@@ -1,0 +1,15 @@
+# AdNihilator Configuration
+
+[llm]
+# Enable OpenAI for LLM-based ad boundary refinement
+provider = "openai"
+model = "gpt-4o-mini"
+api_key_env = "OPENAI_API_KEY"
+
+[detect]
+# Heuristic threshold for initial candidate detection (lower = more sensitive)
+heuristic_threshold = 0.4
+
+# Context segments to include around candidates for LLM analysis
+context_segments_before = 2
+context_segments_after = 2

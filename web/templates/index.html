@@ -1,0 +1,297 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+    <h2>Add Podcast</h2>
+    <form action="/podcasts" method="post">
+        <input type="url" name="source_rss_url" placeholder="https://example.com/feed.xml" required>
+        <button type="submit">Add Podcast</button>
+    </form>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2>Your Podcasts</h2>
+        {% if podcasts %}
+        <button onclick="refreshAll()" class="btn-refresh-all" id="refreshAllBtn">Refresh All</button>
+        {% endif %}
+    </div>
+    {% if podcasts %}
+    <div class="podcast-list">
+        {% for podcast in podcasts %}
+        <div class="podcast-item" data-podcast-id="{{ podcast.id }}">
+            <a href="/podcasts/{{ podcast.id }}/episodes" class="podcast-artwork-link">
+                {% if podcast.artwork_url %}
+                <img src="{{ podcast.artwork_url }}" alt="{{ podcast.title }}" class="podcast-item-artwork">
+                {% else %}
+                <div class="podcast-item-artwork-placeholder"></div>
+                {% endif %}
+            </a>
+            <div class="podcast-item-info">
+                <a href="/podcasts/{{ podcast.id }}/episodes" class="podcast-item-title">
+                    {{ podcast.title or "Untitled" }}
+                </a>
+                <span class="podcast-feed-row">
+                    <a href="/feed/{{ podcast.feed_token }}.xml" target="_blank" class="podcast-item-feed">/feed/{{ podcast.feed_token }}.xml</a>
+                    <button onclick="copyFeedUrl('{{ podcast.feed_token }}')" class="btn-copy" title="Copy feed URL">📋</button>
+                </span>
+            </div>
+            <div class="podcast-item-actions">
+                <span class="last-refreshed" id="lastRefreshed-{{ podcast.id }}"
+                      {% if podcast.last_synced_at %}
+                      data-timestamp="{{ podcast.last_synced_at.isoformat() }}"
+                      title="{{ podcast.last_synced_at.strftime('%b %d, %Y at %I:%M %p') }}"
+                      {% endif %}>
+                    {% if podcast.last_synced_at %}
+                    {{ podcast.last_synced_at|relative_time }}
+                    {% endif %}
+                </span>
+                <button onclick="refreshPodcast('{{ podcast.id }}')" class="btn-refresh">Refresh</button>
+                <button onclick="deletePodcast('{{ podcast.id }}')" class="btn-danger">Delete</button>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <p>No podcasts yet. Add one above!</p>
+    {% endif %}
+</div>
+
+<script>
+function copyFeedUrl(feedToken) {
+    const url = window.location.origin + '/feed/' + feedToken + '.xml';
+    navigator.clipboard.writeText(url).then(() => {
+        const btn = event.target;
+        const original = btn.textContent;
+        btn.textContent = '✓';
+        setTimeout(() => btn.textContent = original, 1500);
+    });
+}
+
+function formatRelativeTime(isoTimestamp) {
+    const date = new Date(isoTimestamp);
+    const now = new Date();
+    const seconds = Math.floor((now - date) / 1000);
+
+    if (seconds < 60) return 'just now';
+    if (seconds < 3600) return Math.floor(seconds / 60) + 'm ago';
+    if (seconds < 86400) return Math.floor(seconds / 3600) + 'h ago';
+    if (seconds < 604800) return Math.floor(seconds / 86400) + 'd ago';
+    return date.toLocaleDateString();
+}
+
+function formatFullTimestamp(isoTimestamp) {
+    const date = new Date(isoTimestamp);
+    return date.toLocaleDateString('en-US', {
+        month: 'short', day: 'numeric', year: 'numeric',
+        hour: 'numeric', minute: '2-digit', hour12: true
+    });
+}
+
+function updateLastRefreshed(podcastId, isoTimestamp) {
+    const elem = document.getElementById('lastRefreshed-' + podcastId);
+    if (elem && isoTimestamp) {
+        elem.textContent = formatRelativeTime(isoTimestamp);
+        elem.dataset.timestamp = isoTimestamp;
+        elem.title = formatFullTimestamp(isoTimestamp);
+    }
+}
+
+async function refreshPodcast(id) {
+    const btn = event.target;
+    btn.disabled = true;
+    btn.textContent = 'Refreshing...';
+
+    const response = await fetch(`/podcasts/${id}/sync`, { method: 'POST' });
+    if (response.ok) {
+        const data = await response.json();
+        updateLastRefreshed(id, data.last_synced_at);
+        if (data.episodes_added > 0) {
+            alert(`Refreshed "${data.title}": ${data.episodes_added} new episodes`);
+        }
+        btn.disabled = false;
+        btn.textContent = 'Refresh';
+    } else {
+        alert('Failed to refresh podcast');
+        btn.disabled = false;
+        btn.textContent = 'Refresh';
+    }
+}
+
+async function refreshAll() {
+    const btn = document.getElementById('refreshAllBtn');
+    btn.disabled = true;
+    btn.textContent = 'Refreshing...';
+
+    const response = await fetch('/podcasts/sync-all', { method: 'POST' });
+    if (response.ok) {
+        const data = await response.json();
+        // Update all timestamps
+        for (const [podcastId, result] of Object.entries(data.results)) {
+            if (!result.error) {
+                // The API doesn't return timestamps for each, so reload to get fresh data
+            }
+        }
+        if (data.total_episodes_added > 0) {
+            alert(`Refreshed all: ${data.total_episodes_added} new episodes total`);
+        }
+        window.location.reload();
+    } else {
+        alert('Failed to refresh podcasts');
+        btn.disabled = false;
+        btn.textContent = 'Refresh All';
+    }
+}
+
+async function deletePodcast(id) {
+    if (!confirm('Delete this podcast and all its episodes?')) return;
+
+    const response = await fetch(`/podcasts/${id}`, { method: 'DELETE' });
+    if (response.ok) {
+        window.location.reload();
+    } else {
+        alert('Failed to delete podcast');
+    }
+}
+
+// Update relative times periodically
+setInterval(() => {
+    document.querySelectorAll('.last-refreshed[data-timestamp]').forEach(elem => {
+        elem.textContent = formatRelativeTime(elem.dataset.timestamp);
+    });
+}, 60000);
+</script>
+
+<style>
+.card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.75rem;
+}
+.card-header h2 {
+    margin: 0;
+}
+.btn-refresh-all {
+    background: #6c757d;
+    font-size: 0.85rem;
+    padding: 0.5rem 1rem;
+}
+.btn-refresh-all:hover {
+    background: #5a6268;
+}
+.podcast-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+.podcast-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: #fff;
+    padding: 1rem;
+    border-radius: 6px;
+    border: 1px solid #e0e0e0;
+    gap: 1rem;
+}
+.podcast-item:hover {
+    background: #fafafa;
+}
+.podcast-artwork-link {
+    flex-shrink: 0;
+}
+.podcast-item-artwork {
+    width: 56px;
+    height: 56px;
+    object-fit: cover;
+    border-radius: 6px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+}
+.podcast-item-artwork-placeholder {
+    width: 56px;
+    height: 56px;
+    background: linear-gradient(135deg, #e0e0e0 0%, #f5f5f5 100%);
+    border-radius: 6px;
+}
+.podcast-item-info {
+    flex: 1;
+    min-width: 0;
+}
+.podcast-item-title {
+    display: block;
+    font-weight: 500;
+    font-size: 1.1rem;
+    margin-bottom: 0.25rem;
+    color: #0066cc;
+    text-decoration: none;
+}
+.podcast-item-title:hover {
+    text-decoration: underline;
+}
+.podcast-feed-row {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+}
+.podcast-item-feed {
+    font-size: 0.8rem;
+    color: #0066cc;
+    background: #f0f0f0;
+    padding: 0.25rem 0.5rem;
+    border-radius: 3px;
+    word-break: break-all;
+    font-family: monospace;
+    text-decoration: none;
+}
+.podcast-item-feed:hover {
+    text-decoration: underline;
+}
+.btn-copy {
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    font-size: 0.7rem;
+    color: #888;
+    opacity: 0.7;
+}
+.btn-copy:hover {
+    opacity: 1;
+    color: #0066cc;
+}
+.podcast-item-actions {
+    display: flex;
+    gap: 0.5rem;
+    flex-shrink: 0;
+    align-items: center;
+}
+.btn-refresh {
+    background: #28a745;
+}
+.btn-refresh:hover {
+    background: #218838;
+}
+.last-refreshed {
+    font-size: 0.75rem;
+    color: #888;
+    white-space: nowrap;
+}
+.btn-danger {
+    background: #dc3545;
+}
+.btn-danger:hover {
+    background: #c82333;
+}
+
+@media (max-width: 600px) {
+    .podcast-item {
+        flex-direction: column;
+        align-items: stretch;
+    }
+    .podcast-item-actions {
+        justify-content: flex-end;
+    }
+}
+</style>
+{% endblock %}

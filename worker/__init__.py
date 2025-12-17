@@ -1,0 +1,1 @@
+"""AdNihilator local worker."""

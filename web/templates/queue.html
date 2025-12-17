@@ -1,0 +1,260 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+    <h2>Processing Queue</h2>
+    {% if episodes %}
+    <div class="queue-list">
+        {% for episode, podcast in episodes %}
+        <div class="queue-item" data-episode-id="{{ episode.id }}" data-podcast-id="{{ podcast.id }}">
+            <a href="/podcasts/{{ podcast.id }}/episodes" class="queue-artwork-link">
+                {% if podcast.artwork_url %}
+                <img src="{{ podcast.artwork_url }}" alt="{{ podcast.title }}" class="queue-item-artwork">
+                {% else %}
+                <div class="queue-item-artwork-placeholder"></div>
+                {% endif %}
+            </a>
+            <div class="queue-item-info">
+                <span class="queue-item-podcast">{{ podcast.title or "Untitled Podcast" }}</span>
+                <span class="queue-item-title">{{ episode.title or "Untitled Episode" }}</span>
+                <div class="queue-item-status">
+                    <span class="status-badge status-{{ episode.status }}">{{ episode.status }}</span>
+                    {% if episode.progress_step %}
+                    <span class="progress-step">{{ episode.progress_step }}</span>
+                    {% endif %}
+                    {% if episode.progress_percent is not none %}
+                    <span class="progress-percent">{{ episode.progress_percent }}%</span>
+                    {% endif %}
+                </div>
+            </div>
+            <div class="queue-item-actions">
+                <button onclick="skipEpisode('{{ podcast.id }}', '{{ episode.id }}')" class="btn-skip">Skip</button>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <p class="empty-queue">No episodes in queue. Episodes will appear here when queued for processing.</p>
+    {% endif %}
+</div>
+
+<script>
+async function skipEpisode(podcastId, episodeId) {
+    if (!confirm('Skip this episode?')) return;
+
+    const response = await fetch(`/podcasts/${podcastId}/episodes/${episodeId}/skip`, { method: 'POST' });
+    if (response.ok) {
+        // Remove the item from the list
+        const item = document.querySelector(`[data-episode-id="${episodeId}"]`);
+        if (item) {
+            item.remove();
+        }
+        // Check if list is now empty
+        const remaining = document.querySelectorAll('.queue-item');
+        if (remaining.length === 0) {
+            document.querySelector('.queue-list').innerHTML = '<p class="empty-queue">No episodes in queue. Episodes will appear here when queued for processing.</p>';
+        }
+    } else {
+        alert('Failed to skip episode');
+    }
+}
+
+// Poll for status updates
+async function updateStatuses() {
+    const items = document.querySelectorAll('.queue-item');
+    if (items.length === 0) return;
+
+    // Group by podcast
+    const byPodcast = {};
+    items.forEach(item => {
+        const podcastId = item.dataset.podcastId;
+        if (!byPodcast[podcastId]) byPodcast[podcastId] = [];
+        byPodcast[podcastId].push(item.dataset.episodeId);
+    });
+
+    // Fetch status for each podcast
+    for (const [podcastId, episodeIds] of Object.entries(byPodcast)) {
+        try {
+            const response = await fetch(`/podcasts/${podcastId}/episodes/status`);
+            if (!response.ok) continue;
+
+            const data = await response.json();
+            for (const episodeId of episodeIds) {
+                const status = data.episodes[episodeId];
+                if (!status) continue;
+
+                const item = document.querySelector(`[data-episode-id="${episodeId}"]`);
+                if (!item) continue;
+
+                // Update status badge
+                const badge = item.querySelector('.status-badge');
+                if (badge) {
+                    badge.className = `status-badge status-${status.status}`;
+                    badge.textContent = status.status;
+                }
+
+                // Update progress
+                const stepElem = item.querySelector('.progress-step');
+                const percentElem = item.querySelector('.progress-percent');
+
+                if (status.progress_step) {
+                    if (stepElem) {
+                        stepElem.textContent = status.progress_step;
+                    } else {
+                        const statusDiv = item.querySelector('.queue-item-status');
+                        const span = document.createElement('span');
+                        span.className = 'progress-step';
+                        span.textContent = status.progress_step;
+                        statusDiv.appendChild(span);
+                    }
+                }
+
+                if (status.progress_percent !== null) {
+                    if (percentElem) {
+                        percentElem.textContent = status.progress_percent + '%';
+                    } else {
+                        const statusDiv = item.querySelector('.queue-item-status');
+                        const span = document.createElement('span');
+                        span.className = 'progress-percent';
+                        span.textContent = status.progress_percent + '%';
+                        statusDiv.appendChild(span);
+                    }
+                }
+
+                // Remove if no longer pending/processing
+                if (!['pending', 'processing'].includes(status.status)) {
+                    item.remove();
+                }
+            }
+        } catch (e) {
+            console.error('Failed to fetch status:', e);
+        }
+    }
+
+    // Check if list is now empty
+    const remaining = document.querySelectorAll('.queue-item');
+    if (remaining.length === 0) {
+        const list = document.querySelector('.queue-list');
+        if (list) {
+            list.innerHTML = '<p class="empty-queue">No episodes in queue. Episodes will appear here when queued for processing.</p>';
+        }
+    }
+}
+
+// Poll every 3 seconds
+setInterval(updateStatuses, 3000);
+</script>
+
+<style>
+.queue-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+.queue-item {
+    display: flex;
+    align-items: center;
+    background: #fff;
+    padding: 1rem;
+    border-radius: 6px;
+    border: 1px solid #e0e0e0;
+    gap: 1rem;
+}
+.queue-item:hover {
+    background: #fafafa;
+}
+.queue-artwork-link {
+    flex-shrink: 0;
+}
+.queue-item-artwork {
+    width: 48px;
+    height: 48px;
+    object-fit: cover;
+    border-radius: 6px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+}
+.queue-item-artwork-placeholder {
+    width: 48px;
+    height: 48px;
+    background: linear-gradient(135deg, #e0e0e0 0%, #f5f5f5 100%);
+    border-radius: 6px;
+}
+.queue-item-info {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+.queue-item-podcast {
+    font-size: 0.8rem;
+    color: #666;
+}
+.queue-item-title {
+    font-weight: 500;
+    color: #333;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.queue-item-status {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.85rem;
+}
+.status-badge {
+    padding: 0.2rem 0.5rem;
+    border-radius: 3px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    text-transform: uppercase;
+}
+.status-pending {
+    background: #fff3cd;
+    color: #856404;
+}
+.status-processing {
+    background: #cce5ff;
+    color: #004085;
+}
+.progress-step {
+    color: #666;
+}
+.progress-percent {
+    color: #17a2b8;
+    font-weight: 500;
+}
+.queue-item-actions {
+    flex-shrink: 0;
+}
+.btn-skip {
+    background: #6c757d;
+    font-size: 0.85rem;
+    padding: 0.4rem 0.8rem;
+}
+.btn-skip:hover {
+    background: #5a6268;
+}
+.empty-queue {
+    color: #666;
+    text-align: center;
+    padding: 2rem;
+}
+
+@media (max-width: 600px) {
+    .queue-item {
+        flex-wrap: wrap;
+    }
+    .queue-item-info {
+        flex-basis: calc(100% - 64px);
+    }
+    .queue-item-actions {
+        width: 100%;
+        display: flex;
+        justify-content: flex-end;
+        margin-top: 0.5rem;
+    }
+}
+</style>
+{% endblock %}

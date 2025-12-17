@@ -1,0 +1,21 @@
+#!/bin/bash
+
+# Worker runner script for launchd
+# Copy this to run-worker.sh and fill in your credentials
+
+exec arch -x86_64 /bin/bash -c '
+cd /path/to/adnihilator
+
+export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"
+export API_URL="https://your-server.com"
+export WORKER_API_KEY="your-worker-api-key"
+export R2_ACCESS_KEY="your-r2-access-key"
+export R2_SECRET_KEY="your-r2-secret-key"
+export R2_BUCKET="your-bucket-name"
+export R2_ENDPOINT="https://your-account-id.r2.cloudflarestorage.com"
+export OPENAI_API_KEY="your-openai-api-key"
+export KMP_DUPLICATE_LIB_OK="TRUE"
+export PYTHONPATH="/path/to/adnihilator"
+
+exec python3 -m adnihilator.cli worker --daemon --interval 60
+'

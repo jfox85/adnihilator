@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }} - AdNihilator</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        h1 { color: #333; }
+        .card {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        button, .btn {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-block;
+        }
+        button:hover, .btn:hover { background: #0056b3; }
+        input[type="text"], input[type="url"] {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            margin: 5px 0;
+        }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }
+        .status-pending { color: #ffc107; }
+        .status-processing { color: #17a2b8; }
+        .status-complete { color: #28a745; }
+        .status-failed { color: #dc3545; }
+
+        /* Header with tools menu */
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 1.5rem;
+        }
+        .header h1 {
+            margin: 0;
+        }
+        .nav-link {
+            color: #666;
+            text-decoration: none;
+            font-weight: 500;
+            font-size: 0.95rem;
+            padding: 0.4rem 0.8rem;
+            border-radius: 4px;
+        }
+        .nav-link:hover {
+            background: #e8e8e8;
+            color: #333;
+        }
+        .tools-menu {
+            position: relative;
+        }
+        .tools-btn {
+            background: none;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 8px 12px;
+            cursor: pointer;
+            font-size: 1.1rem;
+            color: #666;
+        }
+        .tools-btn:hover {
+            background: #f0f0f0;
+            border-color: #ccc;
+        }
+        .tools-dropdown {
+            display: none;
+            position: absolute;
+            right: 0;
+            top: 100%;
+            margin-top: 4px;
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            min-width: 200px;
+            z-index: 100;
+        }
+        .tools-dropdown.open {
+            display: block;
+        }
+        .tools-dropdown-header {
+            padding: 8px 12px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            color: #888;
+            text-transform: uppercase;
+            border-bottom: 1px solid #eee;
+        }
+        .tools-dropdown a,
+        .tools-dropdown label {
+            display: block;
+            padding: 10px 12px;
+            color: #333;
+            text-decoration: none;
+            cursor: pointer;
+            font-size: 0.9rem;
+        }
+        .tools-dropdown a:hover,
+        .tools-dropdown label:hover {
+            background: #f5f5f5;
+        }
+        .tools-dropdown input[type="file"] {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="header-left">
+            <h1><a href="/" style="text-decoration: none; color: inherit;">AdNihilator</a></h1>
+            <a href="/queue" class="nav-link">Queue</a>
+        </div>
+        <div class="tools-menu">
+            <button class="tools-btn" onclick="toggleToolsMenu()" title="Tools">&#9881;</button>
+            <div class="tools-dropdown" id="toolsDropdown">
+                <div class="tools-dropdown-header">Import / Export</div>
+                <label for="opmlImport">Import OPML...</label>
+                <input type="file" id="opmlImport" accept=".opml,.xml" onchange="importOPML(this)">
+                <a href="/opml/export" download>Export OPML</a>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    function toggleToolsMenu() {
+        document.getElementById('toolsDropdown').classList.toggle('open');
+    }
+
+    // Close dropdown when clicking outside
+    document.addEventListener('click', function(e) {
+        const menu = document.querySelector('.tools-menu');
+        if (!menu.contains(e.target)) {
+            document.getElementById('toolsDropdown').classList.remove('open');
+        }
+    });
+
+    async function importOPML(input) {
+        if (!input.files.length) return;
+
+        const file = input.files[0];
+        const formData = new FormData();
+        formData.append('file', file);
+
+        try {
+            const response = await fetch('/opml/import', {
+                method: 'POST',
+                body: formData
+            });
+
+            const data = await response.json();
+
+            if (response.ok) {
+                let msg = `Imported ${data.imported} podcast(s)`;
+                if (data.skipped > 0) {
+                    msg += `, ${data.skipped} skipped (already exist)`;
+                }
+                alert(msg);
+                if (data.imported > 0) {
+                    window.location.reload();
+                }
+            } else {
+                alert('Import failed: ' + (data.detail || 'Unknown error'));
+            }
+        } catch (e) {
+            alert('Import failed: ' + e.message);
+        }
+
+        // Reset file input
+        input.value = '';
+        document.getElementById('toolsDropdown').classList.remove('open');
+    }
+    </script>
+    {% block content %}{% endblock %}
+</body>
+</html>

@@ -1,0 +1,22 @@
+[Unit]
+Description=AdNihilator Web Service
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/adnihilator
+EnvironmentFile=/etc/adnihilator/env
+ExecStart=/opt/adnihilator/venv/bin/uvicorn web.app:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/adnihilator
+
+[Install]
+WantedBy=multi-user.target

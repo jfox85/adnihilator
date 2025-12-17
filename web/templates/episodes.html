@@ -1,0 +1,792 @@
+{% extends "base.html" %}
+
+{% block content %}
+<p><a href="/">&larr; Back to Dashboard</a></p>
+
+<div class="card podcast-header">
+    <div class="podcast-info">
+        {% if podcast.artwork_url %}
+        <img src="{{ podcast.artwork_url }}" alt="{{ podcast.title }}" class="podcast-artwork">
+        {% else %}
+        <div class="podcast-artwork-placeholder">No Art</div>
+        {% endif %}
+        <div class="podcast-details">
+            <h2>{{ podcast.title or "Untitled Podcast" }}</h2>
+            {% if podcast.description %}
+            <p class="podcast-description">{{ (podcast.description|regex_replace('\n+', ' '))[:300] }}{% if podcast.description|length > 300 %}...{% endif %}</p>
+            {% endif %}
+            <p class="podcast-meta">
+                <strong>Source:</strong> <a href="{{ podcast.source_rss_url }}" target="_blank">{{ podcast.source_rss_url[:60] }}{% if podcast.source_rss_url|length > 60 %}...{% endif %}</a><br>
+                <strong>Feed URL:</strong>
+                <span class="feed-url-row">
+                    <a href="/feed/{{ podcast.feed_token }}.xml" target="_blank" class="feed-url-link">/feed/{{ podcast.feed_token }}.xml</a>
+                    <button onclick="copyFeedUrl()" class="btn-copy" title="Copy feed URL">📋</button>
+                </span>
+            </p>
+            <div class="podcast-header-actions">
+                <span class="last-refreshed" id="lastRefreshed"
+                      {% if podcast.last_synced_at %}
+                      data-timestamp="{{ podcast.last_synced_at.isoformat() }}"
+                      title="{{ podcast.last_synced_at.strftime('%b %d, %Y at %I:%M %p') }}"
+                      {% endif %}>
+                    {% if podcast.last_synced_at %}
+                    {{ podcast.last_synced_at|relative_time }}
+                    {% endif %}
+                </span>
+                <button onclick="refreshPodcast()" class="btn-refresh" id="refreshBtn">Refresh</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="controls-bar">
+        <div class="bulk-actions">
+            <button onclick="queueAll()" class="btn-primary">Adnihilate All</button>
+            <button onclick="skipAll()" class="btn-secondary">Skip All</button>
+            <button onclick="toggleAutoProcess()" class="btn-toggle" id="autoProcessBtn">
+                Auto-process: <span id="autoProcessStatus">{{ "ON" if podcast.auto_process else "OFF" }}</span>
+            </button>
+        </div>
+        <div class="search-filter">
+            <input type="text" id="searchInput" placeholder="Search episodes..." oninput="filterEpisodes()">
+            <select id="statusFilter" onchange="filterEpisodes()">
+                <option value="">All Statuses</option>
+                <option value="pending">Pending</option>
+                <option value="processing">Processing</option>
+                <option value="complete">Complete</option>
+                <option value="failed">Failed</option>
+                <option value="skipped">Skipped</option>
+            </select>
+            <select id="sortBy" onchange="sortEpisodes()">
+                <option value="date-desc">Date (Newest)</option>
+                <option value="date-asc">Date (Oldest)</option>
+                <option value="title-asc">Title (A-Z)</option>
+                <option value="title-desc">Title (Z-A)</option>
+                <option value="status">Status</option>
+            </select>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <h2>Episodes <span id="episodeCount">({{ episodes|length }})</span></h2>
+    {% if episodes %}
+    <div class="episode-list" id="episodeList">
+        {% for episode in episodes %}
+        <div class="episode-row"
+             data-id="{{ episode.id }}"
+             data-title="{{ (episode.title or episode.guid)|lower }}"
+             data-status="{{ episode.status }}"
+             data-date="{{ episode.published_at.isoformat() if episode.published_at else '' }}">
+            <div class="episode-main" onclick="toggleDetails('{{ episode.id }}')">
+                <div class="episode-title-section">
+                    <span class="episode-title">{{ episode.title or episode.guid }}</span>
+                    <span class="episode-meta">
+                        {% if episode.published_at %}
+                        {{ episode.published_at.strftime('%b %d, %Y') }}
+                        {% endif %}
+                        {% if episode.duration %}
+                        &middot; {{ (episode.duration // 60) }}min
+                        {% endif %}
+                    </span>
+                </div>
+                <div class="episode-status-section">
+                    <span class="status-badge status-{{ episode.status }}" id="badge-{{ episode.id }}">
+                        {%- if episode.status == 'processing' and episode.progress_step -%}
+                            {{ episode.progress_step }}{% if episode.progress_percent is not none %} {{ episode.progress_percent }}%{% endif %}
+                        {%- else -%}
+                            {{ episode.status }}
+                        {%- endif -%}
+                    </span>
+                    <span class="expand-icon" id="icon-{{ episode.id }}">&#9660;</span>
+                </div>
+            </div>
+            <div class="episode-details" id="details-{{ episode.id }}">
+                {% if episode.description %}
+                <div class="episode-description">
+                    {{ episode.description|safe }}
+                </div>
+                {% endif %}
+                <div class="episode-error" id="error-{{ episode.id }}" {% if not (episode.error_message and episode.status == 'failed') %}style="display:none"{% endif %}>
+                    <strong>Error:</strong> <span class="error-text">{{ episode.error_message or '' }}</span>
+                </div>
+                <div class="episode-stats" id="stats-{{ episode.id }}" {% if not episode.ads_removed_seconds %}style="display:none"{% endif %}>
+                    <strong>Ads Removed:</strong> <span class="stats-ads">{{ "%.1f"|format(episode.ads_removed_seconds or 0) }}</span>s
+                    <span class="stats-duration">
+                    {% if episode.processed_duration %}
+                    &middot; <strong>Final Duration:</strong> {{ (episode.processed_duration // 60)|int }}:{{ "%02d"|format((episode.processed_duration % 60)|int) }}
+                    {% endif %}
+                    </span>
+                </div>
+                <div class="episode-actions" id="actions-{{ episode.id }}">
+                    {% if episode.status in ['skipped', 'failed'] %}
+                    <button onclick="event.stopPropagation(); queueEpisode('{{ podcast.id }}', '{{ episode.id }}')" class="btn-primary btn-small">Queue</button>
+                    {% endif %}
+                    {% if episode.status not in ['skipped', 'complete'] %}
+                    <button onclick="event.stopPropagation(); skipEpisode('{{ podcast.id }}', '{{ episode.id }}')" class="btn-secondary btn-small">Skip</button>
+                    {% endif %}
+                    {% if episode.status == 'complete' %}
+                    <span class="complete-check">&#10003; Processed</span>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <p>No episodes found. The feed will be synced automatically.</p>
+    {% endif %}
+</div>
+
+<script>
+const podcastId = '{{ podcast.id }}';
+const feedUrl = window.location.origin + '/feed/{{ podcast.feed_token }}.xml';
+let pollInterval = null;
+let lastStatuses = {};
+
+function copyFeedUrl() {
+    navigator.clipboard.writeText(feedUrl).then(() => {
+        const btn = event.target;
+        const original = btn.textContent;
+        btn.textContent = '✓';
+        setTimeout(() => btn.textContent = original, 1500);
+    });
+}
+
+function toggleDetails(episodeId) {
+    const details = document.getElementById('details-' + episodeId);
+    const icon = document.getElementById('icon-' + episodeId);
+    if (details.classList.contains('open')) {
+        details.classList.remove('open');
+        icon.innerHTML = '&#9660;';
+    } else {
+        details.classList.add('open');
+        icon.innerHTML = '&#9650;';
+    }
+}
+
+function updateEpisodeUI(episodeId, data) {
+    const row = document.querySelector(`[data-id="${episodeId}"]`);
+    if (!row) return;
+
+    const oldStatus = row.dataset.status;
+    const newStatus = data.status;
+
+    // Skip update if nothing meaningful changed
+    const hasProgressChange = data.progress_step !== undefined || data.progress_percent !== undefined;
+    if (oldStatus === newStatus && !data.ads_removed_seconds && !hasProgressChange) return;
+
+    // Update data attribute
+    row.dataset.status = newStatus;
+
+    // Update badge
+    const badge = document.getElementById('badge-' + episodeId);
+    if (badge) {
+        badge.className = `status-badge status-${newStatus}`;
+        if (newStatus === 'processing' && data.progress_step) {
+            let text = data.progress_step;
+            if (data.progress_percent !== null && data.progress_percent !== undefined) {
+                text += ` ${data.progress_percent}%`;
+            }
+            badge.textContent = text;
+        } else {
+            badge.textContent = newStatus;
+        }
+    }
+
+    // Update error - only show for failed episodes
+    const errorDiv = document.getElementById('error-' + episodeId);
+    if (errorDiv) {
+        if (data.error_message && newStatus === 'failed') {
+            errorDiv.style.display = '';
+            errorDiv.querySelector('.error-text').textContent = data.error_message;
+        } else {
+            errorDiv.style.display = 'none';
+        }
+    }
+
+    // Update stats
+    const statsDiv = document.getElementById('stats-' + episodeId);
+    if (statsDiv) {
+        if (data.ads_removed_seconds) {
+            statsDiv.style.display = '';
+            statsDiv.querySelector('.stats-ads').textContent = data.ads_removed_seconds.toFixed(1);
+            if (data.processed_duration) {
+                const mins = Math.floor(data.processed_duration / 60);
+                const secs = Math.floor(data.processed_duration % 60);
+                statsDiv.querySelector('.stats-duration').innerHTML =
+                    ` &middot; <strong>Final Duration:</strong> ${mins}:${secs.toString().padStart(2, '0')}`;
+            }
+        } else {
+            statsDiv.style.display = 'none';
+        }
+    }
+
+    // Update action buttons based on new status
+    const actionsDiv = document.getElementById('actions-' + episodeId);
+    if (actionsDiv) {
+        let html = '';
+        if (['skipped', 'failed'].includes(newStatus)) {
+            html += `<button onclick="event.stopPropagation(); queueEpisode('${podcastId}', '${episodeId}')" class="btn-primary btn-small">Queue</button>`;
+        }
+        if (!['skipped', 'complete'].includes(newStatus)) {
+            html += `<button onclick="event.stopPropagation(); skipEpisode('${podcastId}', '${episodeId}')" class="btn-secondary btn-small">Skip</button>`;
+        }
+        if (newStatus === 'complete') {
+            html += '<span class="complete-check">&#10003; Processed</span>';
+        }
+        actionsDiv.innerHTML = html;
+    }
+
+    // Visual flash on status change
+    if (oldStatus !== newStatus) {
+        row.classList.add('status-changed');
+        setTimeout(() => row.classList.remove('status-changed'), 2000);
+    }
+}
+
+async function pollStatuses() {
+    try {
+        const response = await fetch(`/podcasts/${podcastId}/episodes/status`, {
+            credentials: 'include'
+        });
+        if (!response.ok) return;
+
+        const data = await response.json();
+
+        // Update auto-process status
+        document.getElementById('autoProcessStatus').textContent = data.auto_process ? 'ON' : 'OFF';
+
+        // Update each episode
+        for (const [episodeId, epData] of Object.entries(data.episodes)) {
+            updateEpisodeUI(episodeId, epData);
+        }
+
+        // Re-apply filter in case statuses changed
+        filterEpisodes();
+    } catch (e) {
+        console.error('Poll error:', e);
+    }
+}
+
+function startPolling() {
+    if (pollInterval) return;
+    pollInterval = setInterval(pollStatuses, 3000);
+}
+
+function stopPolling() {
+    if (pollInterval) {
+        clearInterval(pollInterval);
+        pollInterval = null;
+    }
+}
+
+// Poll when page is visible, stop when hidden
+document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+        stopPolling();
+    } else {
+        pollStatuses();
+        startPolling();
+    }
+});
+
+// Start polling on page load
+startPolling();
+
+async function queueEpisode(podcastId, episodeId) {
+    const response = await fetch(`/podcasts/${podcastId}/episodes/${episodeId}/queue`, {
+        method: 'POST',
+        credentials: 'include'
+    });
+    if (response.ok) {
+        updateEpisodeUI(episodeId, { status: 'pending', error_message: null });
+    } else {
+        alert('Failed to queue episode');
+    }
+}
+
+async function skipEpisode(podcastId, episodeId) {
+    const response = await fetch(`/podcasts/${podcastId}/episodes/${episodeId}/skip`, {
+        method: 'POST',
+        credentials: 'include'
+    });
+    if (response.ok) {
+        updateEpisodeUI(episodeId, { status: 'skipped', error_message: null });
+    } else {
+        alert('Failed to skip episode');
+    }
+}
+
+async function queueAll() {
+    if (!confirm('Queue all unprocessed episodes for ad removal?')) return;
+    const response = await fetch(`/podcasts/${podcastId}/episodes/queue-all`, {
+        method: 'POST',
+        credentials: 'include'
+    });
+    if (response.ok) {
+        const data = await response.json();
+        // Update all skipped/failed to pending
+        document.querySelectorAll('[data-status="skipped"], [data-status="failed"]').forEach(row => {
+            updateEpisodeUI(row.dataset.id, { status: 'pending', error_message: null });
+        });
+    } else {
+        alert('Failed to queue episodes');
+    }
+}
+
+async function skipAll() {
+    if (!confirm('Skip all pending episodes?')) return;
+    const response = await fetch(`/podcasts/${podcastId}/episodes/skip-all`, {
+        method: 'POST',
+        credentials: 'include'
+    });
+    if (response.ok) {
+        const data = await response.json();
+        // Update all pending/failed to skipped
+        document.querySelectorAll('[data-status="pending"], [data-status="failed"]').forEach(row => {
+            updateEpisodeUI(row.dataset.id, { status: 'skipped', error_message: null });
+        });
+    } else {
+        alert('Failed to skip episodes');
+    }
+}
+
+async function toggleAutoProcess() {
+    const response = await fetch(`/podcasts/${podcastId}/auto-process`, {
+        method: 'POST',
+        credentials: 'include'
+    });
+    if (response.ok) {
+        const data = await response.json();
+        document.getElementById('autoProcessStatus').textContent = data.auto_process ? 'ON' : 'OFF';
+    } else {
+        alert('Failed to toggle auto-process');
+    }
+}
+
+function formatRelativeTime(isoTimestamp) {
+    const date = new Date(isoTimestamp);
+    const now = new Date();
+    const seconds = Math.floor((now - date) / 1000);
+
+    if (seconds < 60) return 'just now';
+    if (seconds < 3600) return Math.floor(seconds / 60) + 'm ago';
+    if (seconds < 86400) return Math.floor(seconds / 3600) + 'h ago';
+    if (seconds < 604800) return Math.floor(seconds / 86400) + 'd ago';
+    return date.toLocaleDateString();
+}
+
+function formatFullTimestamp(isoTimestamp) {
+    const date = new Date(isoTimestamp);
+    return date.toLocaleDateString('en-US', {
+        month: 'short', day: 'numeric', year: 'numeric',
+        hour: 'numeric', minute: '2-digit', hour12: true
+    });
+}
+
+async function refreshPodcast() {
+    const btn = document.getElementById('refreshBtn');
+    btn.disabled = true;
+    btn.textContent = 'Refreshing...';
+
+    const response = await fetch(`/podcasts/${podcastId}/sync`, {
+        method: 'POST',
+        credentials: 'include'
+    });
+    if (response.ok) {
+        const data = await response.json();
+        // Update last refreshed timestamp
+        const elem = document.getElementById('lastRefreshed');
+        if (elem && data.last_synced_at) {
+            elem.textContent = formatRelativeTime(data.last_synced_at);
+            elem.dataset.timestamp = data.last_synced_at;
+            elem.title = formatFullTimestamp(data.last_synced_at);
+        }
+        if (data.episodes_added > 0) {
+            alert(`Refreshed: ${data.episodes_added} new episodes. Reloading page...`);
+            window.location.reload();
+        }
+        btn.disabled = false;
+        btn.textContent = 'Refresh';
+    } else {
+        alert('Failed to refresh podcast');
+        btn.disabled = false;
+        btn.textContent = 'Refresh';
+    }
+}
+
+function filterEpisodes() {
+    const search = document.getElementById('searchInput').value.toLowerCase();
+    const status = document.getElementById('statusFilter').value;
+    const rows = document.querySelectorAll('.episode-row');
+    let visible = 0;
+
+    rows.forEach(row => {
+        const title = row.dataset.title;
+        const rowStatus = row.dataset.status;
+        const matchesSearch = !search || title.includes(search);
+        const matchesStatus = !status || rowStatus === status;
+
+        if (matchesSearch && matchesStatus) {
+            row.style.display = '';
+            visible++;
+        } else {
+            row.style.display = 'none';
+        }
+    });
+
+    document.getElementById('episodeCount').textContent = `(${visible})`;
+}
+
+function sortEpisodes() {
+    const sortBy = document.getElementById('sortBy').value;
+    const list = document.getElementById('episodeList');
+    const rows = Array.from(list.querySelectorAll('.episode-row'));
+
+    rows.sort((a, b) => {
+        switch(sortBy) {
+            case 'date-desc':
+                return (b.dataset.date || '').localeCompare(a.dataset.date || '');
+            case 'date-asc':
+                return (a.dataset.date || '').localeCompare(b.dataset.date || '');
+            case 'title-asc':
+                return a.dataset.title.localeCompare(b.dataset.title);
+            case 'title-desc':
+                return b.dataset.title.localeCompare(a.dataset.title);
+            case 'status':
+                const statusOrder = ['processing', 'pending', 'failed', 'complete', 'skipped'];
+                return statusOrder.indexOf(a.dataset.status) - statusOrder.indexOf(b.dataset.status);
+            default:
+                return 0;
+        }
+    });
+
+    rows.forEach(row => list.appendChild(row));
+}
+</script>
+
+<style>
+.podcast-header {
+    display: flex;
+}
+.podcast-info {
+    display: flex;
+    gap: 1.5rem;
+    width: 100%;
+}
+.podcast-artwork {
+    width: 120px;
+    height: 120px;
+    object-fit: cover;
+    border-radius: 8px;
+    flex-shrink: 0;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+}
+.podcast-artwork-placeholder {
+    width: 120px;
+    height: 120px;
+    background: #e0e0e0;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #999;
+    flex-shrink: 0;
+}
+.podcast-details {
+    flex: 1;
+    min-width: 0;
+}
+.podcast-details h2 {
+    margin: 0 0 0.5rem 0;
+    color: #333;
+}
+.podcast-description {
+    color: #666;
+    font-size: 0.9rem;
+    margin-bottom: 0.5rem;
+    line-height: 1.4;
+}
+.podcast-meta {
+    font-size: 0.85rem;
+    color: #888;
+    word-break: break-all;
+}
+.podcast-meta a {
+    color: #0066cc;
+}
+.feed-url-row {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+}
+.feed-url-link {
+    background: #f0f0f0;
+    padding: 0.2rem 0.4rem;
+    border-radius: 3px;
+    font-size: 0.8rem;
+    color: #0066cc;
+    font-family: monospace;
+    text-decoration: none;
+}
+.feed-url-link:hover {
+    text-decoration: underline;
+}
+.btn-copy {
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    font-size: 0.7rem;
+    color: #888;
+    opacity: 0.7;
+    line-height: 1;
+}
+.btn-copy:hover {
+    opacity: 1;
+    color: #0066cc;
+}
+
+.controls-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+}
+.bulk-actions {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: nowrap;
+}
+.bulk-actions button {
+    white-space: nowrap;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.85rem;
+}
+.search-filter {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    flex: 1;
+    justify-content: flex-end;
+}
+.search-filter input,
+.search-filter select {
+    padding: 0.5rem;
+    border-radius: 4px;
+    border: 1px solid #ddd;
+    background: #fff;
+    color: #333;
+    font-size: 0.85rem;
+}
+.search-filter input {
+    width: 180px;
+    min-width: 120px;
+}
+.search-filter select {
+    min-width: 100px;
+}
+
+.btn-toggle {
+    background: #6c757d;
+}
+.btn-toggle:hover {
+    background: #5a6268;
+}
+#autoProcessStatus {
+    font-weight: bold;
+}
+.podcast-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
+}
+.btn-refresh {
+    background: #28a745;
+    padding: 0.4rem 0.75rem;
+    font-size: 0.85rem;
+}
+.btn-refresh:hover {
+    background: #218838;
+}
+.last-refreshed {
+    font-size: 0.75rem;
+    color: #888;
+}
+
+.episode-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+.episode-row {
+    background: #fff;
+    border-radius: 6px;
+    overflow: hidden;
+    border: 1px solid #e0e0e0;
+}
+.episode-main {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.75rem 1rem;
+    cursor: pointer;
+    transition: background 0.2s;
+    gap: 1rem;
+}
+.episode-main:hover {
+    background: #f8f8f8;
+}
+.episode-title-section {
+    flex: 1;
+    min-width: 0;
+}
+.episode-title {
+    display: block;
+    font-weight: 500;
+    color: #333;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.episode-meta {
+    font-size: 0.8rem;
+    color: #888;
+    margin-top: 0.2rem;
+}
+.episode-status-section {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-shrink: 0;
+}
+.status-badge {
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+}
+.status-pending { background: #fff3cd; color: #856404; }
+.status-processing { background: #cce5ff; color: #004085; }
+.status-complete { background: #d4edda; color: #155724; }
+.status-failed { background: #f8d7da; color: #721c24; }
+.status-skipped { background: #e9ecef; color: #6c757d; }
+.status-expired { background: #e2e3e5; color: #383d41; }
+
+.episode-row.status-changed {
+    animation: highlight 2s ease-out;
+}
+@keyframes highlight {
+    0% { background-color: #fffde7; }
+    100% { background-color: transparent; }
+}
+
+.expand-icon {
+    color: #999;
+    font-size: 0.75rem;
+}
+
+.episode-details {
+    display: none;
+    padding: 1rem;
+    background: #fafafa;
+    border-top: 1px solid #e0e0e0;
+}
+.episode-details.open {
+    display: block;
+}
+.episode-description {
+    color: #555;
+    font-size: 0.9rem;
+    margin-bottom: 0.75rem;
+    max-height: 250px;
+    overflow-y: auto;
+    line-height: 1.6;
+    word-wrap: break-word;
+}
+.episode-description a {
+    color: #0066cc;
+}
+.episode-error {
+    background: #f8d7da;
+    padding: 0.75rem;
+    border-radius: 4px;
+    font-size: 0.85rem;
+    margin-bottom: 0.75rem;
+    color: #721c24;
+    border: 1px solid #f5c6cb;
+}
+.episode-stats {
+    color: #155724;
+    font-size: 0.85rem;
+    margin-bottom: 0.75rem;
+    background: #d4edda;
+    padding: 0.5rem 0.75rem;
+    border-radius: 4px;
+    display: inline-block;
+}
+.episode-actions {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
+}
+.btn-small {
+    padding: 0.4rem 0.85rem;
+    font-size: 0.85rem;
+}
+.complete-check {
+    color: #28a745;
+    font-size: 0.85rem;
+}
+
+.btn-primary {
+    background: #007bff;
+}
+.btn-primary:hover {
+    background: #0056b3;
+}
+.btn-secondary {
+    background: #6c757d;
+}
+.btn-secondary:hover {
+    background: #5a6268;
+}
+
+@media (max-width: 900px) {
+    .controls-bar {
+        flex-direction: column;
+        align-items: stretch;
+    }
+    .bulk-actions {
+        justify-content: flex-start;
+    }
+    .search-filter {
+        justify-content: flex-start;
+    }
+}
+
+@media (max-width: 600px) {
+    .podcast-info {
+        flex-direction: column;
+        align-items: center;
+        text-align: center;
+    }
+    .search-filter {
+        flex-direction: column;
+    }
+    .search-filter input,
+    .search-filter select {
+        width: 100%;
+    }
+    .episode-title {
+        white-space: normal;
+    }
+}
+</style>
+{% endblock %}
