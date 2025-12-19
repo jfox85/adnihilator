@@ -92,6 +92,9 @@
                     </span>
                 </div>
                 <div class="episode-status-section">
+                    {% if episode.status in ['skipped', 'failed'] %}
+                    <button onclick="event.stopPropagation(); queueEpisode('{{ podcast.id }}', '{{ episode.id }}')" class="btn-primary mobile-queue-btn">Queue</button>
+                    {% endif %}
                     <span class="status-badge status-{{ episode.status }}" id="badge-{{ episode.id }}">
                         {%- if episode.status == 'processing' and episode.progress_step -%}
                             {{ episode.progress_step }}{% if episode.progress_percent is not none %} {{ episode.progress_percent }}%{% endif %}
@@ -786,6 +789,99 @@ function sortEpisodes() {
     }
     .episode-title {
         white-space: normal;
+    }
+}
+
+/* Mobile Queue Button (Hidden by default) */
+.mobile-queue-btn {
+    display: none;
+}
+
+@media (max-width: 480px) {
+    /* Mobile Episodes Page Overrides */
+
+    /* Taller Rows & Padding */
+    .episode-main {
+        padding: 1rem;
+        min-height: 80px;
+        align-items: flex-start; /* Align to top for better multi-line title */
+    }
+
+    /* Larger, Readable Titles */
+    .episode-title {
+        font-size: 1.15rem;
+        margin-bottom: 0.4rem;
+        white-space: normal; /* Allow title wrapping */
+        line-height: 1.4;
+    }
+
+    .episode-meta {
+        font-size: 0.95rem;
+        display: block;
+        margin-top: 0.25rem;
+    }
+
+    /* Stack Controls (Search, Filter) */
+    .controls-bar {
+        flex-direction: column;
+        gap: 1rem;
+    }
+
+    .search-filter, .bulk-actions {
+        width: 100%;
+        flex-direction: column;
+        gap: 0.75rem;
+    }
+
+    .search-filter input,
+    .search-filter select,
+    .bulk-actions button {
+        width: 100%;
+        height: 48px;
+        font-size: 1rem;
+    }
+
+    /* Status Section Adjustment */
+    .episode-status-section {
+        flex-direction: column;
+        align-items: flex-end;
+        gap: 0.5rem;
+    }
+
+    .mobile-queue-btn {
+        order: -1; /* Put queue button first */
+    }
+
+    .status-badge {
+        order: 0; /* Status badge second */
+    }
+
+    .expand-icon {
+        order: 1; /* Expand icon last */
+    }
+
+    /* Visible Queue Button on Row */
+    .mobile-queue-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 40px;
+        padding: 0 1.2rem;
+        font-size: 0.9rem;
+        margin-bottom: 0.25rem;
+    }
+
+    /* Prominent Status Badges */
+    .status-badge {
+        font-size: 0.8rem;
+        padding: 0.3rem 0.6rem;
+    }
+
+    /* Taller Detail Buttons */
+    .episode-actions button {
+        height: 48px;
+        font-size: 1rem;
+        flex: 1;
     }
 }
 </style>

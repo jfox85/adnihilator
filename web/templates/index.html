@@ -33,7 +33,7 @@
                 </a>
                 <span class="podcast-feed-row">
                     <a href="/feed/{{ podcast.feed_token }}.xml" target="_blank" class="podcast-item-feed">/feed/{{ podcast.feed_token }}.xml</a>
-                    <button onclick="copyFeedUrl('{{ podcast.feed_token }}')" class="btn-copy" title="Copy feed URL">📋</button>
+                    <button onclick="copyFeedUrl('{{ podcast.feed_token }}')" class="btn-copy" title="Copy feed URL" aria-label="Copy feed URL">📋</button>
                 </span>
             </div>
             <div class="podcast-item-actions">
@@ -284,13 +284,109 @@ setInterval(() => {
     background: #c82333;
 }
 
-@media (max-width: 600px) {
+@media (max-width: 480px) {
+    /* Mobile Dashboard Overrides */
+
     .podcast-item {
         flex-direction: column;
         align-items: stretch;
+        padding: 1.25rem;
+        gap: 1rem;
     }
+
+    /* Larger Artwork */
+    .podcast-artwork-link {
+        align-self: center;
+    }
+
+    .podcast-item-artwork,
+    .podcast-item-artwork-placeholder {
+        width: 80px;
+        height: 80px;
+    }
+
+    /* Vertical Layout for Content */
+    .podcast-item-info {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        width: 100%;
+    }
+
+    /* Bigger, Bold Titles */
+    .podcast-item-title {
+        font-size: 1.3rem;
+        font-weight: 700;
+        margin-bottom: 0.75rem;
+        line-height: 1.3;
+        text-align: center;
+    }
+
+    /* Hide Feed URL Text */
+    .podcast-item-feed {
+        display: none;
+    }
+
+    .podcast-feed-row {
+        width: 100%;
+        margin-top: 0.25rem;
+    }
+
+    /* Transform 'Copy' Icon into Prominent Button */
+    .btn-copy {
+        width: 100%;
+        height: 48px;
+        background: #e9ecef;
+        color: #333;
+        font-size: 0 !important; /* Hide the clipboard icon */
+        opacity: 1;
+        border-radius: 6px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 600;
+        text-decoration: none;
+    }
+
+    .btn-copy::after {
+        content: "Copy Feed Link";
+        font-size: 1rem;
+    }
+
+    .btn-copy:active {
+        background: #dbe0e5;
+    }
+
+    /* Full Width Action Buttons */
     .podcast-item-actions {
-        justify-content: flex-end;
+        flex-direction: column;
+        width: 100%;
+        gap: 0.75rem;
+        margin-top: 0.75rem;
+    }
+
+    .podcast-item-actions button {
+        width: 100%;
+        height: 48px;
+        font-size: 1rem;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+
+    /* Hide Delete Button */
+    .btn-danger {
+        display: none;
+    }
+
+    /* Adjust Timestamp */
+    .last-refreshed {
+        order: -1; /* Move above buttons */
+        font-size: 0.9rem;
+        margin-bottom: 0.5rem;
+        text-align: center;
+        width: 100%;
+        display: block;
     }
 }
 </style>
