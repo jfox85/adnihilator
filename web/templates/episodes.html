@@ -121,6 +121,12 @@
                     &middot; <strong>Final Duration:</strong> {{ (episode.processed_duration // 60)|int }}:{{ "%02d"|format((episode.processed_duration % 60)|int) }}
                     {% endif %}
                     </span>
+                    <span class="stats-cost" id="cost-{{ episode.id }}" {% if episode.llm_cost_usd is none %}style="display:none"{% endif %}>
+                    {% if episode.llm_cost_usd is not none %}
+                    &middot; <strong>Cost:</strong> ${{ "%.4f"|format(episode.llm_cost_usd) }}
+                    {% if episode.detection_source %}<span class="detection-source">({{ episode.detection_source }})</span>{% endif %}
+                    {% endif %}
+                    </span>
                 </div>
                 <div class="episode-actions" id="actions-{{ episode.id }}">
                     {% if episode.status in ['skipped', 'failed'] %}
@@ -220,6 +226,21 @@ function updateEpisodeUI(episodeId, data) {
                 const secs = Math.floor(data.processed_duration % 60);
                 statsDiv.querySelector('.stats-duration').innerHTML =
                     ` &middot; <strong>Final Duration:</strong> ${mins}:${secs.toString().padStart(2, '0')}`;
+            }
+
+            // Update LLM cost
+            const costSpan = document.getElementById('cost-' + episodeId);
+            if (costSpan) {
+                if (data.llm_cost_usd !== null && data.llm_cost_usd !== undefined) {
+                    costSpan.style.display = '';
+                    let costHtml = ` &middot; <strong>Cost:</strong> $${data.llm_cost_usd.toFixed(4)}`;
+                    if (data.detection_source) {
+                        costHtml += ` <span class="detection-source">(${data.detection_source})</span>`;
+                    }
+                    costSpan.innerHTML = costHtml;
+                } else {
+                    costSpan.style.display = 'none';
+                }
             }
         } else {
             statsDiv.style.display = 'none';
@@ -733,6 +754,11 @@ function sortEpisodes() {
     padding: 0.5rem 0.75rem;
     border-radius: 4px;
     display: inline-block;
+}
+.detection-source {
+    color: #666;
+    font-size: 0.8rem;
+    font-style: italic;
 }
 .episode-actions {
     display: flex;

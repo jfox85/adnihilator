@@ -61,6 +61,16 @@ class SponsorInfo(BaseModel):
     extraction_method: Literal["patterns", "llm", "none"]
 
 
+class AdTimestamp(BaseModel):
+    """Ad timestamp extracted from episode description."""
+
+    start: float  # seconds
+    end: float  # seconds
+    label: Optional[str] = None  # e.g., "Sponsors", "Ad Break"
+    confidence: float  # 0-1, based on pattern match quality
+    extraction_method: str  # e.g., "chapter_marker", "time_range"
+
+
 class DetectionResult(BaseModel):
     """Complete result of ad detection on an audio file."""
 

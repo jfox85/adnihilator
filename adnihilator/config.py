@@ -22,6 +22,20 @@ class LLMConfig:
 
 
 @dataclass
+class GeminiConfig:
+    """Configuration for Gemini audio-based detection."""
+
+    enabled: bool = False  # Feature flag
+    api_key_env: str = "GEMINI_API_KEY"
+    model: str = "gemini-2.0-flash-exp"
+
+    @property
+    def api_key(self) -> str | None:
+        """Get API key from environment variable."""
+        return os.environ.get(self.api_key_env)
+
+
+@dataclass
 class DetectConfig:
     """Configuration for ad detection."""
 
@@ -35,6 +49,7 @@ class Config:
     """Main configuration for AdNihilator."""
 
     llm: LLMConfig = field(default_factory=LLMConfig)
+    gemini: GeminiConfig = field(default_factory=GeminiConfig)
     detect: DetectConfig = field(default_factory=DetectConfig)
 
 
@@ -75,6 +90,7 @@ def _parse_config(data: dict[str, Any]) -> Config:
         Parsed Config object.
     """
     llm_data = data.get("llm", {})
+    gemini_data = data.get("gemini", {})
     detect_data = data.get("detect", {})
 
     llm_config = LLMConfig(
@@ -84,10 +100,16 @@ def _parse_config(data: dict[str, Any]) -> Config:
         base_url=llm_data.get("base_url"),
     )
 
+    gemini_config = GeminiConfig(
+        enabled=gemini_data.get("enabled", False),
+        api_key_env=gemini_data.get("api_key_env", "GEMINI_API_KEY"),
+        model=gemini_data.get("model", "gemini-2.0-flash-exp"),
+    )
+
     detect_config = DetectConfig(
         heuristic_threshold=detect_data.get("heuristic_threshold", 0.4),
         context_segments_before=detect_data.get("context_segments_before", 2),
         context_segments_after=detect_data.get("context_segments_after", 2),
     )
 
-    return Config(llm=llm_config, detect=detect_config)
+    return Config(llm=llm_config, gemini=gemini_config, detect=detect_config)

@@ -29,6 +29,15 @@ class CompleteRequest(BaseModel):
     ads_removed_seconds: float
     detection_result_path: Optional[str] = None
 
+    # LLM tracking fields
+    llm_provider: Optional[str] = None
+    llm_model: Optional[str] = None
+    llm_input_tokens: Optional[int] = None
+    llm_output_tokens: Optional[int] = None
+    llm_total_tokens: Optional[int] = None
+    llm_cost_usd: Optional[float] = None
+    detection_source: Optional[str] = None
+
 
 class FailRequest(BaseModel):
     """Request body for failing an episode."""
@@ -106,6 +115,16 @@ async def complete_episode(
     episode.progress_step = None
     episode.progress_percent = None
     episode.error_message = None  # Clear any previous error on success
+
+    # LLM tracking fields
+    episode.llm_provider = request.llm_provider
+    episode.llm_model = request.llm_model
+    episode.llm_input_tokens = request.llm_input_tokens
+    episode.llm_output_tokens = request.llm_output_tokens
+    episode.llm_total_tokens = request.llm_total_tokens
+    episode.llm_cost_usd = request.llm_cost_usd
+    episode.detection_source = request.detection_source
+
     db.commit()
 
     return {"status": "complete"}

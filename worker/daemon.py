@@ -13,10 +13,11 @@ import httpx
 
 from adnihilator.ad_keywords import find_ad_candidates
 from adnihilator.ad_llm import create_llm_client, OpenAIClient
+from adnihilator.ad_timestamps import extract_ad_timestamps
 from adnihilator.audio import get_duration
 from adnihilator.config import load_config
 from adnihilator.external_transcript import fetch_external_transcript
-from adnihilator.models import DetectionResult
+from adnihilator.models import AdSpan, DetectionResult
 from adnihilator.splice import splice_audio
 from adnihilator.sponsors import extract_sponsors
 from adnihilator.transcribe import transcribe_audio
@@ -66,6 +67,77 @@ class WorkerDaemon:
             pass
         return None
 
+    def _get_gemini_client(self):
+        """Get Gemini client for audio-based ad detection.
+
+        Returns None if Gemini is not enabled or library not installed.
+        """
+        if not self.config.gemini.enabled:
+            return None
+
+        api_key = self.config.gemini.api_key
+        if not api_key:
+            print("  Warning: Gemini enabled but GEMINI_API_KEY not set")
+            return None
+
+        try:
+            from adnihilator.gemini_audio import GeminiAudioClient
+            return GeminiAudioClient(api_key=api_key, model=self.config.gemini.model)
+        except ImportError:
+            print("  Warning: google-generativeai not installed, Gemini disabled")
+            return None
+
+    def _calculate_llm_cost(
+        self,
+        provider: str,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        audio_duration_seconds: float = 0.0,
+    ) -> float:
+        """Calculate LLM cost in USD based on provider pricing.
+
+        Args:
+            provider: LLM provider (openai, gemini)
+            model: Model name
+            input_tokens: Text input tokens
+            output_tokens: Text output tokens
+            audio_duration_seconds: Audio duration for Gemini audio models
+
+        Returns:
+            Total cost in USD
+        """
+        # Pricing table (as of Dec 2024)
+        PRICING = {
+            "openai": {
+                "gpt-4o-mini": {"input": 0.15 / 1_000_000, "output": 0.60 / 1_000_000},
+                "gpt-4.1-mini": {"input": 0.15 / 1_000_000, "output": 0.60 / 1_000_000},
+                "gpt-4o": {"input": 2.50 / 1_000_000, "output": 10.00 / 1_000_000},
+            },
+            "gemini": {
+                "gemini-2.0-flash-exp": {
+                    "input": 0.075 / 1_000_000,
+                    "output": 0.30 / 1_000_000,
+                    "audio": 0.000025,  # Per second of audio
+                },
+            },
+        }
+
+        pricing = PRICING.get(provider, {}).get(model)
+        if not pricing:
+            return 0.0
+
+        # Text token costs
+        input_cost = input_tokens * pricing.get("input", 0)
+        output_cost = output_tokens * pricing.get("output", 0)
+
+        # Audio costs (Gemini only)
+        audio_cost = 0.0
+        if "audio" in pricing and audio_duration_seconds > 0:
+            audio_cost = audio_duration_seconds * pricing["audio"]
+
+        return input_cost + output_cost + audio_cost
+
     def process_job(self, job: EpisodeJob) -> None:
         """Process a single episode job.
 
@@ -77,6 +149,10 @@ class WorkerDaemon:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
 
+            # Track LLM usage for this job
+            llm_usage = None  # Will be populated if LLM is used
+            detection_source = None  # Track which method detected ads
+
             # Extract sponsors from description
             print("  Extracting sponsors...")
             sponsor_info = extract_sponsors(
@@ -86,113 +162,188 @@ class WorkerDaemon:
             if sponsor_info.sponsors:
                 print(f"    Found {len(sponsor_info.sponsors)} sponsors via {sponsor_info.extraction_method}")
 
-            # Download audio
-            print("  Downloading audio...")
-            self.api_client.update_progress(job.id, "downloading")
-            audio_path = tmpdir_path / "episode.mp3"
-            self._download_audio(job.original_audio_url, audio_path)
+            # TIER 1: Check for ad timestamps in description (FREE)
+            ad_timestamps = extract_ad_timestamps(job.description or "")
+            high_confidence_timestamps = [t for t in ad_timestamps if t.confidence >= 0.85]
 
-            # Get duration
-            duration = get_duration(str(audio_path))
-            print(f"  Duration: {duration:.0f}s")
+            if high_confidence_timestamps:
+                print(f"  Found {len(high_confidence_timestamps)} high-confidence ad timestamps in description")
+                detection_source = "timestamps"
 
-            # Try external transcript first (if source_url available)
-            segments = None
-            ad_spans = []
-            candidates = []
-            transcript_source = "whisper"
-            if job.source_url:
-                print("  Checking for external transcript...")
-                segments = fetch_external_transcript(job.source_url)
-                if segments:
-                    # Determine source based on URL
-                    if 'lexfridman.com' in job.source_url:
-                        transcript_source = "lexfridman"
-                    elif 'substack' in job.source_url:
-                        transcript_source = "substack"
-                    else:
-                        transcript_source = "external"
-                    print(f"    Found external transcript ({transcript_source}): {len(segments)} segments")
+                # Convert timestamps to AdSpan format
+                ad_spans = [
+                    AdSpan(
+                        start=t.start,
+                        end=t.end,
+                        confidence=t.confidence,
+                        reason=f"From description: {t.label or 'Ad'} ({t.extraction_method})",
+                        candidate_indices=[],
+                    )
+                    for t in high_confidence_timestamps
+                ]
 
-            # Fall back to Whisper if no external transcript
-            if segments is None:
-                # Create LLM client to determine transcription strategy
-                llm_client = create_llm_client(self.config)
+                # Download audio for splicing (still need it)
+                print("  Downloading audio...")
+                self.api_client.update_progress(job.id, "downloading")
+                audio_path = tmpdir_path / "episode.mp3"
+                self._download_audio(job.original_audio_url, audio_path)
 
-                # Use two-pass mode if LLM is OpenAI (fast segment-level + targeted word-level)
-                if isinstance(llm_client, OpenAIClient):
-                    print("  Transcribing with two-pass mode...")
-                    self.api_client.update_progress(job.id, "transcribing", 0)
+                # Get duration
+                duration = get_duration(str(audio_path))
+                print(f"  Duration: {duration:.0f}s")
 
-                    def on_transcribe_progress(percent: int) -> None:
-                        # Map progress to steps: 0-99 = Pass 1, 100 = detecting, 101-199 = Pass 2, 200 = complete
-                        if percent <= 99:
-                            self.api_client.update_progress(job.id, "transcribing", percent)
-                        elif percent == 100:
-                            self.api_client.update_progress(job.id, "detecting", 0)
-                        elif percent <= 199:
-                            # Pass 2: map 100-199 to 0-100%
-                            self.api_client.update_progress(job.id, "pass2", percent - 100)
+                # Skip directly to splicing (no transcription needed)
+                segments = []
+                candidates = []
+                transcript_source = "none"
+
+            else:
+                # No timestamp-based detection, continue with other methods
+
+                # Download audio
+                print("  Downloading audio...")
+                self.api_client.update_progress(job.id, "downloading")
+                audio_path = tmpdir_path / "episode.mp3"
+                self._download_audio(job.original_audio_url, audio_path)
+
+                # Get duration
+                duration = get_duration(str(audio_path))
+                print(f"  Duration: {duration:.0f}s")
+
+                # Initialize detection state
+                segments = None
+                ad_spans = []
+                candidates = []
+                transcript_source = "whisper"
+
+                # TIER 2a: Try external transcript first (FREE - if source_url available)
+                if job.source_url:
+                    print("  Checking for external transcript...")
+                    segments = fetch_external_transcript(job.source_url)
+                    if segments:
+                        # Determine source based on URL
+                        if 'lexfridman.com' in job.source_url:
+                            transcript_source = "lexfridman"
+                        elif 'substack' in job.source_url:
+                            transcript_source = "substack"
                         else:
-                            self.api_client.update_progress(job.id, "refining", 100)
+                            transcript_source = "external"
+                        detection_source = "external"
+                        print(f"    Found external transcript ({transcript_source}): {len(segments)} segments")
 
-                    segments, ad_spans = two_pass_detect(
-                        str(audio_path),
-                        llm_client,
-                        self.config,
-                        duration,
-                        model_name=self.whisper_model,
-                        device=self.device,
-                        progress_callback=on_transcribe_progress,
-                        sponsors=sponsor_info,
-                        podcast_name=job.podcast_title,
+                # TIER 2b: Try Gemini audio detection (if no external transcript)
+                if segments is None:
+                    gemini_client = self._get_gemini_client()
+                    if gemini_client:
+                        print("  Using Gemini audio detection...")
+                        self.api_client.update_progress(job.id, "detecting")
+                        try:
+                            ad_spans, llm_usage = gemini_client.detect_ads(
+                                audio_path,
+                                podcast_title=job.podcast_title,
+                                duration=duration,
+                            )
+                            detection_source = "gemini"
+                            transcript_source = "gemini_audio"
+                            segments = []  # No transcription segments from Gemini
+                            print(f"    Gemini detected {len(ad_spans)} ads")
+
+                            # Calculate cost
+                            if llm_usage:
+                                llm_usage["cost"] = self._calculate_llm_cost(
+                                    provider=llm_usage.get("provider", "gemini"),
+                                    model=llm_usage.get("model", self.config.gemini.model),
+                                    input_tokens=llm_usage.get("input_tokens", 0),
+                                    output_tokens=llm_usage.get("output_tokens", 0),
+                                    audio_duration_seconds=llm_usage.get("audio_duration_seconds", duration),
+                                )
+                                print(f"    Gemini cost: ${llm_usage['cost']:.4f}")
+
+                        except Exception as e:
+                            print(f"  Warning: Gemini detection failed: {e}")
+                            print("  Falling back to Whisper...")
+                            gemini_client = None  # Fall through to Whisper
+
+                # TIER 3: Fall back to Whisper if no external transcript and Gemini failed/disabled
+                if segments is None and not ad_spans:
+                    detection_source = "whisper"
+
+                    # Create LLM client to determine transcription strategy
+                    llm_client = create_llm_client(self.config)
+
+                    # Use two-pass mode if LLM is OpenAI (fast segment-level + targeted word-level)
+                    if isinstance(llm_client, OpenAIClient):
+                        print("  Transcribing with two-pass mode...")
+                        self.api_client.update_progress(job.id, "transcribing", 0)
+
+                        def on_transcribe_progress(percent: int) -> None:
+                            # Map progress to steps: 0-99 = Pass 1, 100 = detecting, 101-199 = Pass 2, 200 = complete
+                            if percent <= 99:
+                                self.api_client.update_progress(job.id, "transcribing", percent)
+                            elif percent == 100:
+                                self.api_client.update_progress(job.id, "detecting", 0)
+                            elif percent <= 199:
+                                # Pass 2: map 100-199 to 0-100%
+                                self.api_client.update_progress(job.id, "pass2", percent - 100)
+                            else:
+                                self.api_client.update_progress(job.id, "refining", 100)
+
+                        segments, ad_spans = two_pass_detect(
+                            str(audio_path),
+                            llm_client,
+                            self.config,
+                            duration,
+                            model_name=self.whisper_model,
+                            device=self.device,
+                            progress_callback=on_transcribe_progress,
+                            sponsors=sponsor_info,
+                            podcast_name=job.podcast_title,
+                        )
+                        print(f"    Two-pass complete: {len(segments)} segments, {len(ad_spans)} ads detected")
+                    else:
+                        # Single-pass mode (full word-level transcription)
+                        print("  Transcribing with Whisper...")
+                        self.api_client.update_progress(job.id, "transcribing", 0)
+
+                        def on_transcribe_progress(percent: int) -> None:
+                            self.api_client.update_progress(job.id, "transcribing", percent)
+
+                        segments = transcribe_audio(
+                            str(audio_path),
+                            model_name=self.whisper_model,
+                            device=self.device,
+                            duration=duration,
+                            progress_callback=on_transcribe_progress,
+                        )
+
+                # Save transcript if we have one (before any further processing)
+                if segments and self.artifacts_dir:
+                    artifact_dir = self.artifacts_dir / job.podcast_id
+                    artifact_dir.mkdir(parents=True, exist_ok=True)
+                    transcript_path = artifact_dir / f"{job.id}_transcript.txt"
+                    with open(transcript_path, "w") as f:
+                        for seg in segments:
+                            f.write(f"[{seg.start:.1f}s - {seg.end:.1f}s] {seg.text}\n")
+                    print(f"  Saved transcript to {transcript_path}")
+
+                # If we don't have ad_spans yet (external transcript or single-pass mode),
+                # run heuristic detection + LLM refinement
+                if not ad_spans and segments:
+                    # Detect ads
+                    print("  Detecting ads...")
+                    self.api_client.update_progress(job.id, "detecting")
+                    candidates = find_ad_candidates(
+                        segments, duration, sponsors=sponsor_info, podcast_name=job.podcast_title
                     )
-                    print(f"    Two-pass complete: {len(segments)} segments, {len(ad_spans)} ads detected")
-                else:
-                    # Single-pass mode (full word-level transcription)
-                    print("  Transcribing with Whisper...")
-                    self.api_client.update_progress(job.id, "transcribing", 0)
 
-                    def on_transcribe_progress(percent: int) -> None:
-                        self.api_client.update_progress(job.id, "transcribing", percent)
-
-                    segments = transcribe_audio(
-                        str(audio_path),
-                        model_name=self.whisper_model,
-                        device=self.device,
-                        duration=duration,
-                        progress_callback=on_transcribe_progress,
+                    # Refine with LLM
+                    print("  Refining with LLM...")
+                    self.api_client.update_progress(job.id, "refining")
+                    llm_client = create_llm_client(self.config)
+                    ad_spans = llm_client.refine_candidates(
+                        segments, candidates, self.config,
+                        sponsors=sponsor_info, podcast_title=job.podcast_title
                     )
-
-            # Save transcript immediately after transcription (before any further processing)
-            # This ensures we don't lose the expensive transcription work if later steps fail
-            if self.artifacts_dir:
-                artifact_dir = self.artifacts_dir / job.podcast_id
-                artifact_dir.mkdir(parents=True, exist_ok=True)
-                transcript_path = artifact_dir / f"{job.id}_transcript.txt"
-                with open(transcript_path, "w") as f:
-                    for seg in segments:
-                        f.write(f"[{seg.start:.1f}s - {seg.end:.1f}s] {seg.text}\n")
-                print(f"  Saved transcript to {transcript_path}")
-
-            # If we don't have ad_spans yet (external transcript or single-pass mode),
-            # run heuristic detection + LLM refinement
-            if not ad_spans:
-                # Detect ads
-                print("  Detecting ads...")
-                self.api_client.update_progress(job.id, "detecting")
-                candidates = find_ad_candidates(
-                    segments, duration, sponsors=sponsor_info, podcast_name=job.podcast_title
-                )
-
-                # Refine with LLM
-                print("  Refining with LLM...")
-                self.api_client.update_progress(job.id, "refining")
-                llm_client = create_llm_client(self.config)
-                ad_spans = llm_client.refine_candidates(
-                    segments, candidates, self.config,
-                    sponsors=sponsor_info, podcast_title=job.podcast_title
-                )
 
             # Save detection result artifact if artifacts_dir is set
             detection_result_path = None
@@ -254,14 +405,28 @@ class WorkerDaemon:
                     f"Upload verification failed: expected {local_size}, got {uploaded_size}"
                 )
 
-            # Report completion
-            self.api_client.complete(
-                episode_id=job.id,
-                audio_key=audio_key,
-                duration=stats["new_duration"],
-                ads_removed=stats["time_removed"],
-                detection_result_path=detection_result_path,
-            )
+            # Report completion with LLM tracking data
+            completion_kwargs = {
+                "episode_id": job.id,
+                "audio_key": audio_key,
+                "duration": stats["new_duration"],
+                "ads_removed": stats["time_removed"],
+                "detection_result_path": detection_result_path,
+                "detection_source": detection_source,
+            }
+
+            # Add LLM usage data if available
+            if llm_usage:
+                completion_kwargs.update({
+                    "llm_provider": llm_usage.get("provider"),
+                    "llm_model": llm_usage.get("model"),
+                    "llm_input_tokens": llm_usage.get("input_tokens"),
+                    "llm_output_tokens": llm_usage.get("output_tokens"),
+                    "llm_total_tokens": llm_usage.get("total_tokens"),
+                    "llm_cost_usd": llm_usage.get("cost"),
+                })
+
+            self.api_client.complete(**completion_kwargs)
 
             print(f"  Done! Removed {stats['time_removed']:.0f}s of ads")
 

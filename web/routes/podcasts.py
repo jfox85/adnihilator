@@ -315,6 +315,9 @@ async def get_episode_statuses(
                 "processed_duration": ep.processed_duration,
                 "progress_step": ep.progress_step,
                 "progress_percent": ep.progress_percent,
+                "llm_cost_usd": float(ep.llm_cost_usd) if ep.llm_cost_usd is not None else None,
+                "llm_model": ep.llm_model,
+                "detection_source": ep.detection_source,
             }
             for ep in episodes
         },

@@ -6,6 +6,13 @@ provider = "openai"
 model = "gpt-4o-mini"
 api_key_env = "OPENAI_API_KEY"
 
+[gemini]
+# Enable Gemini 2.0 Flash for audio-based ad detection
+# This is faster (~41s) but more expensive (~$0.087/episode) than Whisper+LLM
+enabled = true
+api_key_env = "GEMINI_API_KEY"
+model = "gemini-2.0-flash-exp"
+
 [detect]
 # Heuristic threshold for initial candidate detection (lower = more sensitive)
 heuristic_threshold = 0.4

@@ -114,6 +114,13 @@ class WorkerClient:
         duration: float,
         ads_removed: float,
         detection_result_path: Optional[str] = None,
+        llm_provider: Optional[str] = None,
+        llm_model: Optional[str] = None,
+        llm_input_tokens: Optional[int] = None,
+        llm_output_tokens: Optional[int] = None,
+        llm_total_tokens: Optional[int] = None,
+        llm_cost_usd: Optional[float] = None,
+        detection_source: Optional[str] = None,
     ) -> None:
         """Mark an episode as complete.
 
@@ -123,6 +130,13 @@ class WorkerClient:
             duration: Duration of processed audio in seconds
             ads_removed: Seconds of ads removed
             detection_result_path: Local path to detection result JSON
+            llm_provider: LLM provider used (e.g., "openai", "gemini")
+            llm_model: Model name used
+            llm_input_tokens: Number of input tokens
+            llm_output_tokens: Number of output tokens
+            llm_total_tokens: Total tokens used
+            llm_cost_usd: Total cost in USD
+            detection_source: Detection method ("timestamps", "gemini", "whisper", etc.)
         """
         payload = {
             "processed_audio_key": audio_key,
@@ -131,6 +145,22 @@ class WorkerClient:
         }
         if detection_result_path:
             payload["detection_result_path"] = detection_result_path
+
+        # LLM tracking fields
+        if llm_provider:
+            payload["llm_provider"] = llm_provider
+        if llm_model:
+            payload["llm_model"] = llm_model
+        if llm_input_tokens is not None:
+            payload["llm_input_tokens"] = llm_input_tokens
+        if llm_output_tokens is not None:
+            payload["llm_output_tokens"] = llm_output_tokens
+        if llm_total_tokens is not None:
+            payload["llm_total_tokens"] = llm_total_tokens
+        if llm_cost_usd is not None:
+            payload["llm_cost_usd"] = llm_cost_usd
+        if detection_source:
+            payload["detection_source"] = detection_source
 
         try:
             response = self.client.post(

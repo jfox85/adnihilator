@@ -6,6 +6,8 @@ from enum import Enum
 from typing import Optional
 from uuid import uuid4
 
+from decimal import Decimal
+
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
@@ -13,6 +15,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -109,6 +112,20 @@ class Episode(Base):
     processed_duration: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     ads_removed_seconds: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     detection_result_path: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # LLM Usage Tracking
+    llm_provider: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    llm_model: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    llm_input_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    llm_output_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    llm_total_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    llm_cost_usd: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 6), nullable=True)
+
+    # Detection Source Tracking
+    detection_source: Mapped[Optional[str]] = mapped_column(
+        String(50), nullable=True
+    )  # 'timestamps', 'external', 'gemini', 'whisper'
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow
     )

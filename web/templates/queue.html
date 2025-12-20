@@ -38,6 +38,47 @@
     {% endif %}
 </div>
 
+<div class="card">
+    <h2>Recently Processed</h2>
+    {% if recent_completed %}
+    <div class="recent-list">
+        {% for episode, podcast in recent_completed %}
+        <div class="recent-item">
+            <a href="/podcasts/{{ podcast.id }}/episodes" class="recent-artwork-link">
+                {% if podcast.artwork_url %}
+                <img src="{{ podcast.artwork_url }}" alt="{{ podcast.title }}" class="recent-item-artwork">
+                {% else %}
+                <div class="recent-item-artwork-placeholder"></div>
+                {% endif %}
+            </a>
+            <div class="recent-item-info">
+                <span class="recent-item-podcast">{{ podcast.title or "Untitled Podcast" }}</span>
+                <span class="recent-item-title">{{ episode.title or "Untitled Episode" }}</span>
+                <div class="recent-item-meta">
+                    {% if episode.updated_at %}
+                    <span class="completed-time">{{ episode.updated_at|relative_time }}</span>
+                    {% endif %}
+                    {% if episode.ads_removed_seconds and episode.ads_removed_seconds > 0 %}
+                        {% set ads_removed = episode.ads_removed_seconds|int %}
+                    <span class="time-saved">Removed {{ (ads_removed // 60) }}min {{ (ads_removed % 60) }}s</span>
+                    {% elif episode.status == 'complete' %}
+                    <span class="no-ads">No ads detected</span>
+                    {% endif %}
+                    {% if episode.llm_cost_usd is not none %}
+                    <span class="llm-cost-badge" title="{{ episode.llm_model or 'Unknown model' }}{% if episode.detection_source %} via {{ episode.detection_source }}{% endif %}">
+                        ${{ "%.3f"|format(episode.llm_cost_usd) }}
+                    </span>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <p class="empty-queue">No recently processed episodes.</p>
+    {% endif %}
+</div>
+
 <script>
 async function skipEpisode(podcastId, episodeId) {
     if (!confirm('Skip this episode?')) return;
@@ -240,6 +281,85 @@ setInterval(updateStatuses, 3000);
     color: #666;
     text-align: center;
     padding: 2rem;
+}
+
+/* Recently Processed Section */
+.recent-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+.recent-item {
+    display: flex;
+    align-items: center;
+    background: #f8f9fa;
+    padding: 0.75rem;
+    border-radius: 6px;
+    border: 1px solid #e0e0e0;
+    gap: 1rem;
+}
+.recent-item:hover {
+    background: #f0f0f0;
+}
+.recent-artwork-link {
+    flex-shrink: 0;
+}
+.recent-item-artwork {
+    width: 40px;
+    height: 40px;
+    object-fit: cover;
+    border-radius: 4px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+}
+.recent-item-artwork-placeholder {
+    width: 40px;
+    height: 40px;
+    background: linear-gradient(135deg, #e0e0e0 0%, #f5f5f5 100%);
+    border-radius: 4px;
+}
+.recent-item-info {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+}
+.recent-item-podcast {
+    font-size: 0.75rem;
+    color: #666;
+}
+.recent-item-title {
+    font-weight: 500;
+    color: #333;
+    font-size: 0.9rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.recent-item-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    font-size: 0.75rem;
+}
+.completed-time {
+    color: #888;
+}
+.time-saved {
+    color: #28a745;
+    font-weight: 500;
+}
+.no-ads {
+    color: #6c757d;
+    font-style: italic;
+}
+.llm-cost-badge {
+    color: #6c757d;
+    font-size: 0.75rem;
+    background: #f0f0f0;
+    padding: 0.1rem 0.4rem;
+    border-radius: 3px;
+    cursor: help;
 }
 
 @media (max-width: 600px) {
