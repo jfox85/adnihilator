@@ -12,11 +12,24 @@ AdNihilator is a podcast ad detection and removal system that:
 
 ### How It Works
 
-1. **Transcription**: Whisper transcribes audio to timestamped text segments
-2. **Sponsor Extraction**: Analyzes episode descriptions to find sponsor names
-3. **Keyword Detection**: Scores segments using sponsor names and ad phrase patterns
-4. **LLM Refinement**: OpenAI GPT refines candidates into precise ad boundaries
-5. **Splicing**: ffmpeg removes ad segments with frame-accurate cuts
+AdNihilator uses a three-tier detection strategy, choosing the cheapest effective method:
+
+**Tier 1 - Description Timestamps (Free)**
+- Extracts ad timestamps from episode descriptions when available
+- Supports formats: `(00:29-01:15)`, chapter markers, `1h02m` notation
+- Skips transcription entirely when high-confidence timestamps found
+
+**Tier 2 - Gemini Audio Detection (~$0.10/episode)**
+- Uses Google's Gemini 2.0 Flash for direct audio analysis
+- ~60 seconds processing vs 5-12 minutes for Whisper
+- No transcription needed - analyzes audio directly
+
+**Tier 3 - Whisper + LLM (~$0.004/episode)**
+- Whisper transcribes audio to timestamped text segments
+- Keyword detection scores segments using sponsor names and ad patterns
+- OpenAI GPT refines candidates into precise ad boundaries
+
+**Final Step**: ffmpeg removes ad segments with frame-accurate cuts
 
 ### Two-Pass Mode (~2.5x Faster)
 
@@ -46,10 +59,13 @@ AdNihilator specifically looks for ads in common placement zones:
 - Store processed audio on Cloudflare R2
 
 ### Detection Capabilities
+- **Gemini audio detection**: Direct audio analysis without transcription (fastest, ~$0.10/episode)
 - **External transcripts**: Fast processing using podcast-provided transcripts (Substack, Lex Fridman)
+- **Description timestamps**: Extract ad markers from episode descriptions (free)
 - **Sponsor-aware**: Extracts sponsor names from episode descriptions for better accuracy
 - **Confidence scoring**: Each ad gets a 0-1 confidence score for filtering
 - **Multi-region detection**: Pre-roll, mid-roll, and outro ad placement
+- **LLM cost tracking**: Track and display detection costs per episode in the UI
 
 ## Installation
 
@@ -123,11 +139,18 @@ Create `adnihilator.toml` in your working directory:
 ```toml
 [llm]
 provider = "openai"
-model = "gpt-4.1-mini"  # or "gpt-4.1"
+model = "gpt-4o-mini"  # or "gpt-4o"
 api_key_env = "OPENAI_API_KEY"
 
+[gemini]
+# Enable Gemini 2.0 Flash for audio-based ad detection
+# Faster (~60s) but more expensive (~$0.10/episode) than Whisper+LLM
+enabled = true
+api_key_env = "GEMINI_API_KEY"
+model = "gemini-2.0-flash-exp"
+
 [detect]
-confidence_threshold = 0.35  # Filter out low-confidence detections
+heuristic_threshold = 0.4    # Heuristic sensitivity (lower = more sensitive)
 context_segments_before = 2  # Include 2 segments before ad for context
 context_segments_after = 2   # Include 2 segments after ad for context
 
@@ -135,6 +158,12 @@ context_segments_after = 2   # Include 2 segments after ad for context
 model = "small"  # Whisper model size
 device = "cpu"   # or "cuda" for GPU
 ```
+
+**Detection Priority**: When Gemini is enabled, the worker uses this order:
+1. Description timestamps (if high-confidence timestamps found)
+2. External transcript (if `source_url` available)
+3. Gemini audio detection (if enabled and API key set)
+4. Whisper + LLM refinement (fallback)
 
 ## Web Service Setup (Optional)
 
@@ -190,6 +219,7 @@ Or run directly:
 export API_URL="https://your-server.com"
 export WORKER_API_KEY="your-worker-secret"
 export OPENAI_API_KEY="sk-..."
+export GEMINI_API_KEY="AIza..."  # Optional: for Gemini audio detection
 export R2_ACCESS_KEY="..."
 export R2_SECRET_KEY="..."
 export R2_BUCKET="adnihilator"
@@ -308,6 +338,8 @@ adnihilator/
 │   ├── cli.py             # CLI commands
 │   ├── transcribe.py      # Whisper transcription
 │   ├── external_transcript.py  # External transcript fetching
+│   ├── ad_timestamps.py   # Extract timestamps from descriptions
+│   ├── gemini_audio.py    # Gemini audio detection client
 │   ├── sponsors.py        # Sponsor extraction from HTML
 │   ├── ad_keywords.py     # Heuristic detection
 │   ├── ad_llm.py          # LLM refinement
@@ -316,13 +348,16 @@ adnihilator/
 │   └── config.py          # Configuration
 ├── web/                   # Web service (optional)
 │   ├── app.py             # FastAPI application
+│   ├── models.py          # SQLAlchemy models (with LLM tracking)
 │   ├── routes/            # API endpoints
 │   ├── services/          # RSS sync, R2 upload
 │   └── templates/         # Admin UI
 ├── worker/                # Worker daemon (optional)
-│   ├── daemon.py          # Job processing loop
+│   ├── daemon.py          # Job processing loop (three-tier detection)
 │   ├── client.py          # API client
 │   └── r2.py              # R2 upload
+├── scripts/               # Utility scripts
+│   └── migrate_add_llm_fields.py  # Database migration
 └── tests/                 # Test suite
 ```
 
@@ -360,11 +395,20 @@ This is faster and free, but less accurate than LLM refinement.
 
 ### How much does this cost?
 
+- **Description timestamps**: Free (parses episode descriptions)
 - **Whisper transcription**: Free (runs locally)
-- **OpenAI LLM refinement**: ~$0.01-0.03 per hour of audio with GPT-4.1-mini
+- **Gemini audio detection**: ~$0.10 per episode (~60 seconds processing)
+- **OpenAI LLM refinement**: ~$0.004 per episode with GPT-4o-mini
 - **Cloudflare R2 storage**: ~$0.015/GB/month + minimal egress fees
 
-A typical podcast (~1 hour) costs about 2 cents to process with LLM refinement.
+| Method | Cost/Episode | Processing Time | Accuracy |
+|--------|-------------|-----------------|----------|
+| Description timestamps | Free | Instant | High (when available) |
+| Gemini 2.0 Flash | ~$0.10 | ~60 seconds | High |
+| Whisper + GPT-4o-mini | ~$0.004 | 5-12 minutes | High |
+| Whisper only (no LLM) | Free | 5-12 minutes | Medium |
+
+The web UI tracks and displays LLM costs per episode so you can monitor spending.
 
 ## Supported Podcasts
 
@@ -390,6 +434,7 @@ Contributions welcome! Please:
 
 Built with:
 - [faster-whisper](https://github.com/guillaumekln/faster-whisper) - Fast Whisper transcription
+- [Google Gemini](https://ai.google.dev) - Audio-based ad detection
 - [OpenAI API](https://openai.com) - LLM refinement
 - [FastAPI](https://fastapi.tiangolo.com) - Web service
 - [ffmpeg](https://ffmpeg.org) - Audio processing
