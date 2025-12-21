@@ -39,23 +39,40 @@ def test_sync_podcast_adds_new_episodes(db_session, mock_feedparser):
     db_session.add(podcast)
     db_session.commit()
 
-    # Mock feed response
+    # Mock feed response - use spec to prevent MagicMock auto-attributes
+    mock_feed = MagicMock()
+    mock_feed.title = "Test Podcast"
+    # Explicitly set no summary/subtitle so hasattr returns False
+    del mock_feed.summary
+    del mock_feed.subtitle
+    del mock_feed.itunes_image
+    del mock_feed.image
+
+    # Create entry mocks with only needed attributes
+    entry1 = MagicMock()
+    entry1.id = "ep-1"
+    entry1.title = "Episode 1"
+    entry1.enclosures = [MagicMock(href="https://example.com/ep1.mp3")]
+    entry1.published_parsed = (2024, 1, 1, 0, 0, 0, 0, 0, 0)
+    # Remove auto-attributes that would cause MagicMock to be stored
+    del entry1.summary
+    del entry1.description
+    del entry1.link
+    del entry1.itunes_duration
+
+    entry2 = MagicMock()
+    entry2.id = "ep-2"
+    entry2.title = "Episode 2"
+    entry2.enclosures = [MagicMock(href="https://example.com/ep2.mp3")]
+    entry2.published_parsed = (2024, 1, 2, 0, 0, 0, 0, 0, 0)
+    del entry2.summary
+    del entry2.description
+    del entry2.link
+    del entry2.itunes_duration
+
     mock_feedparser.parse.return_value = MagicMock(
-        feed=MagicMock(title="Test Podcast"),
-        entries=[
-            MagicMock(
-                id="ep-1",
-                title="Episode 1",
-                enclosures=[MagicMock(href="https://example.com/ep1.mp3")],
-                published_parsed=(2024, 1, 1, 0, 0, 0, 0, 0, 0),
-            ),
-            MagicMock(
-                id="ep-2",
-                title="Episode 2",
-                enclosures=[MagicMock(href="https://example.com/ep2.mp3")],
-                published_parsed=(2024, 1, 2, 0, 0, 0, 0, 0, 0),
-            ),
-        ],
+        feed=mock_feed,
+        entries=[entry1, entry2],
     )
 
     # Sync
@@ -86,17 +103,29 @@ def test_sync_podcast_skips_existing(db_session, mock_feedparser):
     db_session.add(episode)
     db_session.commit()
 
-    # Mock feed response with same episode
+    # Mock feed response - use spec to prevent MagicMock auto-attributes
+    mock_feed = MagicMock()
+    mock_feed.title = "Test Podcast"
+    # Explicitly set no summary/subtitle so hasattr returns False
+    del mock_feed.summary
+    del mock_feed.subtitle
+    del mock_feed.itunes_image
+    del mock_feed.image
+
+    # Create entry mock with only needed attributes
+    entry1 = MagicMock()
+    entry1.id = "ep-1"
+    entry1.title = "Episode 1"
+    entry1.enclosures = [MagicMock(href="https://example.com/ep1.mp3")]
+    entry1.published_parsed = (2024, 1, 1, 0, 0, 0, 0, 0, 0)
+    del entry1.summary
+    del entry1.description
+    del entry1.link
+    del entry1.itunes_duration
+
     mock_feedparser.parse.return_value = MagicMock(
-        feed=MagicMock(title="Test Podcast"),
-        entries=[
-            MagicMock(
-                id="ep-1",
-                title="Episode 1",
-                enclosures=[MagicMock(href="https://example.com/ep1.mp3")],
-                published_parsed=(2024, 1, 1, 0, 0, 0, 0, 0, 0),
-            ),
-        ],
+        feed=mock_feed,
+        entries=[entry1],
     )
 
     # Sync

@@ -28,7 +28,7 @@ def create_test_podcast(client):
     """Helper to create a test podcast via API."""
     response = client.post(
         "/podcasts",
-        data={"rss_url": "https://example.com/feed.xml"},
+        data={"source_rss_url": "https://example.com/feed.xml"},
         auth=("admin", "testpass"),
         follow_redirects=False,
     )

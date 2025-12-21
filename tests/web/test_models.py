@@ -31,7 +31,7 @@ def test_create_podcast(db_session):
     assert podcast.id is not None
     assert podcast.feed_token is not None
     assert len(podcast.feed_token) >= 32
-    assert podcast.auto_process is True
+    assert podcast.auto_process is False  # Default is False
 
 
 def test_create_episode(db_session):

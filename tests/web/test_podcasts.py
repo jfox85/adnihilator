@@ -30,7 +30,7 @@ def test_add_podcast(client):
     """Test adding a podcast."""
     response = client.post(
         "/podcasts",
-        data={"rss_url": "https://example.com/feed.xml"},
+        data={"source_rss_url": "https://example.com/feed.xml"},
         auth=("admin", "testpass"),
         follow_redirects=False,
     )
@@ -50,7 +50,7 @@ def test_delete_podcast(client):
     # Create a podcast first
     response = client.post(
         "/podcasts",
-        data={"rss_url": "https://example.com/feed.xml"},
+        data={"source_rss_url": "https://example.com/feed.xml"},
         auth=("admin", "testpass"),
         follow_redirects=False,
     )
