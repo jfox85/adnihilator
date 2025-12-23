@@ -242,6 +242,7 @@ class WorkerDaemon:
                                 audio_path,
                                 podcast_title=job.podcast_title,
                                 duration=duration,
+                                sponsors=sponsor_info,
                             )
                             detection_source = "gemini"
                             transcript_source = "gemini_audio"

@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from .models import AdSpan
+from .models import AdSpan, SponsorInfo
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +50,7 @@ class GeminiAudioClient:
         audio_path: Path,
         podcast_title: Optional[str] = None,
         duration: Optional[float] = None,
+        sponsors: Optional[SponsorInfo] = None,
     ) -> tuple[list[AdSpan], dict]:
         """Detect ads in audio file using Gemini.
 
@@ -57,6 +58,7 @@ class GeminiAudioClient:
             audio_path: Path to audio file (MP3, WAV, etc.)
             podcast_title: Optional podcast title for context
             duration: Audio duration in seconds (for cost calculation)
+            sponsors: Optional sponsor info extracted from episode description
 
         Returns:
             Tuple of (list of AdSpan objects, usage stats dict)
@@ -89,7 +91,7 @@ class GeminiAudioClient:
                 raise ValueError(f"Gemini file upload failed: {audio_file.state}")
 
             # Build prompt
-            prompt = self._build_detection_prompt(podcast_title)
+            prompt = self._build_detection_prompt(podcast_title, sponsors)
 
             # Call Gemini
             logger.info(f"Sending audio to Gemini {self.model} for analysis...")
@@ -173,38 +175,75 @@ class GeminiAudioClient:
             # Re-raise with context
             raise ValueError(f"Gemini detection failed: {e}") from e
 
-    def _build_detection_prompt(self, podcast_title: Optional[str] = None) -> str:
+    def _build_detection_prompt(
+        self,
+        podcast_title: Optional[str] = None,
+        sponsors: Optional[SponsorInfo] = None,
+    ) -> str:
         """Build the ad detection prompt.
 
         Args:
             podcast_title: Optional podcast title for context
+            sponsors: Optional sponsor info extracted from episode description
 
         Returns:
             Prompt string for Gemini
         """
         title_context = ""
         if podcast_title:
-            title_context = f'\nThe podcast is "{podcast_title}".\n'
+            title_context = f'Podcast: "{podcast_title}"\n'
 
-        return f"""You are analyzing a podcast episode to identify all advertisement segments.
+        # Build sponsor section if we have sponsor info
+        sponsor_section = ""
+        if sponsors and sponsors.sponsors:
+            sponsor_lines = []
+            for s in sponsors.sponsors:
+                if s.url:
+                    sponsor_lines.append(f"- {s.name} ({s.url})")
+                elif s.code:
+                    sponsor_lines.append(f"- {s.name} (code: {s.code})")
+                else:
+                    sponsor_lines.append(f"- {s.name}")
+
+            sponsor_section = f"""
+KNOWN SPONSORS FOR THIS EPISODE:
+{chr(10).join(sponsor_lines)}
+
+You MUST find the ad read for EACH sponsor listed above.
+If you cannot find an ad for a listed sponsor, note which sponsors were not found.
+"""
+
+        return f"""You are analyzing a podcast episode to identify ALL advertisement segments.
 {title_context}
-Look for ANY of the following:
-- Sponsor reads (e.g., "This episode is brought to you by...")
-- Product promotions or advertisements
-- Service advertisements (therapy apps, payment apps, grocery stores, etc.)
-- Mid-roll ads inserted into the content
-- Pre-roll or post-roll advertisements
-- Ads in ANY LANGUAGE (English, Spanish, etc.)
-- Host reads that promote a product/service
+{sponsor_section}
+FINDING AD BOUNDARIES:
 
-IMPORTANT:
-- Listen for ads in BOTH English AND Spanish (and other languages)
-- Ads can appear anywhere: beginning, middle, or end of episode
-- Some ads may be very short (15-30 seconds)
-- Pay attention to audio cues: music changes, tone shifts, different speakers
-- Watch for sponsor names like grocery stores, apps, services, etc.
+START of ad - Listen for intro phrases like:
+- "brought to you by", "sponsored by", "our sponsor today"
+- "word from our sponsor", "thanks to our sponsor"
+- "our partners at", "supported by"
+- "let me tell you about", "I want to talk about"
 
-Analyze the ENTIRE audio file and identify ALL advertisement segments.
+END of ad - The ad ends when the host finishes ALL of:
+- Describing the product/service benefits
+- Mentioning the website URL (e.g., "go to example.com/podcast")
+- Giving any promo code ("use code X", "code X for discount")
+- Making the final call-to-action ("sign up today", "check them out")
+- Any closing like "thanks to X for sponsoring"
+
+The ad is COMPLETE when the host transitions back to:
+- The main topic of discussion
+- A different segment or story
+- Regular conversation (not selling anything)
+
+DO NOT cut off the ad early - include the FULL pitch through the final URL/code mention.
+
+ALSO DETECT:
+- Pre-roll ads at the very beginning
+- Post-roll ads at the very end
+- Mid-roll ads inserted in the middle
+- Ads in ANY language (English, Spanish, etc.)
+- Dynamically inserted ads (may have different audio quality)
 
 For each ad found, provide:
 - start_time: timestamp in seconds when the ad begins
@@ -212,7 +251,7 @@ For each ad found, provide:
 - sponsor: name of the sponsor/brand
 - language: language of the ad (English, Spanish, etc.)
 - confidence: 0.0-1.0 how confident you are this is an ad
-- reason: brief explanation of why this is an ad (include audio cues if relevant)
+- reason: brief explanation of why this is an ad
 
 Respond with JSON:
 {{
@@ -225,7 +264,8 @@ Respond with JSON:
       "confidence": 0.0-1.0,
       "reason": "<explanation>"
     }}
-  ]
+  ],
+  "sponsors_not_found": ["<sponsor name if not detected>"]
 }}
 
 If no ads found: {{"ads": [], "reason": "<explanation>"}}"""
