@@ -93,6 +93,13 @@ class GeminiAudioClient:
             # Build prompt
             prompt = self._build_detection_prompt(podcast_title, sponsors)
 
+            # Log sponsor info for debugging
+            if sponsors and sponsors.sponsors:
+                sponsor_names = [s.name for s in sponsors.sponsors]
+                logger.info(f"Passing {len(sponsor_names)} sponsors to Gemini: {sponsor_names}")
+            else:
+                logger.info("No sponsors to pass to Gemini")
+
             # Call Gemini
             logger.info(f"Sending audio to Gemini {self.model} for analysis...")
             analysis_start = time.time()
