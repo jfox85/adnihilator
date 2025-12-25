@@ -576,6 +576,230 @@ If no ads found: {{"ads": [], "reason": "no sponsor mentions found"}}'''
 
         return merged
 
+    def merge_and_refine(
+        self,
+        prompt_data: dict,
+        config: Config,
+    ) -> tuple[list[AdSpan], dict]:
+        """Merge candidates from multiple detection methods using LLM.
+
+        Used by parallel detection to intelligently merge Gemini and keyword candidates.
+
+        Args:
+            prompt_data: Dict with gemini_candidates, keyword_candidates, transcript_context,
+                        sponsors, and duration.
+            config: Configuration object.
+
+        Returns:
+            Tuple of (ad_spans, usage_dict) for cost tracking.
+        """
+        try:
+            from openai import OpenAI
+        except ImportError:
+            raise ImportError("openai is required. Run: pip install openai")
+
+        client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+        duration = prompt_data.get("duration", 0)
+
+        system_prompt = """You are refining ad detection candidates from two sources:
+
+1. Keyword candidates: Detected via transcript keyword matching. These are GROUNDED in the
+   transcript text - the keywords triggered at these specific timestamps. TRUST these timestamps
+   as they come directly from verified transcript text.
+
+2. Gemini candidates: Detected via audio analysis. These MAY have incorrect timestamps -
+   Gemini sometimes hallucinates timestamps, especially for long episodes. You MUST VERIFY
+   each Gemini candidate against the transcript context before including it.
+
+VERIFICATION RULES:
+- For EACH Gemini candidate, check if the transcript context around that timestamp contains
+  sponsor names, ad keywords, or promotional language
+- If a Gemini timestamp has NO supporting evidence in the transcript, REJECT it
+- When Gemini and Keyword candidates conflict, PREFER the Keyword candidate's timestamps
+  (since keywords are grounded in actual transcript text)
+
+Your tasks:
+1. VERIFY each Gemini candidate has transcript evidence (reject if not)
+2. MERGE overlapping candidates that refer to the SAME ad/sponsor
+3. SPLIT candidates if they contain MULTIPLE DISTINCT ads (different sponsors)
+4. REFINE boundaries using transcript context (find exact transition points)
+5. If you discover an ad in the transcript NOT covered by candidates, you MAY add it
+6. OUTPUT final ad spans
+
+CRITICAL RULES:
+- REJECT any Gemini candidate whose timestamp region doesn't mention sponsors or ad content
+- If adjacent ad reads mention DIFFERENT companies, they are SEPARATE ads - do NOT merge
+- All timestamps must be within [0, {duration}] seconds
+- Each ad must have start < end
+- Output ads sorted by start time, non-overlapping
+- Use keyword timestamps as primary reference, Gemini as secondary confirmation
+
+Output JSON:
+{{
+    "ads": [
+        {{
+            "start": <seconds>,
+            "end": <seconds>,
+            "confidence": 0.0-1.0,
+            "reason": "<brief explanation>",
+            "sources": ["gemini", "keywords"]  // or ["llm_new"] if discovered
+        }}
+    ]
+}}""".format(duration=duration)
+
+        # Build efficient context
+        transcript_context = prompt_data.get("transcript_context", "")
+
+        # Truncate context if too long (avoid hitting token limits)
+        MAX_CONTEXT_CHARS = 15000
+        if len(transcript_context) > MAX_CONTEXT_CHARS:
+            transcript_context = transcript_context[:MAX_CONTEXT_CHARS] + "\n[...truncated...]"
+
+        user_prompt = f"""Episode duration: {duration:.0f} seconds
+
+GEMINI CANDIDATES (from audio analysis):
+{json.dumps(prompt_data.get("gemini_candidates", []), indent=2)}
+
+KEYWORD CANDIDATES (from transcript matching):
+{json.dumps(prompt_data.get("keyword_candidates", []), indent=2)}
+
+TRANSCRIPT CONTEXT:
+{transcript_context}
+
+KNOWN SPONSORS: {prompt_data.get("sponsors", [])}
+
+Analyze the candidates and transcript to produce refined ad boundaries."""
+
+        try:
+            response = client.chat.completions.create(
+                model=config.llm.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.1,
+                response_format={"type": "json_object"},
+            )
+
+            result = json.loads(response.choices[0].message.content or "{}")
+
+            # Extract usage for cost tracking
+            usage = {
+                "provider": "openai",
+                "model": config.llm.model,
+                "input_tokens": response.usage.prompt_tokens if response.usage else 0,
+                "output_tokens": response.usage.completion_tokens if response.usage else 0,
+                "total_tokens": response.usage.total_tokens if response.usage else 0,
+            }
+
+            # Validate and filter output
+            validated_ads = []
+            for ad in result.get("ads", []):
+                # Type coercion - LLM may return strings or None
+                try:
+                    start = float(ad.get("start", 0) or 0)
+                    end = float(ad.get("end", 0) or 0)
+                except (TypeError, ValueError):
+                    continue  # Skip malformed entries
+
+                # Clamp to valid range
+                start = max(0, min(start, duration))
+                end = max(0, min(end, duration))
+
+                # Skip invalid spans
+                if start >= end:
+                    continue
+
+                # Default sources to ["llm_new"] if LLM omitted them
+                sources = ad.get("sources", [])
+                if not sources:
+                    sources = ["llm_new"]
+
+                validated_ads.append(AdSpan(
+                    start=start,
+                    end=end,
+                    confidence=ad.get("confidence", 0.9),
+                    reason=ad.get("reason", "LLM merged"),
+                    sources=sources,
+                    candidate_indices=[],
+                ))
+
+            # Sort by start time
+            validated_ads.sort(key=lambda x: x.start)
+
+            # Enforce non-overlapping: resolve any overlapping spans
+            if len(validated_ads) > 1:
+                validated_ads = self._enforce_non_overlapping(validated_ads)
+
+            return validated_ads, usage
+
+        except Exception as e:
+            print(f"LLM merge failed: {e}")
+            # Re-raise so caller can trigger fallback to simple merge
+            raise
+
+    def _enforce_non_overlapping(self, ads: list[AdSpan]) -> list[AdSpan]:
+        """Post-process to resolve any overlapping spans (safety net for LLM output).
+
+        Strategy: TRIM instead of MERGE to preserve distinct sponsors.
+        - If two spans overlap, trim the later one's start to the earlier one's end
+        - If trimming would make the span too short (<5s), drop the lower-confidence one
+        """
+        if not ads:
+            return ads
+
+        MIN_SPAN_DURATION = 5.0  # Minimum ad duration after trimming
+
+        result = [ads[0]]
+        for ad in ads[1:]:
+            prev = result[-1]
+            if ad.start < prev.end:  # Overlap detected
+                overlap = prev.end - ad.start
+                remaining_duration = ad.end - prev.end
+
+                if remaining_duration >= MIN_SPAN_DURATION:
+                    # Trim: move later span's start to after previous span's end
+                    trimmed = AdSpan(
+                        start=prev.end,
+                        end=ad.end,
+                        confidence=ad.confidence,
+                        reason=f"{ad.reason} (trimmed {overlap:.1f}s overlap)",
+                        sources=ad.sources,
+                        candidate_indices=[],
+                    )
+                    result.append(trimmed)
+                else:
+                    # Trimming would make span too short - keep higher confidence
+                    if ad.confidence > prev.confidence:
+                        # Replace previous with current (trim current's end)
+                        trimmed = AdSpan(
+                            start=ad.start,
+                            end=ad.end,
+                            confidence=ad.confidence,
+                            reason=ad.reason,
+                            sources=ad.sources,
+                            candidate_indices=[],
+                        )
+                        # Trim previous span to not overlap
+                        prev_trimmed = AdSpan(
+                            start=prev.start,
+                            end=ad.start,
+                            confidence=prev.confidence,
+                            reason=f"{prev.reason} (trimmed)",
+                            sources=prev.sources,
+                            candidate_indices=[],
+                        )
+                        if prev_trimmed.end - prev_trimmed.start >= MIN_SPAN_DURATION:
+                            result[-1] = prev_trimmed
+                            result.append(trimmed)
+                        else:
+                            # Previous too short after trim, drop it and use current
+                            result[-1] = trimmed
+                    # else: keep previous, drop current (lower confidence)
+            else:
+                result.append(ad)
+        return result
+
 
 def create_llm_client(config: Config) -> AdLLMClient:
     """Create an LLM client based on configuration.

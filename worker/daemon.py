@@ -138,6 +138,204 @@ class WorkerDaemon:
 
         return input_cost + output_cost + audio_cost
 
+    def _validate_gemini_candidates(
+        self,
+        gemini_candidates: list[dict],
+        segments: list,
+        sponsors: list[str],
+        buffer_seconds: float = 30.0,
+    ) -> tuple[list[dict], list[dict]]:
+        """Validate Gemini candidates against transcript.
+
+        Gemini sometimes hallucinates timestamps. This method checks if the
+        transcript around each Gemini timestamp actually contains sponsor
+        keywords or ad-related phrases.
+
+        Args:
+            gemini_candidates: List of Gemini candidate dicts
+            segments: Transcript segments
+            sponsors: List of sponsor names
+            buffer_seconds: Buffer around candidate to search
+
+        Returns:
+            Tuple of (validated_candidates, rejected_candidates)
+        """
+        if not gemini_candidates or not segments:
+            return gemini_candidates, []
+
+        # Build keyword set for validation
+        ad_keywords = {
+            "sponsor", "sponsored", "brought to you", "thanks to",
+            "promo code", "use code", "discount", "% off", "percent off",
+            ".com/", "check out", "sign up", "free trial",
+        }
+        sponsor_keywords = {s.lower() for s in sponsors}
+
+        validated = []
+        rejected = []
+
+        for candidate in gemini_candidates:
+            start = candidate.get("start", 0)
+            end = candidate.get("end", 0)
+
+            # Get transcript text around this candidate
+            context_start = max(0, start - buffer_seconds)
+            context_end = end + buffer_seconds
+
+            context_text = ""
+            for seg in segments:
+                if seg.end >= context_start and seg.start <= context_end:
+                    context_text += " " + seg.text
+
+            context_lower = context_text.lower()
+
+            # Check for any sponsor name in context
+            has_sponsor = any(s in context_lower for s in sponsor_keywords)
+
+            # Check for ad keywords in context
+            has_ad_keyword = any(kw in context_lower for kw in ad_keywords)
+
+            if has_sponsor or has_ad_keyword:
+                validated.append(candidate)
+            else:
+                rejected.append(candidate)
+                print(f"    Rejected Gemini candidate {start:.0f}-{end:.0f}s: no ad evidence in transcript")
+
+        return validated, rejected
+
+    def _get_combined_transcript_context(
+        self,
+        segments: list,
+        candidates: list[dict],
+        buffer_seconds: float = 30.0,
+        max_chars: int = 15000,
+    ) -> str:
+        """Extract single contiguous transcript block around all candidates.
+
+        More efficient than per-candidate extraction - sends one block to LLM.
+        """
+        if not candidates or not segments:
+            return ""
+
+        # Find min/max across all candidates
+        min_start = min(c["start"] for c in candidates)
+        max_end = max(c["end"] for c in candidates)
+
+        # Add buffer
+        context_start = max(0, min_start - buffer_seconds)
+        context_end = max_end + buffer_seconds
+
+        # Extract text with timestamps
+        parts = []
+        for seg in segments:
+            if seg.end >= context_start and seg.start <= context_end:
+                parts.append(f"[{seg.start:.0f}s] {seg.text}")
+
+        result = "\n".join(parts)
+
+        # Truncate if too long
+        if len(result) > max_chars:
+            result = result[:max_chars] + "\n[...truncated...]"
+
+        return result
+
+    def _simple_merge_candidates(
+        self,
+        gemini_candidates: list[dict],
+        keyword_candidates: list[dict],
+    ) -> list[AdSpan]:
+        """Simple merge fallback: union of candidates, merge overlapping.
+
+        Preserves source tracking.
+        """
+        all_candidates = gemini_candidates + keyword_candidates
+        if not all_candidates:
+            return []
+
+        # Sort by start time
+        sorted_candidates = sorted(all_candidates, key=lambda c: c["start"])
+
+        merged = []
+        current = sorted_candidates[0].copy()
+        current["sources"] = [current.get("source", "unknown")]
+
+        for c in sorted_candidates[1:]:
+            if c["start"] <= current["end"] + 5:  # Merge if within 5 seconds
+                current["end"] = max(current["end"], c["end"])
+                current["confidence"] = max(current["confidence"], c["confidence"])
+                # Track all sources
+                source = c.get("source", "unknown")
+                if source not in current["sources"]:
+                    current["sources"].append(source)
+                # Combine reasons
+                current["reason"] = f"{current.get('reason', '')}; {c.get('reason', '')}"
+            else:
+                merged.append(current)
+                current = c.copy()
+                current["sources"] = [current.get("source", "unknown")]
+
+        merged.append(current)
+
+        return [
+            AdSpan(
+                start=c["start"],
+                end=c["end"],
+                confidence=c["confidence"],
+                reason=c["reason"][:200],  # Truncate long reasons
+                candidate_indices=[],
+                sources=c["sources"],
+            )
+            for c in merged
+        ]
+
+    def _llm_merge_candidates(
+        self,
+        gemini_candidates: list[dict],
+        keyword_candidates: list[dict],
+        segments: list,
+        sponsors,
+        duration: float,
+    ) -> tuple[list[AdSpan], dict | None]:
+        """Use LLM to merge candidates from both detection methods.
+
+        Returns:
+            Tuple of (ad_spans, llm_usage_dict or None)
+            Always returns usage if LLM was called (even on error/empty result)
+        """
+        all_candidates = gemini_candidates + keyword_candidates
+
+        # Short-circuit if no candidates
+        if not all_candidates:
+            return [], None
+
+        # Build efficient context
+        transcript_context = self._get_combined_transcript_context(segments, all_candidates)
+
+        prompt_data = {
+            "gemini_candidates": gemini_candidates,
+            "keyword_candidates": keyword_candidates,
+            "transcript_context": transcript_context,
+            "sponsors": [s.name for s in sponsors.sponsors] if sponsors and sponsors.sponsors else [],
+            "duration": duration,
+        }
+
+        llm_client = create_llm_client(self.config)
+        usage = None
+
+        if isinstance(llm_client, OpenAIClient):
+            try:
+                spans, usage = llm_client.merge_and_refine(prompt_data, self.config)
+                # Empty result = LLM says "no ads" - this is valid, NOT a failure
+                # Only fallback on actual exception (parse error, API error, etc.)
+                return spans, usage
+            except Exception as e:
+                print(f"  Warning: LLM merge failed ({e}), using simple merge fallback")
+                # Fallback to simple merge on actual error (still return usage if available)
+                return self._simple_merge_candidates(gemini_candidates, keyword_candidates), usage
+
+        # No LLM client available - use simple merge
+        return self._simple_merge_candidates(gemini_candidates, keyword_candidates), None
+
     def process_job(self, job: EpisodeJob) -> None:
         """Process a single episode job.
 
@@ -152,6 +350,7 @@ class WorkerDaemon:
             # Track LLM usage for this job
             llm_usage = None  # Will be populated if LLM is used
             detection_source = None  # Track which method detected ads
+            raw_gemini_candidates = []  # Store raw Gemini candidates for debugging
 
             # Extract sponsors from description
             print("  Extracting sponsors...")
@@ -231,8 +430,200 @@ class WorkerDaemon:
                         detection_source = "external"
                         print(f"    Found external transcript ({transcript_source}): {len(segments)} segments")
 
-                # TIER 2b: Try Gemini audio detection (if no external transcript)
-                if segments is None:
+                # Check if parallel mode enabled
+                if self.config.detection.parallel_enabled:
+                    # PARALLEL DETECTION MODE
+                    import concurrent.futures
+
+                    gemini_candidates = []
+                    keyword_candidates = []
+                    gemini_usage = None
+                    gemini_error = None
+                    whisper_error = None
+                    gemini_attempted = False  # Track if Gemini ran (vs failed to run)
+
+                    def run_gemini():
+                        nonlocal gemini_candidates, gemini_usage, gemini_error, gemini_attempted
+                        try:
+                            gemini_client = self._get_gemini_client()
+                            if gemini_client:
+                                gemini_attempted = True  # Mark as attempted BEFORE call
+                                spans, usage = gemini_client.detect_ads(
+                                    audio_path,
+                                    podcast_title=job.podcast_title,
+                                    duration=duration,
+                                    sponsors=sponsor_info,
+                                )
+                                gemini_candidates = [
+                                    {
+                                        "start": s.start,
+                                        "end": s.end,
+                                        "confidence": s.confidence,
+                                        "reason": s.reason,
+                                        "source": "gemini",
+                                    }
+                                    for s in spans
+                                ]
+                                gemini_usage = usage
+                        except Exception as e:
+                            gemini_error = str(e)
+
+                    def run_transcript_keywords():
+                        nonlocal keyword_candidates, segments, whisper_error, transcript_source, candidates
+                        try:
+                            # Use existing external transcript if available
+                            if segments is None:
+                                # Need to transcribe
+                                print("    Transcribing with Whisper...")
+
+                                def on_transcribe_progress(percent: int) -> None:
+                                    self.api_client.update_progress(job.id, "transcribing", percent)
+
+                                segments = transcribe_audio(
+                                    str(audio_path),
+                                    model_name=self.whisper_model,
+                                    device=self.device,
+                                    duration=duration,
+                                    progress_callback=on_transcribe_progress,
+                                )
+                                transcript_source = "whisper"
+
+                            # Find keyword candidates
+                            cands = find_ad_candidates(
+                                segments, duration, sponsors=sponsor_info, podcast_name=job.podcast_title
+                            )
+                            keyword_candidates = [
+                                {
+                                    "start": c.start,
+                                    "end": c.end,
+                                    "confidence": c.heuristic_score,
+                                    "reason": f"Keywords: {', '.join(c.trigger_keywords[:3])}",
+                                    "matched_keywords": c.trigger_keywords,
+                                    "source": "keywords",
+                                }
+                                for c in cands
+                            ]
+                            # Store original candidates for artifact
+                            candidates = cands
+                        except Exception as e:
+                            whisper_error = str(e)
+
+                    print("  Running parallel detection (Gemini + Transcript/Keywords)...")
+                    # Start with "transcribing" since that's the slow part - progress updates will follow
+                    self.api_client.update_progress(job.id, "transcribing", 0)
+
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                        futures = [
+                            executor.submit(run_gemini),
+                            executor.submit(run_transcript_keywords),
+                        ]
+                        concurrent.futures.wait(futures)
+
+                    # Update status after parallel work completes
+                    self.api_client.update_progress(job.id, "detecting")
+
+                    if gemini_error:
+                        print(f"  Warning: Gemini failed: {gemini_error}")
+                    if whisper_error:
+                        print(f"  Warning: Whisper/keywords failed: {whisper_error}")
+
+                    print(f"    Gemini: {len(gemini_candidates)} candidates")
+                    print(f"    Keywords: {len(keyword_candidates)} candidates")
+
+                    # Store raw Gemini candidates for debugging (before validation)
+                    raw_gemini_candidates = gemini_candidates.copy()
+
+                    # Validate Gemini candidates against transcript
+                    # This catches hallucinated timestamps that don't contain ad content
+                    if gemini_candidates and segments:
+                        sponsor_names = [s.name for s in sponsor_info.sponsors] if sponsor_info and sponsor_info.sponsors else []
+                        gemini_candidates, rejected = self._validate_gemini_candidates(
+                            gemini_candidates, segments, sponsor_names
+                        )
+                        if rejected:
+                            print(f"    Validated: {len(gemini_candidates)} Gemini candidates ({len(rejected)} rejected)")
+
+                    # Track all usages for accurate cost reporting
+                    all_usages = []
+                    total_cost = 0.0
+
+                    if gemini_usage:
+                        gemini_cost = self._calculate_llm_cost(
+                            provider=gemini_usage.get("provider", "gemini"),
+                            model=gemini_usage.get("model", self.config.gemini.model),
+                            input_tokens=gemini_usage.get("input_tokens", 0),
+                            output_tokens=gemini_usage.get("output_tokens", 0),
+                            audio_duration_seconds=duration,
+                        )
+                        gemini_usage["cost"] = gemini_cost
+                        total_cost += gemini_cost
+                        all_usages.append(gemini_usage)
+                        print(f"    Gemini cost: ${gemini_cost:.4f}")
+
+                    if gemini_candidates or keyword_candidates:
+                        if segments:
+                            print("  Merging with LLM...")
+                            self.api_client.update_progress(job.id, "refining")
+                            ad_spans, merge_usage = self._llm_merge_candidates(
+                                gemini_candidates,
+                                keyword_candidates,
+                                segments,
+                                sponsor_info,
+                                duration,
+                            )
+                            detection_source = "parallel"
+
+                            # Track merge LLM cost (even if empty result or error)
+                            if merge_usage:
+                                if "input_tokens" in merge_usage:
+                                    merge_cost = self._calculate_llm_cost(
+                                        provider=merge_usage.get("provider", "openai"),
+                                        model=merge_usage.get("model", self.config.llm.model),
+                                        input_tokens=merge_usage.get("input_tokens", 0),
+                                        output_tokens=merge_usage.get("output_tokens", 0),
+                                    )
+                                    merge_usage["cost"] = merge_cost
+                                    total_cost += merge_cost
+                                    print(f"    LLM merge cost: ${merge_cost:.4f}")
+                                all_usages.append(merge_usage)
+                        else:
+                            # No transcript (Whisper failed) - use Gemini directly
+                            print("  No transcript, using Gemini candidates directly")
+                            ad_spans = [
+                                AdSpan(
+                                    start=c["start"],
+                                    end=c["end"],
+                                    confidence=c["confidence"],
+                                    reason=c["reason"],
+                                    candidate_indices=[],
+                                    sources=["gemini"],
+                                )
+                                for c in gemini_candidates
+                            ]
+                            detection_source = "gemini_only"
+                            transcript_source = "none"
+                    elif gemini_attempted or segments:
+                        # Valid "no ads" outcome: either Gemini ran and found nothing,
+                        # or we have transcript but no keyword matches
+                        print("  No candidates found from either method (valid no-ads result)")
+                        ad_spans = []
+                        detection_source = "parallel_empty"
+                    else:
+                        # Both actually failed to run
+                        raise RuntimeError("Both Gemini and Whisper detection failed")
+
+                    # Build combined llm_usage for reporting
+                    if all_usages:
+                        # Use first provider's info but aggregate cost
+                        llm_usage = all_usages[0].copy()
+                        llm_usage["cost"] = total_cost
+                        if len(all_usages) > 1:
+                            llm_usage["providers"] = [u.get("provider") for u in all_usages]
+
+                    print(f"    Total cost: ${total_cost:.4f}")
+
+                # TIER 2b: Try Gemini audio detection (if no external transcript) - TIERED MODE
+                elif segments is None:
                     gemini_client = self._get_gemini_client()
                     if gemini_client:
                         print("  Using Gemini audio detection...")
@@ -329,7 +720,8 @@ class WorkerDaemon:
 
                 # If we don't have ad_spans yet (external transcript or single-pass mode),
                 # run heuristic detection + LLM refinement
-                if not ad_spans and segments:
+                # Skip if parallel detection already ran (detection_source will be set)
+                if not ad_spans and segments and detection_source is None:
                     # Detect ads
                     print("  Detecting ads...")
                     self.api_client.update_progress(job.id, "detecting")
@@ -353,11 +745,15 @@ class WorkerDaemon:
                 model_info = {
                     "transcript_source": transcript_source,
                     "llm_provider": self.config.llm.provider,
+                    "detection_source": detection_source,
                 }
                 # Only include whisper details if we used whisper
                 if transcript_source == "whisper":
                     model_info["whisper_model"] = self.whisper_model
                     model_info["device"] = self.device
+                # Store raw Gemini candidates for debugging (before validation)
+                if raw_gemini_candidates:
+                    model_info["gemini_candidates_raw"] = raw_gemini_candidates
 
                 detection_result = DetectionResult(
                     audio_path=job.original_audio_url,

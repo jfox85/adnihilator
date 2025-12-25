@@ -20,3 +20,9 @@ heuristic_threshold = 0.4
 # Context segments to include around candidates for LLM analysis
 context_segments_before = 2
 context_segments_after = 2
+
+[detection]
+# Enable parallel detection mode (Gemini + Whisper/keywords running simultaneously)
+# When enabled, both methods run in parallel and results are merged by LLM
+# When disabled (default), uses tiered detection (Gemini first, Whisper fallback)
+parallel_enabled = true

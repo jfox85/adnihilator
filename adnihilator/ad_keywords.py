@@ -30,10 +30,13 @@ KEYWORD_PATTERNS: list[tuple[str, str]] = [
     ("check out", "cta"),
     ("sign up at", "cta"),
     ("get started at", "cta"),
-    # URL patterns
+    # URL patterns (including spelled-out slashes from transcription)
     (".com/", "url"),
+    (".com slash", "url"),  # Transcribed "slash" (e.g., "human.com slash tim")
     (".io/", "url"),
+    (".io slash", "url"),
     (".co/", "url"),
+    (".co slash", "url"),
     (".org/", "url"),
     (".net/", "url"),
     # Pricing and offers

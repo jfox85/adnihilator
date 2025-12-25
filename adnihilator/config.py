@@ -45,12 +45,20 @@ class DetectConfig:
 
 
 @dataclass
+class DetectionConfig:
+    """Detection strategy configuration."""
+
+    parallel_enabled: bool = False  # Feature flag - default OFF for safety
+
+
+@dataclass
 class Config:
     """Main configuration for AdNihilator."""
 
     llm: LLMConfig = field(default_factory=LLMConfig)
     gemini: GeminiConfig = field(default_factory=GeminiConfig)
     detect: DetectConfig = field(default_factory=DetectConfig)
+    detection: DetectionConfig = field(default_factory=DetectionConfig)
 
 
 def load_config(path: str | None = None) -> Config:
@@ -92,6 +100,7 @@ def _parse_config(data: dict[str, Any]) -> Config:
     llm_data = data.get("llm", {})
     gemini_data = data.get("gemini", {})
     detect_data = data.get("detect", {})
+    detection_data = data.get("detection", {})
 
     llm_config = LLMConfig(
         provider=llm_data.get("provider", "none"),
@@ -112,4 +121,13 @@ def _parse_config(data: dict[str, Any]) -> Config:
         context_segments_after=detect_data.get("context_segments_after", 2),
     )
 
-    return Config(llm=llm_config, gemini=gemini_config, detect=detect_config)
+    detection_config = DetectionConfig(
+        parallel_enabled=detection_data.get("parallel_enabled", False),
+    )
+
+    return Config(
+        llm=llm_config,
+        gemini=gemini_config,
+        detect=detect_config,
+        detection=detection_config,
+    )

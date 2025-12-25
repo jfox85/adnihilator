@@ -2,7 +2,7 @@
 
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class WordTimestamp(BaseModel):
@@ -43,7 +43,8 @@ class AdSpan(BaseModel):
     end: float
     confidence: float
     reason: str
-    candidate_indices: list[int]
+    candidate_indices: list[int] = Field(default_factory=list)
+    sources: list[str] = Field(default_factory=list)  # ["gemini", "keywords", "llm_new"]
 
 
 class Sponsor(BaseModel):
