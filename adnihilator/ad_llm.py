@@ -620,19 +620,30 @@ VERIFICATION RULES:
 
 Your tasks:
 1. VERIFY each Gemini candidate has transcript evidence (reject if not)
-2. MERGE overlapping candidates that refer to the SAME ad/sponsor
-3. SPLIT candidates if they contain MULTIPLE DISTINCT ads (different sponsors)
-4. REFINE boundaries using transcript context (find exact transition points)
-5. If you discover an ad in the transcript NOT covered by candidates, you MAY add it
-6. OUTPUT final ad spans
+2. MERGE overlapping or adjacent ad candidates (keep ad blocks together)
+3. REFINE boundaries using transcript context (find exact transition points)
+4. If you discover an ad in the transcript NOT covered by candidates, you MAY add it
+5. OUTPUT final ad spans
 
-CRITICAL RULES:
-- REJECT any Gemini candidate whose timestamp region doesn't mention sponsors or ad content
-- If adjacent ad reads mention DIFFERENT companies, they are SEPARATE ads - do NOT merge
+PRE-ROLL AD DETECTION (CRITICAL):
+The first 0-120 seconds often contain DYNAMICALLY INSERTED pre-roll ads. These are:
+- Multiple back-to-back sponsor ads (Peloton, Corona, PayPal, etc.) inserted by the ad network
+- Often followed by a network bumper ("Podcasts you love", "This is TWiT", etc.)
+- End when the ACTUAL SHOW starts (host greetings, episode intro, guest introduction)
+
+For pre-roll regions:
+- Keep ALL back-to-back ads as ONE block (do NOT split by sponsor)
+- Find the END by looking for: "Episode [number]", "I'm [host name]", "Hello and welcome", etc.
+- The show typically starts after all ads AND network bumpers complete
+- If keyword candidate says 0-90s, EXTEND to find the actual show start, don't truncate
+
+BOUNDARY RULES:
+- TRUST keyword candidate boundaries as minimum range
+- EXTEND (don't shrink) when you find more ad content beyond the candidate
+- Look for actual show content to determine where ads END
 - All timestamps must be within [0, {duration}] seconds
 - Each ad must have start < end
 - Output ads sorted by start time, non-overlapping
-- Use keyword timestamps as primary reference, Gemini as secondary confirmation
 
 Output JSON:
 {{
