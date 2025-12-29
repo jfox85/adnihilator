@@ -295,19 +295,27 @@ def find_ad_candidates(
 
     # Phase 5: Add dedicated pre-roll candidate region for house ads and network promos
     # Pre-rolls often promote other shows or network content rather than sponsors
+    # CRITICAL: Dynamic ads at the very beginning often lack trigger keywords (e.g., Royal Caribbean style)
     if duration >= PRE_ROLL_MIN_EPISODE_LENGTH:
         pre_roll_start = 0.0
         pre_roll_end = min(PRE_ROLL_REGION_DURATION, duration)
 
-        # Check if we already have ANY candidate in the pre-roll region (substantial overlap)
-        # Only add pre-roll candidate if there's minimal coverage (<30% overlap)
-        total_overlap = sum(
-            max(0, min(c.end, pre_roll_end) - max(c.start, pre_roll_start))
-            for c in candidates
-        )
-        pre_roll_covered = total_overlap > (pre_roll_end - pre_roll_start) * 0.3
+        # Check if we already have coverage of the BEGINNING of the episode
+        # The key issue: dynamic pre-roll ads often appear at 0-30s without trigger keywords
+        # We need to ensure the very beginning is covered, not just "some overlap"
+        earliest_candidate_start = min((c.start for c in candidates), default=float('inf'))
 
-        if not pre_roll_covered:
+        # Add pre-roll candidate if:
+        # 1. No candidates exist at all, OR
+        # 2. The earliest candidate starts after 30s (leaving a gap at the beginning)
+        beginning_uncovered = earliest_candidate_start > 30.0
+
+        if beginning_uncovered:
+            # Extend to the start of the earliest candidate or pre_roll_end, whichever is smaller
+            if earliest_candidate_start < pre_roll_end:
+                # There's a candidate later in the pre-roll - extend to meet it
+                pre_roll_end = earliest_candidate_start
+
             # Find segment indices in the pre-roll region
             pre_roll_indices = [
                 s.index for s in segments
