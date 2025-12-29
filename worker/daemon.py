@@ -512,12 +512,17 @@ class WorkerDaemon:
                     # Start with "transcribing" since that's the slow part - progress updates will follow
                     self.api_client.update_progress(job.id, "transcribing", 0)
 
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-                        futures = [
-                            executor.submit(run_gemini),
-                            executor.submit(run_transcript_keywords),
-                        ]
-                        concurrent.futures.wait(futures)
+                    # Run Gemini in background thread (I/O bound - safe in thread)
+                    # Run Whisper in main thread (uses multiprocessing internally - unsafe in thread)
+                    # This avoids the leaked semaphore issue from running multiprocessing inside threads
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                        gemini_future = executor.submit(run_gemini)
+
+                        # Run Whisper/keywords in main thread
+                        run_transcript_keywords()
+
+                        # Wait for Gemini to complete
+                        gemini_future.result()
 
                     # Update status after parallel work completes
                     self.api_client.update_progress(job.id, "detecting")

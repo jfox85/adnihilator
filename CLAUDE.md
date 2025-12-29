@@ -87,3 +87,23 @@ Web service requires: `ADMIN_USERNAME`, `ADMIN_PASSWORD`, `WORKER_API_KEY`, `DAT
 ## OpenMP Fix
 
 macOS requires `KMP_DUPLICATE_LIB_OK=TRUE` before importing faster-whisper (set in cli.py).
+
+## Safety Rules
+
+### Process Management
+**NEVER use broad `pkill` or `killall` commands.** Always find the specific PID first and kill only that:
+
+```bash
+# WRONG - can kill unintended processes
+pkill -f "worker"
+
+# RIGHT - find specific PID first, then kill it
+ps aux | grep "adnihilator.cli worker" | grep -v grep
+kill <specific_pid>
+```
+
+To restart the local worker safely, use launchctl (it manages the process):
+```bash
+launchctl unload ~/Library/LaunchAgents/com.adnihilator.worker.plist
+launchctl load ~/Library/LaunchAgents/com.adnihilator.worker.plist
+```
