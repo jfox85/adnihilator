@@ -300,15 +300,16 @@ def find_ad_candidates(
         pre_roll_start = 0.0
         pre_roll_end = min(PRE_ROLL_REGION_DURATION, duration)
 
-        # Check if we already have coverage of the BEGINNING of the episode
-        # The key issue: dynamic pre-roll ads often appear at 0-30s without trigger keywords
-        # We need to ensure the very beginning is covered, not just "some overlap"
+        # Check if we already have coverage of the very BEGINNING of the episode (first 10 seconds)
+        # Dynamic pre-roll ads often start immediately and may not have trigger keywords
+        # We need to ensure the start is covered, not just "some overlap somewhere in the first 2 min"
         earliest_candidate_start = min((c.start for c in candidates), default=float('inf'))
 
         # Add pre-roll candidate if:
         # 1. No candidates exist at all, OR
-        # 2. The earliest candidate starts after 30s (leaving a gap at the beginning)
-        beginning_uncovered = earliest_candidate_start > 30.0
+        # 2. The earliest candidate starts after 10s (leaving a gap at the beginning)
+        # 10s threshold because dynamic ads literally start at 0s
+        beginning_uncovered = earliest_candidate_start > 10.0
 
         if beginning_uncovered:
             # Extend to the start of the earliest candidate or pre_roll_end, whichever is smaller
