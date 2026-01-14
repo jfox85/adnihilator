@@ -5,20 +5,59 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{ title }} - AdNihilator</title>
     <style>
+        :root {
+            --bg-page: #f5f5f5;
+            --bg-card: #ffffff;
+            --bg-card-hover: #fafafa;
+            --bg-input: #ffffff;
+            --bg-hover: #e8e8e8;
+            --bg-code: #f0f0f0;
+            --text-primary: #333333;
+            --text-secondary: #666666;
+            --text-muted: #888888;
+            --text-link: #0066cc;
+            --border-color: #dddddd;
+            --border-light: #eeeeee;
+            --shadow-card: 0 2px 4px rgba(0,0,0,0.1);
+            --shadow-dropdown: 0 4px 12px rgba(0,0,0,0.15);
+            color-scheme: light dark;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg-page: #121212;
+                --bg-card: #1e1e1e;
+                --bg-card-hover: #2a2a2a;
+                --bg-input: #2d2d2d;
+                --bg-hover: #3d3d3d;
+                --bg-code: #2d2d2d;
+                --text-primary: #e0e0e0;
+                --text-secondary: #b0b0b0;
+                --text-muted: #888888;
+                --text-link: #66b3ff;
+                --border-color: #404040;
+                --border-light: #333333;
+                --shadow-card: 0 2px 4px rgba(0,0,0,0.3);
+                --shadow-dropdown: 0 4px 12px rgba(0,0,0,0.4);
+            }
+        }
+
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
             max-width: 900px;
             margin: 0 auto;
             padding: 20px;
-            background: #f5f5f5;
+            background: var(--bg-page);
+            color: var(--text-primary);
         }
-        h1 { color: #333; }
+        h1, h2 { color: var(--text-primary); }
+        a { color: var(--text-link); }
         .card {
-            background: white;
+            background: var(--bg-card);
             border-radius: 8px;
             padding: 20px;
             margin: 20px 0;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            box-shadow: var(--shadow-card);
         }
         button, .btn {
             background: #007bff;
@@ -31,21 +70,26 @@
             display: inline-block;
         }
         button:hover, .btn:hover { background: #0056b3; }
-        input[type="text"], input[type="url"] {
+        input[type="text"], input[type="url"], select {
             width: 100%;
             padding: 10px;
-            border: 1px solid #ddd;
+            border: 1px solid var(--border-color);
             border-radius: 4px;
             margin: 5px 0;
+            background: var(--bg-input);
+            color: var(--text-primary);
+        }
+        input[type="text"]:focus, input[type="url"]:focus, select:focus {
+            outline: none;
+            border-color: var(--text-link);
         }
         table { width: 100%; border-collapse: collapse; }
-        th, td { padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }
+        th, td { padding: 10px; text-align: left; border-bottom: 1px solid var(--border-color); }
         .status-pending { color: #ffc107; }
         .status-processing { color: #17a2b8; }
         .status-complete { color: #28a745; }
         .status-failed { color: #dc3545; }
 
-        /* Header with tools menu */
         .header {
             display: flex;
             justify-content: space-between;
@@ -60,8 +104,12 @@
         .header h1 {
             margin: 0;
         }
+        .header h1 a {
+            text-decoration: none;
+            color: var(--text-primary);
+        }
         .nav-link {
-            color: #666;
+            color: var(--text-secondary);
             text-decoration: none;
             font-weight: 500;
             font-size: 0.95rem;
@@ -69,24 +117,24 @@
             border-radius: 4px;
         }
         .nav-link:hover {
-            background: #e8e8e8;
-            color: #333;
+            background: var(--bg-hover);
+            color: var(--text-primary);
         }
         .tools-menu {
             position: relative;
         }
         .tools-btn {
             background: none;
-            border: 1px solid #ddd;
+            border: 1px solid var(--border-color);
             border-radius: 4px;
             padding: 8px 12px;
             cursor: pointer;
             font-size: 1.1rem;
-            color: #666;
+            color: var(--text-secondary);
         }
         .tools-btn:hover {
-            background: #f0f0f0;
-            border-color: #ccc;
+            background: var(--bg-hover);
+            border-color: var(--border-color);
         }
         .tools-dropdown {
             display: none;
@@ -94,10 +142,10 @@
             right: 0;
             top: 100%;
             margin-top: 4px;
-            background: white;
-            border: 1px solid #ddd;
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
             border-radius: 6px;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            box-shadow: var(--shadow-dropdown);
             min-width: 200px;
             z-index: 100;
         }
@@ -108,22 +156,22 @@
             padding: 8px 12px;
             font-size: 0.75rem;
             font-weight: 600;
-            color: #888;
+            color: var(--text-muted);
             text-transform: uppercase;
-            border-bottom: 1px solid #eee;
+            border-bottom: 1px solid var(--border-light);
         }
         .tools-dropdown a,
         .tools-dropdown label {
             display: block;
             padding: 10px 12px;
-            color: #333;
+            color: var(--text-primary);
             text-decoration: none;
             cursor: pointer;
             font-size: 0.9rem;
         }
         .tools-dropdown a:hover,
         .tools-dropdown label:hover {
-            background: #f5f5f5;
+            background: var(--bg-hover);
         }
         .tools-dropdown input[type="file"] {
             display: none;
@@ -133,7 +181,7 @@
 <body>
     <div class="header">
         <div class="header-left">
-            <h1><a href="/" style="text-decoration: none; color: inherit;">AdNihilator</a></h1>
+            <h1><a href="/">AdNihilator</a></h1>
             <a href="/queue" class="nav-link">Queue</a>
         </div>
         <div class="tools-menu">

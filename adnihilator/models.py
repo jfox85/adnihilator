@@ -45,6 +45,7 @@ class AdSpan(BaseModel):
     reason: str
     candidate_indices: list[int] = Field(default_factory=list)
     sources: list[str] = Field(default_factory=list)  # ["gemini", "keywords", "llm_new"]
+    ad_type: Optional[str] = None  # "dynamic_insertion", "host_read", "network_bumper"
 
 
 class Sponsor(BaseModel):

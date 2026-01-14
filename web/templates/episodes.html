@@ -511,12 +511,12 @@ function sortEpisodes() {
 .podcast-artwork-placeholder {
     width: 120px;
     height: 120px;
-    background: #e0e0e0;
+    background: var(--border-color);
     border-radius: 8px;
     display: flex;
     align-items: center;
     justify-content: center;
-    color: #999;
+    color: var(--text-muted);
     flex-shrink: 0;
 }
 .podcast-details {
@@ -525,21 +525,21 @@ function sortEpisodes() {
 }
 .podcast-details h2 {
     margin: 0 0 0.5rem 0;
-    color: #333;
+    color: var(--text-primary);
 }
 .podcast-description {
-    color: #666;
+    color: var(--text-secondary);
     font-size: 0.9rem;
     margin-bottom: 0.5rem;
     line-height: 1.4;
 }
 .podcast-meta {
     font-size: 0.85rem;
-    color: #888;
+    color: var(--text-muted);
     word-break: break-all;
 }
 .podcast-meta a {
-    color: #0066cc;
+    color: var(--text-link);
 }
 .feed-url-row {
     display: inline-flex;
@@ -547,11 +547,11 @@ function sortEpisodes() {
     gap: 0.35rem;
 }
 .feed-url-link {
-    background: #f0f0f0;
+    background: var(--bg-code);
     padding: 0.2rem 0.4rem;
     border-radius: 3px;
     font-size: 0.8rem;
-    color: #0066cc;
+    color: var(--text-link);
     font-family: monospace;
     text-decoration: none;
 }
@@ -564,13 +564,13 @@ function sortEpisodes() {
     padding: 0;
     cursor: pointer;
     font-size: 0.7rem;
-    color: #888;
+    color: var(--text-muted);
     opacity: 0.7;
     line-height: 1;
 }
 .btn-copy:hover {
     opacity: 1;
-    color: #0066cc;
+    color: var(--text-link);
 }
 
 .controls-bar {
@@ -601,9 +601,9 @@ function sortEpisodes() {
 .search-filter select {
     padding: 0.5rem;
     border-radius: 4px;
-    border: 1px solid #ddd;
-    background: #fff;
-    color: #333;
+    border: 1px solid var(--border-color);
+    background: var(--bg-input);
+    color: var(--text-primary);
     font-size: 0.85rem;
 }
 .search-filter input {
@@ -639,7 +639,7 @@ function sortEpisodes() {
 }
 .last-refreshed {
     font-size: 0.75rem;
-    color: #888;
+    color: var(--text-muted);
 }
 
 .episode-list {
@@ -648,10 +648,10 @@ function sortEpisodes() {
     gap: 0.5rem;
 }
 .episode-row {
-    background: #fff;
+    background: var(--bg-card);
     border-radius: 6px;
     overflow: hidden;
-    border: 1px solid #e0e0e0;
+    border: 1px solid var(--border-color);
 }
 .episode-main {
     display: flex;
@@ -663,7 +663,7 @@ function sortEpisodes() {
     gap: 1rem;
 }
 .episode-main:hover {
-    background: #f8f8f8;
+    background: var(--bg-card-hover);
 }
 .episode-title-section {
     flex: 1;
@@ -672,14 +672,14 @@ function sortEpisodes() {
 .episode-title {
     display: block;
     font-weight: 500;
-    color: #333;
+    color: var(--text-primary);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }
 .episode-meta {
     font-size: 0.8rem;
-    color: #888;
+    color: var(--text-muted);
     margin-top: 0.2rem;
 }
 .episode-status-section {
@@ -700,8 +700,8 @@ function sortEpisodes() {
 .status-processing { background: #cce5ff; color: #004085; }
 .status-complete { background: #d4edda; color: #155724; }
 .status-failed { background: #f8d7da; color: #721c24; }
-.status-skipped { background: #e9ecef; color: #6c757d; }
-.status-expired { background: #e2e3e5; color: #383d41; }
+.status-skipped { background: var(--bg-hover); color: var(--text-muted); }
+.status-expired { background: var(--bg-hover); color: var(--text-muted); }
 
 .episode-row.status-changed {
     animation: highlight 2s ease-out;
@@ -710,23 +710,29 @@ function sortEpisodes() {
     0% { background-color: #fffde7; }
     100% { background-color: transparent; }
 }
+@media (prefers-color-scheme: dark) {
+    @keyframes highlight {
+        0% { background-color: #3d3d00; }
+        100% { background-color: transparent; }
+    }
+}
 
 .expand-icon {
-    color: #999;
+    color: var(--text-muted);
     font-size: 0.75rem;
 }
 
 .episode-details {
     display: none;
     padding: 1rem;
-    background: #fafafa;
-    border-top: 1px solid #e0e0e0;
+    background: var(--bg-card-hover);
+    border-top: 1px solid var(--border-color);
 }
 .episode-details.open {
     display: block;
 }
 .episode-description {
-    color: #555;
+    color: var(--text-secondary);
     font-size: 0.9rem;
     margin-bottom: 0.75rem;
     max-height: 250px;
@@ -735,7 +741,7 @@ function sortEpisodes() {
     word-wrap: break-word;
 }
 .episode-description a {
-    color: #0066cc;
+    color: var(--text-link);
 }
 .episode-error {
     background: #f8d7da;
@@ -756,7 +762,7 @@ function sortEpisodes() {
     display: inline-block;
 }
 .detection-source {
-    color: #666;
+    color: var(--text-secondary);
     font-size: 0.8rem;
     font-style: italic;
 }

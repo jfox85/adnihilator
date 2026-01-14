@@ -162,7 +162,7 @@ class GeminiAudioClient:
                     continue
 
                 sponsor = ad.get("sponsor", "Unknown")
-                language = ad.get("language", "Unknown")
+                ad_type = ad.get("ad_type")
                 reason = ad.get("reason", "")
 
                 ad_spans.append(
@@ -170,8 +170,9 @@ class GeminiAudioClient:
                         start=start_time,
                         end=end_time,
                         confidence=ad.get("confidence", 0.95),
-                        reason=f"Gemini: {sponsor} ({language}) - {reason}",
+                        reason=f"Gemini: {sponsor} ({ad_type or 'unknown'}) - {reason}",
                         candidate_indices=[],  # Not applicable for Gemini
+                        ad_type=ad_type,
                     )
                 )
 
@@ -223,42 +224,45 @@ If you cannot find an ad for a listed sponsor, note which sponsors were not foun
         return f"""You are analyzing a podcast episode to identify ALL advertisement segments.
 {title_context}
 {sponsor_section}
-FINDING AD BOUNDARIES:
+TYPES OF ADS TO DETECT:
 
-START of ad - Listen for intro phrases like:
-- "brought to you by", "sponsored by", "our sponsor today"
-- "word from our sponsor", "thanks to our sponsor"
-- "our partners at", "supported by"
-- "let me tell you about", "I want to talk about"
+1. DYNAMICALLY INSERTED ADS (easy to detect by audio):
+   - Different voices from podcast hosts (professional announcers)
+   - Different audio production quality (music, sound effects, studio polish)
+   - Standard 15/30/60 second spot lengths
+   - MAY BE IN A DIFFERENT LANGUAGE than the podcast (Spanish, etc.) - detect these!
+   - Often appear at BEGINNING (pre-roll), MIDDLE (mid-roll), or END (post-roll)
+   - Mark these as ad_type: "dynamic_insertion"
 
-END of ad - The ad ends when the host finishes ALL of:
-- Describing the product/service benefits
-- Mentioning the website URL (e.g., "go to example.com/podcast")
-- Giving any promo code ("use code X", "code X for discount")
-- Making the final call-to-action ("sign up today", "check them out")
-- Any closing like "thanks to X for sponsoring"
+2. HOST-READ SPONSOR SEGMENTS:
+   - Podcast host reads an ad script
+   - Phrases like "brought to you by", "thanks to our sponsor"
+   - Mentions website URLs, promo codes, special offers
+   - Mark these as ad_type: "host_read"
 
-The ad is COMPLETE when the host transitions back to:
-- The main topic of discussion
-- A different segment or story
-- Regular conversation (not selling anything)
+3. NETWORK BUMPERS:
+   - Short audio stings like "This is TWiT", "Podcasts you love"
+   - Mark these as ad_type: "network_bumper"
 
-DO NOT cut off the ad early - include the FULL pitch through the final URL/code mention.
+AD LOCATIONS - CHECK ALL OF THESE:
+- PRE-ROLL: First 0-120 seconds (dynamic ads before show starts)
+- MID-ROLL: Throughout the middle - dynamic ads can appear ANYWHERE, often around 25-35%, 50%, 75% marks
+- POST-ROLL: Final 2-3 minutes (dynamic ads after show ends)
 
-ALSO DETECT:
-- Pre-roll ads at the very beginning
-- Post-roll ads at the very end
-- Mid-roll ads inserted in the middle
-- Ads in ANY language (English, Spanish, etc.)
-- Dynamically inserted ads (may have different audio quality)
+CRITICAL: Dynamic mid-roll ads are common! Listen to the ENTIRE episode, not just beginning/end.
+
+FINDING BOUNDARIES:
+- START: When the ad audio/voice begins
+- END: After the final URL/promo code mention or call-to-action
+- Include the FULL ad through the transition back to content
 
 For each ad found, provide:
 - start_time: timestamp in seconds when the ad begins
 - end_time: timestamp in seconds when the ad ends
-- sponsor: name of the sponsor/brand
-- language: language of the ad (English, Spanish, etc.)
+- sponsor: name of the sponsor/brand (or "Network Promo" for bumpers)
+- ad_type: "dynamic_insertion", "host_read", or "network_bumper"
 - confidence: 0.0-1.0 how confident you are this is an ad
-- reason: brief explanation of why this is an ad
+- reason: brief explanation
 
 Respond with JSON:
 {{
@@ -267,7 +271,7 @@ Respond with JSON:
       "start_time": <seconds>,
       "end_time": <seconds>,
       "sponsor": "<brand name>",
-      "language": "<language>",
+      "ad_type": "<type>",
       "confidence": 0.0-1.0,
       "reason": "<explanation>"
     }}

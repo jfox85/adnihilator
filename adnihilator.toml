@@ -12,6 +12,10 @@ api_key_env = "OPENAI_API_KEY"
 enabled = true
 api_key_env = "GEMINI_API_KEY"
 model = "gemini-2.0-flash-exp"
+# Use chunked detection for episodes longer than this (seconds)
+# Chunked mode splits audio into 5-min chunks for more reliable detection
+# Default: 1800 (30 minutes)
+chunked_threshold = 1800
 
 [detect]
 # Heuristic threshold for initial candidate detection (lower = more sensitive)

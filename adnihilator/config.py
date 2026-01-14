@@ -28,6 +28,7 @@ class GeminiConfig:
     enabled: bool = False  # Feature flag
     api_key_env: str = "GEMINI_API_KEY"
     model: str = "gemini-2.0-flash-exp"
+    chunked_threshold: int = 1800  # Use chunked detection for episodes > 30 min
 
     @property
     def api_key(self) -> str | None:
@@ -113,6 +114,7 @@ def _parse_config(data: dict[str, Any]) -> Config:
         enabled=gemini_data.get("enabled", False),
         api_key_env=gemini_data.get("api_key_env", "GEMINI_API_KEY"),
         model=gemini_data.get("model", "gemini-2.0-flash-exp"),
+        chunked_threshold=gemini_data.get("chunked_threshold", 1800),
     )
 
     detect_config = DetectConfig(

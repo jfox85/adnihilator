@@ -196,18 +196,20 @@ setInterval(() => {
 .search-box input {
     flex: 1;
     padding: 0.5rem 0.75rem;
-    border: 1px solid #ddd;
+    border: 1px solid var(--border-color);
     border-radius: 6px;
     font-size: 0.95rem;
+    background: var(--bg-input);
+    color: var(--text-primary);
 }
 .search-box input:focus {
     outline: none;
-    border-color: #0066cc;
-    box-shadow: 0 0 0 2px rgba(0, 102, 204, 0.1);
+    border-color: var(--text-link);
+    box-shadow: 0 0 0 2px rgba(102, 179, 255, 0.2);
 }
 .search-count {
     font-size: 0.85rem;
-    color: #666;
+    color: var(--text-secondary);
     white-space: nowrap;
 }
 .card-header {
@@ -236,14 +238,14 @@ setInterval(() => {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    background: #fff;
+    background: var(--bg-card);
     padding: 1rem;
     border-radius: 6px;
-    border: 1px solid #e0e0e0;
+    border: 1px solid var(--border-color);
     gap: 1rem;
 }
 .podcast-item:hover {
-    background: #fafafa;
+    background: var(--bg-card-hover);
 }
 .podcast-artwork-link {
     flex-shrink: 0;
@@ -258,7 +260,7 @@ setInterval(() => {
 .podcast-item-artwork-placeholder {
     width: 56px;
     height: 56px;
-    background: linear-gradient(135deg, #e0e0e0 0%, #f5f5f5 100%);
+    background: linear-gradient(135deg, var(--border-color) 0%, var(--bg-card-hover) 100%);
     border-radius: 6px;
 }
 .podcast-item-info {
@@ -270,7 +272,7 @@ setInterval(() => {
     font-weight: 500;
     font-size: 1.1rem;
     margin-bottom: 0.25rem;
-    color: #0066cc;
+    color: var(--text-link);
     text-decoration: none;
 }
 .podcast-item-title:hover {
@@ -283,8 +285,8 @@ setInterval(() => {
 }
 .podcast-item-feed {
     font-size: 0.8rem;
-    color: #0066cc;
-    background: #f0f0f0;
+    color: var(--text-link);
+    background: var(--bg-code);
     padding: 0.25rem 0.5rem;
     border-radius: 3px;
     word-break: break-all;
@@ -300,12 +302,12 @@ setInterval(() => {
     padding: 0;
     cursor: pointer;
     font-size: 0.7rem;
-    color: #888;
+    color: var(--text-muted);
     opacity: 0.7;
 }
 .btn-copy:hover {
     opacity: 1;
-    color: #0066cc;
+    color: var(--text-link);
 }
 .podcast-item-actions {
     display: flex;
@@ -321,7 +323,7 @@ setInterval(() => {
 }
 .last-refreshed {
     font-size: 0.75rem;
-    color: #888;
+    color: var(--text-muted);
     white-space: nowrap;
 }
 .btn-danger {
@@ -379,13 +381,12 @@ setInterval(() => {
         margin-top: 0.25rem;
     }
 
-    /* Transform 'Copy' Icon into Prominent Button */
     .btn-copy {
         width: 100%;
         height: 48px;
-        background: #e9ecef;
-        color: #333;
-        font-size: 0 !important; /* Hide the clipboard icon */
+        background: var(--bg-hover);
+        color: var(--text-primary);
+        font-size: 0 !important;
         opacity: 1;
         border-radius: 6px;
         display: flex;
@@ -401,7 +402,7 @@ setInterval(() => {
     }
 
     .btn-copy:active {
-        background: #dbe0e5;
+        background: var(--border-color);
     }
 
     /* Full Width Action Buttons */

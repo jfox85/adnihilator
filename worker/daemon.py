@@ -67,10 +67,15 @@ class WorkerDaemon:
             pass
         return None
 
-    def _get_gemini_client(self):
+    def _get_gemini_client(self, duration: float = 0.0):
         """Get Gemini client for audio-based ad detection.
 
+        Uses chunked detection for long episodes (> chunked_threshold).
         Returns None if Gemini is not enabled or library not installed.
+
+        Args:
+            duration: Audio duration in seconds. If > chunked_threshold,
+                     uses GeminiChunkedClient for more reliable detection.
         """
         if not self.config.gemini.enabled:
             return None
@@ -81,8 +86,14 @@ class WorkerDaemon:
             return None
 
         try:
-            from adnihilator.gemini_audio import GeminiAudioClient
-            return GeminiAudioClient(api_key=api_key, model=self.config.gemini.model)
+            # Use chunked client for long episodes
+            if duration > self.config.gemini.chunked_threshold:
+                from adnihilator.gemini_chunked import GeminiChunkedClient
+                print(f"    Using chunked detection (episode > {self.config.gemini.chunked_threshold}s)")
+                return GeminiChunkedClient(api_key=api_key, model=self.config.gemini.model)
+            else:
+                from adnihilator.gemini_audio import GeminiAudioClient
+                return GeminiAudioClient(api_key=api_key, model=self.config.gemini.model)
         except ImportError:
             print("  Warning: google-generativeai not installed, Gemini disabled")
             return None
@@ -121,6 +132,14 @@ class WorkerDaemon:
                     "audio": 0.000025,  # Per second of audio
                 },
             },
+            # Chunked Gemini uses same model pricing
+            "gemini_chunked": {
+                "gemini-2.0-flash-exp": {
+                    "input": 0.075 / 1_000_000,
+                    "output": 0.30 / 1_000_000,
+                    "audio": 0.000025,  # Per second of audio
+                },
+            },
         }
 
         pricing = PRICING.get(provider, {}).get(model)
@@ -144,18 +163,25 @@ class WorkerDaemon:
         segments: list,
         sponsors: list[str],
         buffer_seconds: float = 30.0,
+        duration: float = 0.0,
     ) -> tuple[list[dict], list[dict]]:
         """Validate Gemini candidates against transcript.
 
-        Gemini sometimes hallucinates timestamps. This method checks if the
-        transcript around each Gemini timestamp actually contains sponsor
-        keywords or ad-related phrases.
+        Gemini detects ads via audio characteristics (different voices, music, production).
+        This is reliable for dynamic insertion ads in pre/post-roll positions.
+        However, Gemini sometimes hallucinates mid-roll timestamps.
+
+        Validation strategy:
+        - PRE-ROLL (first 120s): Trust dynamic ads - these are reliable
+        - POST-ROLL (last 180s): Trust dynamic ads - these are reliable
+        - MID-ROLL: Validate against transcript keywords (hallucinations more likely)
 
         Args:
             gemini_candidates: List of Gemini candidate dicts
             segments: Transcript segments
             sponsors: List of sponsor names
             buffer_seconds: Buffer around candidate to search
+            duration: Total audio duration for post-roll detection
 
         Returns:
             Tuple of (validated_candidates, rejected_candidates)
@@ -163,11 +189,16 @@ class WorkerDaemon:
         if not gemini_candidates or not segments:
             return gemini_candidates, []
 
-        # Build keyword set for validation
+        # Pre-roll and post-roll boundaries
+        PRE_ROLL_END = 120.0  # First 2 minutes
+        POST_ROLL_START = max(0, duration - 180.0)  # Last 3 minutes
+
+        # Build keyword set for mid-roll validation
         ad_keywords = {
             "sponsor", "sponsored", "brought to you", "thanks to",
             "promo code", "use code", "discount", "% off", "percent off",
-            ".com/", "check out", "sign up", "free trial",
+            ".com/", ".com slash", "check out", "sign up", "free trial",
+            "go to", "visit", "head to",
         }
         sponsor_keywords = {s.lower() for s in sponsors}
 
@@ -177,8 +208,20 @@ class WorkerDaemon:
         for candidate in gemini_candidates:
             start = candidate.get("start", 0)
             end = candidate.get("end", 0)
+            ad_type = candidate.get("ad_type", "unknown")
 
-            # Get transcript text around this candidate
+            # Pre-roll dynamic ads: TRUST them - Gemini is very reliable here
+            # Dynamic insertion ads have distinct audio (different voice, music, production)
+            is_pre_roll = start < PRE_ROLL_END
+            is_post_roll = duration > 0 and start >= POST_ROLL_START
+            is_dynamic = ad_type in ("dynamic_insertion", "network_bumper")
+
+            if is_dynamic and (is_pre_roll or is_post_roll):
+                # Trust Gemini's audio-based detection for pre/post-roll dynamic ads
+                validated.append(candidate)
+                continue
+
+            # Mid-roll ads need transcript validation (Gemini hallucinates these more)
             context_start = max(0, start - buffer_seconds)
             context_end = end + buffer_seconds
 
@@ -195,7 +238,11 @@ class WorkerDaemon:
             # Check for ad keywords in context
             has_ad_keyword = any(kw in context_lower for kw in ad_keywords)
 
-            if has_sponsor or has_ad_keyword:
+            # Also check for Gemini's detected sponsor name in context
+            gemini_sponsor = candidate.get("sponsor", "").lower()
+            has_gemini_sponsor = gemini_sponsor and gemini_sponsor in context_lower
+
+            if has_sponsor or has_ad_keyword or has_gemini_sponsor:
                 validated.append(candidate)
             else:
                 rejected.append(candidate)
@@ -269,6 +316,9 @@ class WorkerDaemon:
                     current["sources"].append(source)
                 # Combine reasons
                 current["reason"] = f"{current.get('reason', '')}; {c.get('reason', '')}"
+                # Preserve ad_type (prefer existing or Gemini's type)
+                if not current.get("ad_type") and c.get("ad_type"):
+                    current["ad_type"] = c["ad_type"]
             else:
                 merged.append(current)
                 current = c.copy()
@@ -284,9 +334,579 @@ class WorkerDaemon:
                 reason=c["reason"][:200],  # Truncate long reasons
                 candidate_indices=[],
                 sources=c["sources"],
+                ad_type=c.get("ad_type"),
             )
             for c in merged
         ]
+
+    def _verify_long_ad_spans(
+        self,
+        ad_spans: list[AdSpan],
+        segments: list,
+        sponsors,
+        threshold: float = 240.0,  # 4 minutes
+        buffer: float = 15.0,  # Buffer around detected boundaries
+    ) -> list[AdSpan]:
+        """Verify and trim ad spans that exceed the threshold duration.
+
+        Long ad spans from LLM merge are often over-expanded. This verifies
+        them against the transcript by looking for actual sponsor mentions.
+
+        Args:
+            ad_spans: List of AdSpan objects from LLM merge
+            segments: Transcript segments
+            sponsors: SponsorInfo object
+            threshold: Duration threshold in seconds (spans longer get verified)
+            buffer: Buffer to add around detected boundaries
+
+        Returns:
+            List of verified/trimmed AdSpan objects
+        """
+        if not segments:
+            return ad_spans
+
+        # Build sponsor keywords set
+        sponsor_keywords = set()
+        if sponsors and sponsors.sponsors:
+            for s in sponsors.sponsors:
+                sponsor_keywords.add(s.name.lower())
+                # Also add common variations
+                if s.url:
+                    # Extract domain from URL
+                    domain = s.url.replace("https://", "").replace("http://", "").split("/")[0]
+                    sponsor_keywords.add(domain.lower())
+
+        # Strong standalone ad phrases - these are specific enough to indicate an ad by themselves
+        standalone_ad_phrases = {
+            "brought to you by", "sponsored by", "our sponsor", "our sponsors",
+            "promo code", "use code", "discount code",
+        }
+        # Weaker intro phrases - these need a sponsor name nearby to count
+        # "thanks to" alone matches things like "thanks to you guys in the Club"
+        weak_intro_phrases = {
+            "thanks to", "thank you to", "want to thank", "like to thank",
+        }
+
+        verified_spans = []
+
+        for ad in ad_spans:
+            duration = ad.end - ad.start
+
+            # Short ads pass through unchanged
+            if duration <= threshold:
+                verified_spans.append(ad)
+                continue
+
+            # Long ad - verify against transcript
+            print(f"    Verifying long ad span: {ad.start:.0f}-{ad.end:.0f}s ({duration:.0f}s)")
+
+            # Find all segments within the ad span
+            span_segments = [
+                seg for seg in segments
+                if seg.start >= ad.start and seg.end <= ad.end
+            ]
+
+            if not span_segments:
+                # No transcript segments - keep original but flag
+                print(f"      No transcript segments found, keeping original")
+                verified_spans.append(ad)
+                continue
+
+            # Find first and last segment with sponsor/ad evidence
+            first_ad_time = None
+            last_ad_time = None
+
+            # First pass: identify segments with sponsor keywords
+            # This is used to validate weak intro phrases
+            segments_with_sponsor = set()
+            for i, seg in enumerate(span_segments):
+                text_lower = seg.text.lower()
+                if any(kw in text_lower for kw in sponsor_keywords):
+                    segments_with_sponsor.add(i)
+
+            for i, seg in enumerate(span_segments):
+                text_lower = seg.text.lower()
+
+                # Check for sponsor keywords (most reliable)
+                has_sponsor = any(kw in text_lower for kw in sponsor_keywords)
+
+                # Check for strong standalone phrases
+                has_standalone = any(phrase in text_lower for phrase in standalone_ad_phrases)
+
+                # Check for weak intro phrases (need sponsor nearby)
+                has_weak_intro = any(phrase in text_lower for phrase in weak_intro_phrases)
+
+                # Weak intro is only valid if there's a sponsor within 3 segments
+                weak_intro_valid = False
+                if has_weak_intro:
+                    for j in range(max(0, i - 3), min(len(span_segments), i + 4)):
+                        if j in segments_with_sponsor:
+                            weak_intro_valid = True
+                            break
+
+                # Count as ad evidence if:
+                # - Has sponsor name directly, OR
+                # - Has strong standalone phrase, OR
+                # - Has weak intro phrase WITH sponsor nearby
+                is_ad_evidence = has_sponsor or has_standalone or weak_intro_valid
+
+                if is_ad_evidence:
+                    if first_ad_time is None:
+                        first_ad_time = seg.start
+                    last_ad_time = seg.end
+
+            if first_ad_time is None:
+                # No ad evidence found - reject this span
+                print(f"      No sponsor/ad evidence found, rejecting span")
+                continue
+
+            # Calculate new boundaries with buffer
+            new_start = max(ad.start, first_ad_time - buffer)
+            new_end = min(ad.end, last_ad_time + buffer)
+            new_duration = new_end - new_start
+
+            if new_duration < duration * 0.5:
+                # Significant trim - report it
+                print(f"      Trimmed from {duration:.0f}s to {new_duration:.0f}s ({new_start:.0f}-{new_end:.0f}s)")
+
+            verified_spans.append(AdSpan(
+                start=new_start,
+                end=new_end,
+                confidence=ad.confidence,
+                reason=ad.reason + " (verified)",
+                candidate_indices=ad.candidate_indices,
+                sources=ad.sources,
+                ad_type=ad.ad_type,
+            ))
+
+        return verified_spans
+
+    def _validate_sponsor_coverage(
+        self,
+        ad_spans: list[AdSpan],
+        segments: list,
+        sponsors,
+        duration: float,
+    ) -> tuple[list[str], list[str], dict]:
+        """Validate that detected ads cover all sponsors from description.
+
+        Automated validation step that:
+        1. Checks which sponsors are covered by detected ads
+        2. Identifies missing sponsors
+        3. Flags anomalies (e.g., way more ads than sponsors)
+
+        Args:
+            ad_spans: List of detected ad spans
+            segments: Transcript segments
+            sponsors: SponsorInfo object from description
+            duration: Total audio duration
+
+        Returns:
+            Tuple of (covered_sponsors, missing_sponsors, validation_info)
+        """
+        if not sponsors or not sponsors.sponsors:
+            return [], [], {"no_sponsors_in_description": True}
+
+        sponsor_names = [s.name for s in sponsors.sponsors]
+        covered_sponsors: list[str] = []
+        missing_sponsors: list[str] = []
+
+        from adnihilator.sponsors import generate_sponsor_keywords
+        sponsor_keywords: dict[str, list[str]] = {}
+        for sponsor in sponsors.sponsors:
+            sponsor_keywords[sponsor.name] = generate_sponsor_keywords(sponsor)
+
+        ad_texts: list[str] = []
+        for ad in ad_spans:
+            ad_text = ""
+            for seg in segments:
+                if seg.end >= ad.start and seg.start <= ad.end:
+                    ad_text += " " + seg.text
+            ad_texts.append(ad_text.lower())
+
+        for sponsor_name, keywords in sponsor_keywords.items():
+            found = False
+            for ad_text_lower in ad_texts:
+                for kw in keywords:
+                    if re.search(r'\b' + re.escape(kw) + r'\b', ad_text_lower):
+                        found = True
+                        break
+                if found:
+                    break
+
+            if found:
+                covered_sponsors.append(sponsor_name)
+            else:
+                missing_sponsors.append(sponsor_name)
+
+        validation_info = {
+            "total_sponsors": len(sponsor_names),
+            "covered_count": len(covered_sponsors),
+            "missing_count": len(missing_sponsors),
+            "ad_count": len(ad_spans),
+            "covered_sponsors": covered_sponsors,
+            "missing_sponsors": missing_sponsors,
+        }
+
+        if len(ad_spans) > len(sponsor_names) * 2 and len(sponsor_names) > 0:
+            validation_info["anomaly"] = "more_ads_than_expected"
+            print(f"    Warning: {len(ad_spans)} ads detected but only {len(sponsor_names)} sponsors in description")
+
+        if missing_sponsors:
+            print(f"    Missing sponsors: {', '.join(missing_sponsors)}")
+
+        return covered_sponsors, missing_sponsors, validation_info
+
+    def _hunt_missing_sponsors(
+        self,
+        segments: list,
+        ad_spans: list[AdSpan],
+        missing_sponsors: list[str],
+        sponsors,
+        duration: float,
+    ) -> tuple[list[AdSpan], dict | None]:
+        """Search for missing sponsors in gaps between detected ads.
+
+        Args:
+            segments: Transcript segments
+            ad_spans: Currently detected ad spans
+            missing_sponsors: List of sponsor names not yet found
+            sponsors: Full SponsorInfo object
+            duration: Total audio duration
+
+        Returns:
+            Tuple of (new_ad_spans, llm_usage) for any newly discovered ads
+        """
+        if not missing_sponsors or not segments:
+            return [], None
+
+        MIN_GAP_SECONDS = 300
+        MAX_GAPS_TO_SEARCH = 3
+
+        gaps: list[tuple[float, float]] = []
+        sorted_spans = sorted(ad_spans, key=lambda s: s.start)
+
+        prev_end = 0.0
+        for span in sorted_spans:
+            if span.start - prev_end > MIN_GAP_SECONDS:
+                gaps.append((prev_end, span.start))
+            prev_end = max(prev_end, span.end)
+
+        if duration - prev_end > MIN_GAP_SECONDS:
+            gaps.append((prev_end, duration))
+
+        if not gaps:
+            return [], None
+
+        from adnihilator.sponsors import generate_sponsor_keywords
+        missing_keywords: dict[str, list[str]] = {}
+        for sponsor in sponsors.sponsors:
+            if sponsor.name in missing_sponsors:
+                missing_keywords[sponsor.name] = generate_sponsor_keywords(sponsor)
+
+        new_spans: list[AdSpan] = []
+        total_usage: dict | None = None
+        found_sponsors: set[str] = set()
+
+        for gap_start, gap_end in gaps[:MAX_GAPS_TO_SEARCH]:
+            gap_segments = [
+                seg for seg in segments
+                if seg.end >= gap_start and seg.start <= gap_end
+            ]
+
+            if not gap_segments:
+                continue
+
+            gap_text = " ".join(seg.text for seg in gap_segments).lower()
+
+            for sponsor_name, keywords in missing_keywords.items():
+                if sponsor_name in found_sponsors:
+                    continue
+
+                for kw in keywords:
+                    if re.search(r'\b' + re.escape(kw) + r'\b', gap_text):
+                        print(f"    Found potential {sponsor_name} ad in gap {gap_start:.0f}-{gap_end:.0f}s")
+
+                        hunt_spans, usage = self._llm_hunt_in_window(
+                            segments, sponsor_name, gap_start, gap_end, duration
+                        )
+
+                        new_spans.extend(hunt_spans)
+                        if usage:
+                            if total_usage is None:
+                                total_usage = usage.copy()
+                            else:
+                                total_usage["input_tokens"] = total_usage.get("input_tokens", 0) + usage.get("input_tokens", 0)
+                                total_usage["output_tokens"] = total_usage.get("output_tokens", 0) + usage.get("output_tokens", 0)
+
+                        if hunt_spans:
+                            found_sponsors.add(sponsor_name)
+                        break
+
+        return new_spans, total_usage
+
+    def _llm_hunt_in_window(
+        self,
+        segments: list,
+        sponsor_name: str,
+        window_start: float,
+        window_end: float,
+        duration: float,
+    ) -> tuple[list[AdSpan], dict | None]:
+        """Use LLM to find exact ad boundaries for a sponsor in a window.
+
+        Args:
+            segments: All transcript segments
+            sponsor_name: Name of sponsor to hunt for
+            window_start: Start of search window (seconds)
+            window_end: End of search window (seconds)
+            duration: Total audio duration
+
+        Returns:
+            Tuple of (ad_spans, usage_dict)
+        """
+        llm_client = create_llm_client(self.config)
+        if not isinstance(llm_client, OpenAIClient):
+            return [], None
+
+        window_segments = [
+            seg for seg in segments
+            if seg.end >= window_start and seg.start <= window_end
+        ]
+
+        if not window_segments:
+            return [], None
+
+        MAX_HUNT_TRANSCRIPT_CHARS = 8000
+
+        transcript_lines = []
+        for seg in window_segments:
+            transcript_lines.append(f"[{seg.start:.0f}s] {seg.text}")
+
+        transcript_text = "\n".join(transcript_lines)
+        if len(transcript_text) > MAX_HUNT_TRANSCRIPT_CHARS:
+            transcript_text = transcript_text[:MAX_HUNT_TRANSCRIPT_CHARS] + "\n[...truncated...]"
+
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=llm_client.api_key, base_url=llm_client.base_url)
+
+            prompt = f"""Find the exact boundaries of the ad for "{sponsor_name}" in this transcript.
+
+Transcript (window {window_start:.0f}s - {window_end:.0f}s):
+{transcript_text}
+
+Look for:
+- Sponsor introduction ("brought to you by", "thanks to", etc.)
+- Product pitch and benefits
+- Call to action (URL, promo code)
+- Transition back to main content
+
+Return JSON:
+{{
+    "found": true/false,
+    "ad_start": <seconds>,
+    "ad_end": <seconds>,
+    "confidence": 0.0-1.0,
+    "reason": "<brief explanation>"
+}}"""
+
+            response = client.chat.completions.create(
+                model=self.config.llm.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                response_format={"type": "json_object"},
+            )
+
+            import json
+            result = json.loads(response.choices[0].message.content or "{}")
+
+            usage = {
+                "provider": "openai",
+                "model": self.config.llm.model,
+                "input_tokens": response.usage.prompt_tokens if response.usage else 0,
+                "output_tokens": response.usage.completion_tokens if response.usage else 0,
+            }
+
+            if result.get("found") and result.get("ad_start") is not None and result.get("ad_end") is not None:
+                start = max(window_start, min(float(result["ad_start"]), window_end))
+                end = max(window_start, min(float(result["ad_end"]), window_end))
+
+                if start < end:
+                    return [AdSpan(
+                        start=start,
+                        end=end,
+                        confidence=result.get("confidence", 0.7),
+                        reason=f"hunt_mode: {result.get('reason', 'found ' + sponsor_name)}",
+                        sources=["hunt"],
+                        candidate_indices=[],
+                    )], usage
+
+            return [], usage
+
+        except Exception as e:
+            print(f"    Hunt LLM failed: {e}")
+            return [], None
+
+    def _final_llm_review(
+        self,
+        ad_spans: list[AdSpan],
+        segments: list,
+        sponsors,
+        duration: float,
+        validation_info: dict,
+    ) -> tuple[list[AdSpan], dict | None]:
+        """Final LLM review pass to holistically validate all detected ads.
+
+        This is the last sanity check before splicing. The LLM reviews:
+        1. All detected ads and their timestamps
+        2. Sponsor coverage
+        3. Any anomalies flagged by automated validation
+        4. Overall coherence of the detection results
+
+        Args:
+            ad_spans: All detected ad spans
+            segments: Transcript segments
+            sponsors: SponsorInfo object
+            duration: Total audio duration
+            validation_info: Results from _validate_sponsor_coverage()
+
+        Returns:
+            Tuple of (validated_ad_spans, usage_dict)
+        """
+        llm_client = create_llm_client(self.config)
+        if not isinstance(llm_client, OpenAIClient):
+            return ad_spans, None
+
+        if not ad_spans:
+            return ad_spans, None
+
+        ads_summary = []
+        for i, ad in enumerate(ad_spans):
+            ad_text = ""
+            for seg in segments:
+                if seg.end >= ad.start and seg.start <= ad.end:
+                    ad_text += seg.text + " "
+
+            ads_summary.append({
+                "index": i,
+                "start": ad.start,
+                "end": ad.end,
+                "duration": ad.end - ad.start,
+                "confidence": ad.confidence,
+                "sources": ad.sources if hasattr(ad, 'sources') else [],
+                "reason": ad.reason,
+                "transcript_snippet": ad_text[:300] + "..." if len(ad_text) > 300 else ad_text,
+            })
+
+        sponsor_names = [s.name for s in sponsors.sponsors] if sponsors and sponsors.sponsors else []
+
+        try:
+            from openai import OpenAI
+            import json
+
+            client = OpenAI(api_key=llm_client.api_key, base_url=llm_client.base_url)
+
+            prompt = f"""Final review of ad detection results before splicing.
+
+EPISODE INFO:
+- Duration: {duration:.0f} seconds ({duration/60:.1f} minutes)
+- Sponsors from description: {sponsor_names}
+
+VALIDATION RESULTS:
+- Sponsors covered: {validation_info.get('covered_sponsors', [])}
+- Sponsors missing: {validation_info.get('missing_sponsors', [])}
+- Total ads detected: {len(ad_spans)}
+- Anomalies: {validation_info.get('anomaly', 'none')}
+
+DETECTED ADS:
+{json.dumps(ads_summary, indent=2)}
+
+REVIEW TASKS:
+1. Verify each ad looks legitimate (has sponsor content, not false positive)
+2. Check if any ads should be REJECTED (e.g., clearly not an ad, wrong boundaries)
+3. Check if any ads should be MERGED (e.g., same sponsor split into multiple spans)
+4. Flag any concerns about the detection quality
+
+OUTPUT FORMAT:
+{{
+    "approved_ads": [<list of ad indices to KEEP>],
+    "rejected_ads": [
+        {{"index": <int>, "reason": "<why rejected>"}}
+    ],
+    "merge_suggestions": [
+        {{"indices": [<list of indices to merge>], "reason": "<why>"}}
+    ],
+    "overall_confidence": 0.0-1.0,
+    "concerns": ["<any concerns about detection quality>"]
+}}
+
+Be CONSERVATIVE - only reject ads if you're confident they're false positives.
+If in doubt, keep the ad (it's safer to remove a questionable segment than leave an ad in)."""
+
+            response = client.chat.completions.create(
+                model=self.config.llm.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                response_format={"type": "json_object"},
+            )
+
+            result = json.loads(response.choices[0].message.content or "{}")
+
+            usage = {
+                "provider": "openai",
+                "model": self.config.llm.model,
+                "input_tokens": response.usage.prompt_tokens if response.usage else 0,
+                "output_tokens": response.usage.completion_tokens if response.usage else 0,
+            }
+
+            approved_indices = set(result.get("approved_ads", list(range(len(ad_spans)))))
+            rejected = result.get("rejected_ads", [])
+            merge_suggestions = result.get("merge_suggestions", [])
+            concerns = result.get("concerns", [])
+
+            if concerns:
+                for concern in concerns:
+                    print(f"    Review concern: {concern}")
+
+            for rej in rejected:
+                idx = rej.get("index")
+                reason = rej.get("reason", "unknown")
+                if idx is not None and 0 <= idx < len(ad_spans):
+                    ad = ad_spans[idx]
+                    print(f"    Rejecting ad {idx} ({ad.start:.0f}-{ad.end:.0f}s): {reason}")
+                    approved_indices.discard(idx)
+
+            for merge in merge_suggestions:
+                indices = merge.get("indices", [])
+                valid_indices = [i for i in indices if 0 <= i < len(ad_spans) and i in approved_indices]
+                if len(valid_indices) >= 2:
+                    to_merge = [ad_spans[i] for i in valid_indices]
+                    print(f"    Merging ads {valid_indices}: {merge.get('reason', '')}")
+                    merged = AdSpan(
+                        start=min(s.start for s in to_merge),
+                        end=max(s.end for s in to_merge),
+                        confidence=max(s.confidence for s in to_merge),
+                        reason="merged: " + to_merge[0].reason,
+                        sources=list(set(s for span in to_merge for s in (span.sources if hasattr(span, 'sources') else []))),
+                        candidate_indices=[],
+                    )
+                    for i in valid_indices:
+                        approved_indices.discard(i)
+                    ad_spans.append(merged)
+                    approved_indices.add(len(ad_spans) - 1)
+
+            final_spans = [ad_spans[i] for i in sorted(approved_indices) if i < len(ad_spans)]
+            final_spans.sort(key=lambda x: x.start)
+
+            overall_confidence = result.get("overall_confidence", 0.8)
+            print(f"    Final review confidence: {overall_confidence:.0%}")
+
+            return final_spans, usage
+
+        except Exception as e:
+            print(f"    Final review failed: {e}")
+            return ad_spans, None
 
     def _llm_merge_candidates(
         self,
@@ -445,7 +1065,7 @@ class WorkerDaemon:
                     def run_gemini():
                         nonlocal gemini_candidates, gemini_usage, gemini_error, gemini_attempted
                         try:
-                            gemini_client = self._get_gemini_client()
+                            gemini_client = self._get_gemini_client(duration=duration)
                             if gemini_client:
                                 gemini_attempted = True  # Mark as attempted BEFORE call
                                 spans, usage = gemini_client.detect_ads(
@@ -461,6 +1081,7 @@ class WorkerDaemon:
                                         "confidence": s.confidence,
                                         "reason": s.reason,
                                         "source": "gemini",
+                                        "ad_type": s.ad_type,
                                     }
                                     for s in spans
                                 ]
@@ -540,10 +1161,11 @@ class WorkerDaemon:
 
                     # Validate Gemini candidates against transcript
                     # This catches hallucinated timestamps that don't contain ad content
+                    # Pre/post-roll dynamic ads are trusted; mid-roll needs keyword validation
                     if gemini_candidates and segments:
                         sponsor_names = [s.name for s in sponsor_info.sponsors] if sponsor_info and sponsor_info.sponsors else []
                         gemini_candidates, rejected = self._validate_gemini_candidates(
-                            gemini_candidates, segments, sponsor_names
+                            gemini_candidates, segments, sponsor_names, duration=duration
                         )
                         if rejected:
                             print(f"    Validated: {len(gemini_candidates)} Gemini candidates ({len(rejected)} rejected)")
@@ -578,7 +1200,50 @@ class WorkerDaemon:
                             )
                             detection_source = "parallel"
 
-                            # Track merge LLM cost (even if empty result or error)
+                            if ad_spans:
+                                ad_spans = self._verify_long_ad_spans(
+                                    ad_spans, segments, sponsor_info
+                                )
+
+                            print("  Validating sponsor coverage...")
+                            covered, missing, validation_info = self._validate_sponsor_coverage(
+                                ad_spans, segments, sponsor_info, duration
+                            )
+
+                            if missing and segments:
+                                print(f"  Hunting for {len(missing)} missing sponsors...")
+                                hunt_spans, hunt_usage = self._hunt_missing_sponsors(
+                                    segments, ad_spans, missing.copy(), sponsor_info, duration
+                                )
+                                if hunt_spans:
+                                    ad_spans.extend(hunt_spans)
+                                    ad_spans.sort(key=lambda x: x.start)
+                                    print(f"    Found {len(hunt_spans)} additional ads")
+                                if hunt_usage:
+                                    hunt_cost = self._calculate_llm_cost(
+                                        provider=hunt_usage.get("provider", "openai"),
+                                        model=hunt_usage.get("model", self.config.llm.model),
+                                        input_tokens=hunt_usage.get("input_tokens", 0),
+                                        output_tokens=hunt_usage.get("output_tokens", 0),
+                                    )
+                                    total_cost += hunt_cost
+                                    all_usages.append(hunt_usage)
+
+                            print("  Running final LLM review...")
+                            self.api_client.update_progress(job.id, "reviewing")
+                            ad_spans, review_usage = self._final_llm_review(
+                                ad_spans, segments, sponsor_info, duration, validation_info
+                            )
+                            if review_usage:
+                                review_cost = self._calculate_llm_cost(
+                                    provider=review_usage.get("provider", "openai"),
+                                    model=review_usage.get("model", self.config.llm.model),
+                                    input_tokens=review_usage.get("input_tokens", 0),
+                                    output_tokens=review_usage.get("output_tokens", 0),
+                                )
+                                total_cost += review_cost
+                                all_usages.append(review_usage)
+                                print(f"    Review cost: ${review_cost:.4f}")
                             if merge_usage:
                                 if "input_tokens" in merge_usage:
                                     merge_cost = self._calculate_llm_cost(
@@ -602,6 +1267,7 @@ class WorkerDaemon:
                                     reason=c["reason"],
                                     candidate_indices=[],
                                     sources=["gemini"],
+                                    ad_type=c.get("ad_type"),
                                 )
                                 for c in gemini_candidates
                             ]
@@ -629,7 +1295,7 @@ class WorkerDaemon:
 
                 # TIER 2b: Try Gemini audio detection (if no external transcript) - TIERED MODE
                 elif segments is None:
-                    gemini_client = self._get_gemini_client()
+                    gemini_client = self._get_gemini_client(duration=duration)
                     if gemini_client:
                         print("  Using Gemini audio detection...")
                         self.api_client.update_progress(job.id, "detecting")
