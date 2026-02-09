@@ -79,12 +79,12 @@ def load_config(path: str | None = None) -> Config:
         raise FileNotFoundError(f"Config file not found: {path}")
 
     try:
-        import tomli
+        import tomllib
+    except ModuleNotFoundError:
+        import tomli as tomllib  # type: ignore[no-redef]
 
-        with open(config_path, "rb") as f:
-            data = tomli.load(f)
-    except ImportError:
-        raise ImportError("tomli is required for config loading. Run: pip install tomli")
+    with open(config_path, "rb") as f:
+        data = tomllib.load(f)
 
     return _parse_config(data)
 
