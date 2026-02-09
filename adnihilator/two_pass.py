@@ -19,7 +19,7 @@ from .ad_llm import AdLLMClient
 from .audio import extract_audio_regions
 from .config import Config
 from .models import AdSpan, TranscriptSegment, WordTimestamp
-from .transcribe import transcribe_audio
+from .transcribe import transcribe_audio, transcribe_audio_parakeet
 
 
 def two_pass_detect(
@@ -33,6 +33,7 @@ def two_pass_detect(
     progress_callback: Callable[[int], None] | None = None,
     sponsors: "SponsorInfo | None" = None,
     podcast_name: str | None = None,
+    engine: str = "parakeet",
 ) -> tuple[list[TranscriptSegment], list[AdSpan]]:
     """Run two-pass ad detection for optimal speed/precision tradeoff.
 
@@ -51,16 +52,23 @@ def two_pass_detect(
     Returns:
         Tuple of (segments with word timestamps for ad regions, ad_spans).
     """
-    # Pass 1: Fast segment-level transcription
     print("  Pass 1: Segment-level transcription (fast)...")
-    segments = transcribe_audio(
-        audio_path,
-        model_name=model_name,
-        device=device,
-        word_timestamps=False,  # Fast mode
-        duration=duration,
-        progress_callback=progress_callback,
-    )
+    if engine == "parakeet":
+        segments = transcribe_audio_parakeet(
+            audio_path,
+            word_timestamps=False,
+            duration=duration,
+            progress_callback=progress_callback,
+        )
+    else:
+        segments = transcribe_audio(
+            audio_path,
+            model_name=model_name,
+            device=device,
+            word_timestamps=False,
+            duration=duration,
+            progress_callback=progress_callback,
+        )
 
     # Run keyword detection
     print("  Finding ad candidates...")
@@ -109,12 +117,18 @@ def two_pass_detect(
                 pass2_progress = int(100 + (idx / len(extracted)) * 100)  # 100-200%
                 progress_callback(min(pass2_progress, 200))
 
-            region_segments = transcribe_audio(
-                segment_path,
-                model_name=model_name,
-                device=device,
-                word_timestamps=True,
-            )
+            if engine == "parakeet":
+                region_segments = transcribe_audio_parakeet(
+                    segment_path,
+                    word_timestamps=True,
+                )
+            else:
+                region_segments = transcribe_audio(
+                    segment_path,
+                    model_name=model_name,
+                    device=device,
+                    word_timestamps=True,
+                )
 
             # Adjust timestamps to match original audio
             for seg in region_segments:

@@ -20,7 +20,7 @@ from adnihilator.external_transcript import fetch_external_transcript
 from adnihilator.models import AdSpan, DetectionResult
 from adnihilator.splice import splice_audio
 from adnihilator.sponsors import extract_sponsors
-from adnihilator.transcribe import transcribe_audio
+from adnihilator.transcribe import transcribe_audio, transcribe_audio_parakeet
 from adnihilator.two_pass import two_pass_detect
 
 from .client import WorkerClient, EpisodeJob
@@ -40,6 +40,7 @@ class WorkerDaemon:
         r2_endpoint: str,
         whisper_model: str = "small",
         device: str = "cpu",
+        engine: str = "parakeet",
         artifacts_dir: Optional[str] = None,
     ):
         """Initialize the worker daemon."""
@@ -49,6 +50,7 @@ class WorkerDaemon:
         )
         self.whisper_model = whisper_model
         self.device = device
+        self.engine = engine
 
         # Load config from adnihilator.toml if it exists, otherwise use defaults
         config_path = Path("adnihilator.toml")
@@ -126,17 +128,17 @@ class WorkerDaemon:
                 "gpt-4o": {"input": 2.50 / 1_000_000, "output": 10.00 / 1_000_000},
             },
             "gemini": {
-                "gemini-2.0-flash-exp": {
-                    "input": 0.075 / 1_000_000,
-                    "output": 0.30 / 1_000_000,
+                "gemini-2.5-flash": {
+                    "input": 0.15 / 1_000_000,
+                    "output": 0.60 / 1_000_000,
                     "audio": 0.000025,  # Per second of audio
                 },
             },
             # Chunked Gemini uses same model pricing
             "gemini_chunked": {
-                "gemini-2.0-flash-exp": {
-                    "input": 0.075 / 1_000_000,
-                    "output": 0.30 / 1_000_000,
+                "gemini-2.5-flash": {
+                    "input": 0.15 / 1_000_000,
+                    "output": 0.60 / 1_000_000,
                     "audio": 0.000025,  # Per second of audio
                 },
             },
@@ -1094,20 +1096,26 @@ If in doubt, keep the ad (it's safer to remove a questionable segment than leave
                         try:
                             # Use existing external transcript if available
                             if segments is None:
-                                # Need to transcribe
-                                print("    Transcribing with Whisper...")
-
                                 def on_transcribe_progress(percent: int) -> None:
                                     self.api_client.update_progress(job.id, "transcribing", percent)
 
-                                segments = transcribe_audio(
-                                    str(audio_path),
-                                    model_name=self.whisper_model,
-                                    device=self.device,
-                                    duration=duration,
-                                    progress_callback=on_transcribe_progress,
-                                )
-                                transcript_source = "whisper"
+                                if self.engine == "parakeet":
+                                    print("    Transcribing with Parakeet (MLX)...")
+                                    segments = transcribe_audio_parakeet(
+                                        str(audio_path),
+                                        duration=duration,
+                                        progress_callback=on_transcribe_progress,
+                                    )
+                                else:
+                                    print("    Transcribing with Whisper...")
+                                    segments = transcribe_audio(
+                                        str(audio_path),
+                                        model_name=self.whisper_model,
+                                        device=self.device,
+                                        duration=duration,
+                                        progress_callback=on_transcribe_progress,
+                                    )
+                                transcript_source = self.engine
 
                             # Find keyword candidates
                             cands = find_ad_candidates(
@@ -1361,23 +1369,31 @@ If in doubt, keep the ad (it's safer to remove a questionable segment than leave
                             progress_callback=on_transcribe_progress,
                             sponsors=sponsor_info,
                             podcast_name=job.podcast_title,
+                            engine=self.engine,
                         )
                         print(f"    Two-pass complete: {len(segments)} segments, {len(ad_spans)} ads detected")
                     else:
-                        # Single-pass mode (full word-level transcription)
-                        print("  Transcribing with Whisper...")
                         self.api_client.update_progress(job.id, "transcribing", 0)
 
                         def on_transcribe_progress(percent: int) -> None:
                             self.api_client.update_progress(job.id, "transcribing", percent)
 
-                        segments = transcribe_audio(
-                            str(audio_path),
-                            model_name=self.whisper_model,
-                            device=self.device,
-                            duration=duration,
-                            progress_callback=on_transcribe_progress,
-                        )
+                        if self.engine == "parakeet":
+                            print("  Transcribing with Parakeet (MLX)...")
+                            segments = transcribe_audio_parakeet(
+                                str(audio_path),
+                                duration=duration,
+                                progress_callback=on_transcribe_progress,
+                            )
+                        else:
+                            print("  Transcribing with Whisper...")
+                            segments = transcribe_audio(
+                                str(audio_path),
+                                model_name=self.whisper_model,
+                                device=self.device,
+                                duration=duration,
+                                progress_callback=on_transcribe_progress,
+                            )
 
                 # Save transcript if we have one (before any further processing)
                 if segments and self.artifacts_dir:
@@ -1414,12 +1430,14 @@ If in doubt, keep the ad (it's safer to remove a questionable segment than leave
             if self.artifacts_dir:
                 print("  Saving detection result...")
                 model_info = {
+                    "engine": self.engine,
                     "transcript_source": transcript_source,
                     "llm_provider": self.config.llm.provider,
                     "detection_source": detection_source,
                 }
-                # Only include whisper details if we used whisper
-                if transcript_source == "whisper":
+                if self.engine == "parakeet":
+                    model_info["parakeet_model"] = "mlx-community/parakeet-tdt-0.6b-v3"
+                elif transcript_source == "whisper":
                     model_info["whisper_model"] = self.whisper_model
                     model_info["device"] = self.device
                 # Store raw Gemini candidates for debugging (before validation)

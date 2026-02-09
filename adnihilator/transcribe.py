@@ -183,6 +183,93 @@ def transcribe_audio(
         raise TranscriptionError(f"Transcription failed: {e}")
 
 
+def transcribe_audio_parakeet(
+    path: str,
+    model_name: str = "mlx-community/parakeet-tdt-0.6b-v3",
+    word_timestamps: bool = True,
+    chunk_duration: float = 120.0,
+    overlap_duration: float = 15.0,
+    duration: Optional[float] = None,
+    progress_callback: Optional[ProgressCallback] = None,
+) -> list[TranscriptSegment]:
+    """Transcribe an audio file using parakeet-mlx (Apple Silicon optimized).
+
+    Uses NVIDIA's Parakeet TDT model via the MLX framework for fast
+    transcription on Apple Silicon Macs.
+
+    Args:
+        path: Path to the audio file.
+        model_name: HuggingFace model repo for the parakeet MLX model.
+        word_timestamps: Whether to include word-level timestamps.
+        chunk_duration: Duration in seconds for chunking long audio.
+        overlap_duration: Overlap in seconds between chunks.
+        duration: Total audio duration in seconds (for progress estimation).
+        progress_callback: Optional callback called with progress percentage (0-100).
+
+    Returns:
+        List of TranscriptSegment objects.
+
+    Raises:
+        TranscriptionError: If transcription fails.
+    """
+    try:
+        from parakeet_mlx import from_pretrained
+    except ImportError:
+        raise TranscriptionError(
+            "parakeet-mlx is not installed. Run: pip install parakeet-mlx"
+        )
+
+    audio_path = Path(path)
+    if not audio_path.exists():
+        raise TranscriptionError(f"Audio file not found: {path}")
+
+    try:
+        if progress_callback:
+            progress_callback(0)
+
+        model = from_pretrained(model_name)
+        result = model.transcribe(
+            str(audio_path),
+            chunk_duration=chunk_duration,
+            overlap_duration=overlap_duration,
+        )
+
+        segments: list[TranscriptSegment] = []
+        for idx, sentence in enumerate(result.sentences):
+            words = None
+            if word_timestamps and sentence.tokens:
+                words = [
+                    WordTimestamp(
+                        word=token.text,
+                        start=token.start,
+                        end=token.end,
+                        probability=1.0,
+                    )
+                    for token in sentence.tokens
+                    if token.text.strip()
+                ]
+
+            segments.append(
+                TranscriptSegment(
+                    index=idx,
+                    start=sentence.start,
+                    end=sentence.end,
+                    text=sentence.text.strip(),
+                    words=words,
+                )
+            )
+
+        if progress_callback:
+            progress_callback(100)
+
+        return segments
+
+    except TranscriptionError:
+        raise
+    except Exception as e:
+        raise TranscriptionError(f"Parakeet transcription failed: {e}")
+
+
 def transcribe_audio_regions(
     path: str,
     regions: list[tuple[float, float]],

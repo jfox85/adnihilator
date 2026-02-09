@@ -19,7 +19,7 @@ dependencies = [
     "pydantic>=2.0.0",
     "tomli>=2.0.0",
     "openai>=1.0.0",
-    "numpy<2.0.0",
+    "numpy",
     # Web service
     "fastapi>=0.104.0",
     "uvicorn[standard]>=0.24.0",
@@ -34,6 +34,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+parakeet = [
+    "parakeet-mlx>=0.4.0",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",

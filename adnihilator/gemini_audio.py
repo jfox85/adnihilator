@@ -19,12 +19,12 @@ logger = logging.getLogger(__name__)
 class GeminiAudioClient:
     """Client for Gemini audio-based ad detection."""
 
-    def __init__(self, api_key: str, model: str = "gemini-2.0-flash-exp"):
+    def __init__(self, api_key: str, model: str = "gemini-2.5-flash"):
         """Initialize the Gemini client.
 
         Args:
             api_key: Gemini API key
-            model: Model name (default: gemini-2.0-flash-exp)
+            model: Model name (default: gemini-2.5-flash)
         """
         self.api_key = api_key
         self.model = model

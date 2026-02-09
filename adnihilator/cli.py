@@ -20,7 +20,12 @@ from .config import Config, load_config
 from .models import DetectionResult
 from .splice import SpliceError, splice_audio
 from .transcript import generate_marked_transcript, generate_summary
-from .transcribe import TranscriptionError, download_model as dl_model, transcribe_audio
+from .transcribe import (
+    TranscriptionError,
+    download_model as dl_model,
+    transcribe_audio,
+    transcribe_audio_parakeet,
+)
 from .two_pass import two_pass_detect
 
 app = typer.Typer(
@@ -56,6 +61,10 @@ def detect(
         str,
         typer.Option("--llm-provider", "-l", help="LLM provider (none or openai)"),
     ] = "none",
+    engine: Annotated[
+        str,
+        typer.Option("--engine", "-e", help="Transcription engine (parakeet or whisper)"),
+    ] = "parakeet",
     two_pass: Annotated[
         bool,
         typer.Option("--two-pass", help="Use two-pass mode: fast segment transcription + targeted word timestamps"),
@@ -65,6 +74,9 @@ def detect(
     ] = None,
 ) -> None:
     """Detect advertisements in a podcast audio file."""
+    if engine not in ("whisper", "parakeet"):
+        typer.echo(f"Error: Unknown engine '{engine}'. Choose 'whisper' or 'parakeet'.", err=True)
+        raise typer.Exit(1)
     # Validate input file
     try:
         validate_audio_file(str(input_mp3))
@@ -98,7 +110,6 @@ def detect(
         typer.echo("Warning: Two-pass mode works best with LLM enabled. Consider using --llm-provider openai")
 
     if two_pass:
-        # Use two-pass optimization
         typer.echo("Using two-pass mode (segment-level + targeted word timestamps)...")
         try:
             llm_client = create_llm_client(config)
@@ -109,6 +120,7 @@ def detect(
                 duration=duration,
                 model_name=whisper_model,
                 device=device,
+                engine=engine,
             )
             # Reconstruct candidates from spans for compatibility
             candidates = find_ad_candidates(segments, duration)
@@ -116,14 +128,22 @@ def detect(
             typer.echo(f"Error: {e}", err=True)
             raise typer.Exit(1)
     else:
-        # Original single-pass mode
-        # Transcribe
-        typer.echo(f"Transcribing with Whisper ({whisper_model})...")
-        try:
-            segments = transcribe_audio(str(input_mp3), whisper_model, device)
-        except TranscriptionError as e:
-            typer.echo(f"Error: {e}", err=True)
-            raise typer.Exit(1)
+        if engine == "parakeet":
+            typer.echo("Transcribing with Parakeet (MLX)...")
+            try:
+                segments = transcribe_audio_parakeet(
+                    str(input_mp3), duration=duration,
+                )
+            except TranscriptionError as e:
+                typer.echo(f"Error: {e}", err=True)
+                raise typer.Exit(1)
+        else:
+            typer.echo(f"Transcribing with Whisper ({whisper_model})...")
+            try:
+                segments = transcribe_audio(str(input_mp3), whisper_model, device)
+            except TranscriptionError as e:
+                typer.echo(f"Error: {e}", err=True)
+                raise typer.Exit(1)
 
         typer.echo(f"Segments: {len(segments)}")
 
@@ -151,7 +171,9 @@ def detect(
         candidates=candidates,
         ad_spans=ad_spans,
         model_info={
-            "whisper_model": whisper_model,
+            "engine": engine,
+            **({"whisper_model": whisper_model} if engine == "whisper" else {}),
+            **({"parakeet_model": "mlx-community/parakeet-tdt-0.6b-v3"} if engine == "parakeet" else {}),
             "llm_provider": config.llm.provider,
             "llm_model": config.llm.model if config.llm.provider != "none" else None,
             "two_pass": two_pass,
