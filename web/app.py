@@ -152,6 +152,16 @@ async def queue_page(
         .all()
     )
 
+    # Get recently failed episodes (last 10)
+    recent_failed = (
+        db.query(Episode, Podcast)
+        .join(Podcast, Episode.podcast_id == Podcast.id)
+        .filter(Episode.status == EpisodeStatus.FAILED.value)
+        .order_by(Episode.updated_at.desc())
+        .limit(10)
+        .all()
+    )
+
     return templates.TemplateResponse(
         request,
         "queue.html",
@@ -159,5 +169,6 @@ async def queue_page(
             "title": "Queue",
             "episodes": episodes,
             "recent_completed": recent_completed,
+            "recent_failed": recent_failed,
         },
     )

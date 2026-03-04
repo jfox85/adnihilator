@@ -38,6 +38,41 @@
     {% endif %}
 </div>
 
+{% if recent_failed %}
+<div class="card">
+    <h2>Recently Failed</h2>
+    <div class="failed-list">
+        {% for episode, podcast in recent_failed %}
+        <div class="failed-item" data-episode-id="{{ episode.id }}" data-podcast-id="{{ podcast.id }}">
+            <a href="/podcasts/{{ podcast.id }}/episodes" class="failed-artwork-link">
+                {% if podcast.artwork_url %}
+                <img src="{{ podcast.artwork_url }}" alt="{{ podcast.title }}" class="failed-item-artwork">
+                {% else %}
+                <div class="failed-item-artwork-placeholder"></div>
+                {% endif %}
+            </a>
+            <div class="failed-item-info">
+                <span class="failed-item-podcast">{{ podcast.title or "Untitled Podcast" }}</span>
+                <span class="failed-item-title">{{ episode.title or "Untitled Episode" }}</span>
+                <div class="failed-item-meta">
+                    <span class="status-badge status-failed">failed</span>
+                    {% if episode.updated_at %}
+                    <span class="failed-time">{{ episode.updated_at|relative_time }}</span>
+                    {% endif %}
+                    {% if episode.error_message %}
+                    <span class="failed-error" title="{{ episode.error_message }}">{{ episode.error_message[:80] }}{% if episode.error_message|length > 80 %}…{% endif %}</span>
+                    {% endif %}
+                </div>
+            </div>
+            <div class="failed-item-actions">
+                <button onclick="retryEpisode('{{ podcast.id }}', '{{ episode.id }}')" class="btn-retry">Retry</button>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+
 <div class="card">
     <h2>Recently Processed</h2>
     {% if recent_completed %}
@@ -97,6 +132,22 @@ async function skipEpisode(podcastId, episodeId) {
         }
     } else {
         alert('Failed to skip episode');
+    }
+}
+
+async function retryEpisode(podcastId, episodeId) {
+    const response = await fetch(`/podcasts/${podcastId}/episodes/${episodeId}/queue`, { method: 'POST' });
+    if (response.ok) {
+        const item = document.querySelector(`.failed-item[data-episode-id="${episodeId}"]`);
+        if (item) item.remove();
+        const remaining = document.querySelectorAll('.failed-item');
+        if (remaining.length === 0) {
+            const card = document.querySelector('.failed-list')?.closest('.card');
+            if (card) card.remove();
+        }
+        location.reload();
+    } else {
+        alert('Failed to re-queue episode');
     }
 }
 
@@ -361,18 +412,106 @@ setInterval(updateStatuses, 3000);
     cursor: help;
 }
 
+.failed-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+.failed-item {
+    display: flex;
+    align-items: center;
+    background: var(--bg-card-hover);
+    padding: 0.75rem;
+    border-radius: 6px;
+    border: 1px solid #dc354533;
+    gap: 1rem;
+}
+.failed-item:hover {
+    background: var(--bg-hover);
+}
+.failed-artwork-link {
+    flex-shrink: 0;
+}
+.failed-item-artwork {
+    width: 40px;
+    height: 40px;
+    object-fit: cover;
+    border-radius: 4px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+}
+.failed-item-artwork-placeholder {
+    width: 40px;
+    height: 40px;
+    background: linear-gradient(135deg, var(--border-color) 0%, var(--bg-card-hover) 100%);
+    border-radius: 4px;
+}
+.failed-item-info {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+}
+.failed-item-podcast {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+.failed-item-title {
+    font-weight: 500;
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.failed-item-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    font-size: 0.75rem;
+}
+.status-failed {
+    background: #f8d7da;
+    color: #721c24;
+}
+.failed-time {
+    color: var(--text-muted);
+}
+.failed-error {
+    color: #dc3545;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 300px;
+    cursor: help;
+}
+.failed-item-actions {
+    flex-shrink: 0;
+}
+.btn-retry {
+    background: #dc3545;
+    font-size: 0.85rem;
+    padding: 0.4rem 0.8rem;
+}
+.btn-retry:hover {
+    background: #c82333;
+}
+
 @media (max-width: 600px) {
-    .queue-item {
+    .queue-item, .failed-item {
         flex-wrap: wrap;
     }
-    .queue-item-info {
+    .queue-item-info, .failed-item-info {
         flex-basis: calc(100% - 64px);
     }
-    .queue-item-actions {
+    .queue-item-actions, .failed-item-actions {
         width: 100%;
         display: flex;
         justify-content: flex-end;
         margin-top: 0.5rem;
+    }
+    .failed-error {
+        max-width: 200px;
     }
 }
 </style>
