@@ -7,11 +7,18 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Request
-from fastapi.responses import HTMLResponse
+from fastapi import Depends, FastAPI, Form, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from .auth import security, verify_admin
+from .auth import (
+    LoginRequiredError,
+    SESSION_COOKIE,
+    SESSION_MAX_AGE,
+    check_credentials,
+    create_session_token,
+    verify_admin,
+)
 from .database import get_engine, init_db, get_session_factory
 from .dependencies import get_db
 from .routes import podcasts, api, feeds, opml
@@ -92,11 +99,56 @@ app.include_router(feeds.router)
 app.include_router(opml.router)
 
 
+@app.exception_handler(LoginRequiredError)
+async def login_redirect_handler(request: Request, exc: LoginRequiredError):
+    return RedirectResponse(url=f"/login?next={exc.next_url}", status_code=303)
+
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
     return {"status": "ok"}
 
+
+@app.get("/login", response_class=HTMLResponse)
+async def login_page(request: Request, next: str = "/"):
+    return templates.TemplateResponse(
+        request,
+        "login.html",
+        {"title": "Login", "next": next},
+    )
+
+
+@app.post("/login")
+async def login_submit(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+    next: str = Form("/"),
+):
+    if not check_credentials(username, password):
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            {"title": "Login", "next": next, "error": "Invalid credentials"},
+            status_code=401,
+        )
+    response = RedirectResponse(url=next, status_code=303)
+    response.set_cookie(
+        SESSION_COOKIE,
+        create_session_token(),
+        max_age=SESSION_MAX_AGE,
+        httponly=True,
+        samesite="lax",
+    )
+    return response
+
+
+@app.get("/logout")
+async def logout():
+    response = RedirectResponse(url="/login", status_code=303)
+    response.delete_cookie(SESSION_COOKIE)
+    return response
 
 @app.get("/", response_class=HTMLResponse)
 async def index(
