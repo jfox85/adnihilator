@@ -235,7 +235,7 @@ def test_fail_episode_max_retries(client):
     assert episode_data["error_message"] == "Final failure"
 
 
-def _create_processing_episode(podcast_id, guid, claimed_at):
+def _create_processing_episode(podcast_id, guid, claimed_at, retry_count=0):
     """Create an episode in 'processing' with an explicit claimed_at timestamp."""
     from web.dependencies import SessionFactory
     from web.models import Episode
@@ -249,6 +249,7 @@ def _create_processing_episode(podcast_id, guid, claimed_at):
             original_audio_url=f"https://example.com/{guid}.mp3",
             status=EpisodeStatus.PROCESSING.value,
             claimed_at=claimed_at,
+            retry_count=retry_count,
         )
         db.add(episode)
         db.commit()
@@ -278,9 +279,10 @@ def test_claim_requeues_stuck_episode(client):
     assert data["id"] == episode_id
     assert data["status"] == EpisodeStatus.PROCESSING.value
 
-    # Re-claimed, so it gets a fresh claimed_at.
+    # Re-claimed, so it gets a fresh claimed_at and consumes a retry.
     episode_data = get_episode_from_db(episode_id)
     assert episode_data["claimed_at"] is not None
+    assert episode_data["retry_count"] == 1
 
 
 def test_claim_ignores_recent_processing_episode(client):
@@ -320,3 +322,53 @@ def test_requeue_stuck_timeout_is_configurable(client, monkeypatch):
     )
     assert response.status_code == 200
     assert response.json()["id"] == episode_id
+
+
+def test_stuck_episode_fails_after_max_retries(client):
+    """A repeatedly orphaned episode is marked failed instead of looping forever."""
+    podcast_id = create_test_podcast(client)
+    episode_id = _create_processing_episode(
+        podcast_id,
+        "poison-episode",
+        claimed_at=datetime.utcnow() - timedelta(hours=3),
+        retry_count=2,  # already at MAX_RETRIES
+    )
+
+    response = client.post(
+        "/api/queue/claim",
+        headers={"X-Worker-API-Key": "test-worker-key"},
+    )
+    assert response.status_code == 200
+    # Nothing claimable: the poison job is failed, not requeued.
+    assert response.json() is None
+
+    episode_data = get_episode_from_db(episode_id)
+    assert episode_data["status"] == EpisodeStatus.FAILED.value
+    assert episode_data["error_message"] is not None
+
+
+def test_progress_renews_claim_lease(client):
+    """A progress update refreshes claimed_at so the job is not later reclaimed."""
+    podcast_id = create_test_podcast(client)
+    stale = datetime.utcnow() - timedelta(hours=3)
+    episode_id = _create_processing_episode(
+        podcast_id, "heartbeat-episode", claimed_at=stale
+    )
+
+    response = client.post(
+        f"/api/queue/{episode_id}/progress",
+        headers={"X-Worker-API-Key": "test-worker-key"},
+        json={"step": "transcribing", "percent": 40},
+    )
+    assert response.status_code == 200
+
+    episode_data = get_episode_from_db(episode_id)
+    assert episode_data["claimed_at"] > stale
+
+    # Recovery should now treat it as alive and leave it processing.
+    claim = client.post(
+        "/api/queue/claim",
+        headers={"X-Worker-API-Key": "test-worker-key"},
+    )
+    assert claim.json() is None
+    assert get_episode_from_db(episode_id)["status"] == EpisodeStatus.PROCESSING.value

@@ -14,6 +14,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
@@ -85,6 +86,10 @@ class Episode(Base):
             "status IN ('pending', 'processing', 'complete', 'failed', 'skipped', 'expired')",
             name="ck_episode_status",
         ),
+        # Claim path: select oldest pending episode.
+        Index("ix_episodes_status_created_at", "status", "created_at"),
+        # Stuck-job recovery: find stale processing episodes by claimed_at.
+        Index("ix_episodes_status_claimed_at", "status", "claimed_at"),
     )
 
     id: Mapped[str] = mapped_column(

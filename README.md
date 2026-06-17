@@ -193,6 +193,8 @@ export ADMIN_PASSWORD="your-password"
 export WORKER_API_KEY="your-worker-secret"
 export DATABASE_PATH="data/adnihilator.db"
 export R2_PUBLIC_URL="https://pub-xxxxx.r2.dev"
+# Optional: stuck-job recovery timeout in seconds (default 7200 = 2h)
+export WORKER_STUCK_TIMEOUT_SECONDS="7200"
 
 # Run with uvicorn
 uvicorn web.app:app --host 0.0.0.0 --port 8001 --workers 2

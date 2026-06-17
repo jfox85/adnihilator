@@ -84,6 +84,8 @@ Worker requires: `API_URL`, `WORKER_API_KEY`, `R2_ACCESS_KEY`, `R2_SECRET_KEY`, 
 
 Web service requires: `ADMIN_USERNAME`, `ADMIN_PASSWORD`, `WORKER_API_KEY`, `DATABASE_PATH`, `R2_PUBLIC_URL`
 
+Web service optional: `WORKER_STUCK_TIMEOUT_SECONDS` (default 7200) — seconds a claimed job may stay in `processing` without progress before it is auto-recovered.
+
 ## OpenMP Fix
 
 macOS requires `KMP_DUPLICATE_LIB_OK=TRUE` before importing faster-whisper (set in cli.py).
