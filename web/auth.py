@@ -8,7 +8,6 @@ import time
 
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 
 class LoginRequiredError(Exception):
