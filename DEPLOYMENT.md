@@ -170,3 +170,19 @@ ssh root@jonefox.com "sqlite3 /opt/adnihilator/data/adnihilator.db \
 ssh root@jonefox.com "sqlite3 /opt/adnihilator/data/adnihilator.db \
   'SELECT COUNT(*), status FROM episodes GROUP BY status'"
 ```
+
+## Stuck Job Recovery
+
+Episodes are claimed by setting `status='processing'`. If a worker dies mid-job
+(e.g. the 12h watchdog restart), the episode is orphaned in `processing` and the
+queue looks empty even though work is waiting.
+
+The web service self-heals this: on every `/api/queue/claim`, episodes stuck in
+`processing` with a `claimed_at` older than the timeout are reset to `pending`
+so they get reprocessed automatically.
+
+- Default timeout: 2 hours.
+- Override with the `WORKER_STUCK_TIMEOUT_SECONDS` env var on the web service
+  (set in `/etc/adnihilator/env`, then `systemctl restart adnihilator`).
+
+Manual reset is still available via the "Reset an episode to pending" query above.

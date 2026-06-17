@@ -1,6 +1,7 @@
 """Worker API routes."""
 
-from datetime import datetime
+import os
+from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -14,6 +15,54 @@ from ..models import Episode, EpisodeStatus
 router = APIRouter(prefix="/api", tags=["worker"])
 
 MAX_RETRIES = 2
+
+# Episodes stuck in 'processing' longer than this are assumed to be from a
+# worker that died mid-job (e.g. watchdog restart) and are requeued on claim.
+DEFAULT_STUCK_TIMEOUT_SECONDS = 7200  # 2 hours
+
+
+def _stuck_timeout_seconds() -> int:
+    """Read the stuck-job timeout from the environment, falling back to default."""
+    raw = os.getenv("WORKER_STUCK_TIMEOUT_SECONDS")
+    if not raw:
+        return DEFAULT_STUCK_TIMEOUT_SECONDS
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_STUCK_TIMEOUT_SECONDS
+    return value if value > 0 else DEFAULT_STUCK_TIMEOUT_SECONDS
+
+
+def requeue_stuck_episodes(db: Session) -> int:
+    """Reset episodes stuck in 'processing' back to 'pending' for reprocessing.
+
+    An episode is considered stuck when it has been in 'processing' with a
+    ``claimed_at`` older than the configured timeout. This recovers jobs that
+    were claimed by a worker that died before completing or failing them.
+
+    Returns the number of episodes that were requeued.
+    """
+    cutoff = datetime.utcnow() - timedelta(seconds=_stuck_timeout_seconds())
+    stuck = (
+        db.query(Episode)
+        .filter(
+            Episode.status == EpisodeStatus.PROCESSING.value,
+            Episode.claimed_at.isnot(None),
+            Episode.claimed_at < cutoff,
+        )
+        .all()
+    )
+
+    for episode in stuck:
+        episode.status = EpisodeStatus.PENDING.value
+        episode.claimed_at = None
+        episode.progress_step = None
+        episode.progress_percent = None
+
+    if stuck:
+        db.commit()
+
+    return len(stuck)
 
 
 def get_worker_auth(x_worker_api_key: str = Header(...)):
@@ -61,6 +110,10 @@ async def claim_episode(
 
     Returns the episode data if one was claimed, or None if queue is empty.
     """
+    # Recover jobs orphaned by a worker that died mid-processing so they
+    # become claimable again instead of blocking the queue indefinitely.
+    requeue_stuck_episodes(db)
+
     # Atomic update: find and claim in one query
     episode = (
         db.query(Episode)

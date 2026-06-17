@@ -1,5 +1,7 @@
 """Tests for worker API routes."""
 
+from datetime import datetime, timedelta
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -231,3 +233,90 @@ def test_fail_episode_max_retries(client):
     episode_data = get_episode_from_db(episode_id)
     assert episode_data["status"] == EpisodeStatus.FAILED.value
     assert episode_data["error_message"] == "Final failure"
+
+
+def _create_processing_episode(podcast_id, guid, claimed_at):
+    """Create an episode in 'processing' with an explicit claimed_at timestamp."""
+    from web.dependencies import SessionFactory
+    from web.models import Episode
+
+    db = SessionFactory()
+    try:
+        episode = Episode(
+            podcast_id=podcast_id,
+            guid=guid,
+            title=f"Episode {guid}",
+            original_audio_url=f"https://example.com/{guid}.mp3",
+            status=EpisodeStatus.PROCESSING.value,
+            claimed_at=claimed_at,
+        )
+        db.add(episode)
+        db.commit()
+        db.refresh(episode)
+        return episode.id
+    finally:
+        db.close()
+
+
+def test_claim_requeues_stuck_episode(client):
+    """A stale 'processing' episode is requeued and then claimed."""
+    podcast_id = create_test_podcast(client)
+    episode_id = _create_processing_episode(
+        podcast_id,
+        "stuck-episode",
+        claimed_at=datetime.utcnow() - timedelta(hours=3),
+    )
+
+    response = client.post(
+        "/api/queue/claim",
+        headers={"X-Worker-API-Key": "test-worker-key"},
+    )
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data is not None
+    assert data["id"] == episode_id
+    assert data["status"] == EpisodeStatus.PROCESSING.value
+
+    # Re-claimed, so it gets a fresh claimed_at.
+    episode_data = get_episode_from_db(episode_id)
+    assert episode_data["claimed_at"] is not None
+
+
+def test_claim_ignores_recent_processing_episode(client):
+    """A recently claimed 'processing' episode is left alone."""
+    podcast_id = create_test_podcast(client)
+    episode_id = _create_processing_episode(
+        podcast_id,
+        "in-progress-episode",
+        claimed_at=datetime.utcnow() - timedelta(minutes=1),
+    )
+
+    response = client.post(
+        "/api/queue/claim",
+        headers={"X-Worker-API-Key": "test-worker-key"},
+    )
+    assert response.status_code == 200
+    # Nothing pending and the active job is not stolen.
+    assert response.json() is None
+
+    episode_data = get_episode_from_db(episode_id)
+    assert episode_data["status"] == EpisodeStatus.PROCESSING.value
+
+
+def test_requeue_stuck_timeout_is_configurable(client, monkeypatch):
+    """WORKER_STUCK_TIMEOUT_SECONDS controls the staleness threshold."""
+    monkeypatch.setenv("WORKER_STUCK_TIMEOUT_SECONDS", "60")
+    podcast_id = create_test_podcast(client)
+    episode_id = _create_processing_episode(
+        podcast_id,
+        "short-timeout-episode",
+        claimed_at=datetime.utcnow() - timedelta(minutes=5),
+    )
+
+    response = client.post(
+        "/api/queue/claim",
+        headers={"X-Worker-API-Key": "test-worker-key"},
+    )
+    assert response.status_code == 200
+    assert response.json()["id"] == episode_id
