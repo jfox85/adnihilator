@@ -40,6 +40,9 @@ ADMIN_PASSWORD=<generate-strong-password>
 WORKER_API_KEY=<generate-random-key>
 DATABASE_PATH=/var/lib/adnihilator/adnihilator.db
 R2_PUBLIC_URL=https://your-bucket.r2.dev
+# Optional: seconds a claimed job may stay in 'processing' (no progress)
+# before it is automatically recovered. Default 7200 (2h).
+#WORKER_STUCK_TIMEOUT_SECONDS=7200
 ```
 
 Secure the file:

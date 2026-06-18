@@ -1,6 +1,8 @@
 """Worker API routes."""
 
-from datetime import datetime
+import logging
+import os
+from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -11,9 +13,91 @@ from ..app import get_db
 from ..auth import verify_worker_api_key
 from ..models import Episode, EpisodeStatus
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api", tags=["worker"])
 
 MAX_RETRIES = 2
+
+# Episodes stuck in 'processing' longer than this are assumed to be from a
+# worker that died mid-job (e.g. watchdog restart) and are recovered on claim.
+DEFAULT_STUCK_TIMEOUT_SECONDS = 7200  # 2 hours
+# Upper bound so a misconfigured env value cannot overflow timedelta or
+# effectively disable recovery (30 days).
+MAX_STUCK_TIMEOUT_SECONDS = 30 * 24 * 3600
+
+
+def _stuck_timeout_seconds() -> int:
+    """Read the stuck-job timeout from the environment, falling back to default.
+
+    Invalid, non-positive, or out-of-range values are rejected (with a warning)
+    in favour of the default so a misconfiguration cannot break claim handling.
+    """
+    raw = os.getenv("WORKER_STUCK_TIMEOUT_SECONDS")
+    if not raw:
+        return DEFAULT_STUCK_TIMEOUT_SECONDS
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            "Invalid WORKER_STUCK_TIMEOUT_SECONDS=%r, using default %ds",
+            raw,
+            DEFAULT_STUCK_TIMEOUT_SECONDS,
+        )
+        return DEFAULT_STUCK_TIMEOUT_SECONDS
+    if value <= 0 or value > MAX_STUCK_TIMEOUT_SECONDS:
+        logger.warning(
+            "WORKER_STUCK_TIMEOUT_SECONDS=%d out of range (1..%d), using default %ds",
+            value,
+            MAX_STUCK_TIMEOUT_SECONDS,
+            DEFAULT_STUCK_TIMEOUT_SECONDS,
+        )
+        return DEFAULT_STUCK_TIMEOUT_SECONDS
+    return value
+
+
+def requeue_stuck_episodes(db: Session) -> int:
+    """Recover episodes stuck in 'processing' so the queue is not blocked.
+
+    An episode is considered stuck when it has been in 'processing' with a
+    ``claimed_at`` older than the configured timeout. ``claimed_at`` is renewed
+    on every progress update, so a stale value means the worker that claimed it
+    died before completing or failing the job.
+
+    Recovery consumes the retry budget like an explicit failure: each stuck
+    episode has its ``retry_count`` incremented and is returned to 'pending'
+    while under ``MAX_RETRIES``, or marked permanently 'failed' once exhausted.
+    This prevents a poison episode that repeatedly crashes the worker from
+    being requeued forever.
+
+    Returns the number of episodes that were recovered.
+    """
+    cutoff = datetime.utcnow() - timedelta(seconds=_stuck_timeout_seconds())
+    stuck = (
+        db.query(Episode)
+        .filter(
+            Episode.status == EpisodeStatus.PROCESSING.value,
+            Episode.claimed_at.isnot(None),
+            Episode.claimed_at < cutoff,
+        )
+        .all()
+    )
+
+    for episode in stuck:
+        episode.claimed_at = None
+        episode.progress_step = None
+        episode.progress_percent = None
+        episode.error_message = "Reclaimed: worker stopped responding while processing"
+        if episode.retry_count < MAX_RETRIES:
+            episode.retry_count += 1
+            episode.status = EpisodeStatus.PENDING.value
+        else:
+            episode.status = EpisodeStatus.FAILED.value
+
+    if stuck:
+        db.commit()
+
+    return len(stuck)
 
 
 def get_worker_auth(x_worker_api_key: str = Header(...)):
@@ -61,6 +145,10 @@ async def claim_episode(
 
     Returns the episode data if one was claimed, or None if queue is empty.
     """
+    # Recover jobs orphaned by a worker that died mid-processing so they
+    # become claimable again instead of blocking the queue indefinitely.
+    requeue_stuck_episodes(db)
+
     # Atomic update: find and claim in one query
     episode = (
         db.query(Episode)
@@ -182,6 +270,9 @@ async def update_progress(
 
     episode.progress_step = request.step
     episode.progress_percent = request.percent
+    # Renew the claim lease: a job that is still reporting progress is alive,
+    # so refresh claimed_at to keep stuck-job recovery from requeueing it.
+    episode.claimed_at = datetime.utcnow()
     db.commit()
 
     return {"status": "updated"}

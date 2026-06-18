@@ -170,3 +170,38 @@ ssh root@jonefox.com "sqlite3 /opt/adnihilator/data/adnihilator.db \
 ssh root@jonefox.com "sqlite3 /opt/adnihilator/data/adnihilator.db \
   'SELECT COUNT(*), status FROM episodes GROUP BY status'"
 ```
+
+## Stuck Job Recovery
+
+Episodes are claimed by setting `status='processing'`. If a worker dies mid-job
+(e.g. the 12h watchdog restart), the episode is orphaned in `processing` and the
+queue looks empty even though work is waiting.
+
+The web service self-heals this: on every `/api/queue/claim`, episodes stuck in
+`processing` whose `claimed_at` is older than the timeout are recovered.
+
+- `claimed_at` is treated as a renewable lease: every worker progress update
+  refreshes it, so a job is only considered stuck once it stops reporting
+  progress for longer than the timeout. Healthy long-running jobs are not
+  reclaimed.
+- Recovery consumes the retry budget like a failure: each stuck episode's
+  `retry_count` is incremented and it returns to `pending` while under
+  `MAX_RETRIES`, or is marked permanently `failed` once exhausted. This stops
+  a poison episode from being requeued forever.
+- Default timeout: 2 hours.
+- Override with the `WORKER_STUCK_TIMEOUT_SECONDS` env var on the web service
+  (set in `/etc/adnihilator/env`, then `systemctl restart adnihilator`).
+  Values are clamped to 1s..30d; invalid values fall back to the default.
+
+Manual reset is still available via the "Reset an episode to pending" query above.
+
+### One-time index migration
+
+This change adds two composite indexes used by the claim and recovery queries.
+New databases get them automatically; apply them to the existing prod DB once:
+
+```bash
+ssh root@jonefox.com "sqlite3 /opt/adnihilator/data/adnihilator.db \
+  'CREATE INDEX IF NOT EXISTS ix_episodes_status_created_at ON episodes(status, created_at); \
+   CREATE INDEX IF NOT EXISTS ix_episodes_status_claimed_at ON episodes(status, claimed_at);'"
+```

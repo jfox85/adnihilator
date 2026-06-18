@@ -253,6 +253,9 @@ Required for web service:
 - `ADMIN_USERNAME`, `ADMIN_PASSWORD`, `WORKER_API_KEY`
 - `DATABASE_PATH`, `R2_PUBLIC_URL`
 
+Optional for web service:
+- `WORKER_STUCK_TIMEOUT_SECONDS` (default 7200) — stuck-job recovery timeout
+
 ### macOS OpenMP Fix
 
 Set `KMP_DUPLICATE_LIB_OK=TRUE` before importing faster-whisper (already done in cli.py).
