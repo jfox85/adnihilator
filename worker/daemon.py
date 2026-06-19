@@ -38,6 +38,18 @@ LONG_AD_SPAN_THRESHOLD = 240.0  # 4 minutes
 # long reads are never refined.
 MEGA_AD_SPAN_THRESHOLD = 600.0  # 10 minutes
 
+# Hard cap on mega-span refine LLM calls per episode. Mega spans are rare
+# (~1-2 on the few episodes that have any), but a pathological keyword
+# over-detection could produce many. Cap the fan-out so one bad episode cannot
+# fan out into an unbounded number of sequential OpenAI calls; spans beyond the
+# cap keep their original (conservative over-removal we already had).
+MEGA_REFINE_MAX_CALLS_PER_EPISODE = 4
+
+# Max characters of mega-span transcript sent to the refine LLM. A mega span
+# can be very long; sending head-only could hide a late ad. When over budget we
+# send head + tail so ad copy at either end still reaches the model.
+MEGA_REFINE_TRANSCRIPT_BUDGET = 8000
+
 
 class WorkerDaemon:
     """Daemon that processes podcast episodes."""
@@ -1339,6 +1351,28 @@ If in doubt, keep the ad (it's safer to remove a questionable segment than leave
                 return True
         return False
 
+    @staticmethod
+    def _truncate_transcript_head_tail(transcript: str, budget: int) -> str:
+        """Fit ``transcript`` in ``budget`` chars, keeping both ends.
+
+        A mega span can contain an early ad, a long stretch of normal talk, and
+        a late ad. Head-only truncation would drop the late ad before the model
+        ever sees it. When over budget, keep the first and last halves of the
+        budget with an elision marker between them so ad copy at either end is
+        preserved. Whole lines are kept where possible so timestamps stay valid.
+        """
+        if len(transcript) <= budget:
+            return transcript
+        half = budget // 2
+        head = transcript[:half]
+        tail = transcript[-half:]
+        # Trim partial lines at the cut points so timestamps aren't mangled.
+        if "\n" in head:
+            head = head[: head.rfind("\n")]
+        if "\n" in tail:
+            tail = tail[tail.find("\n") + 1:]
+        return f"{head}\n[... middle of span omitted for length ...]\n{tail}"
+
     def _refine_mega_spans(
         self,
         ad_spans: list[AdSpan],
@@ -1390,10 +1424,21 @@ If in doubt, keep the ad (it's safer to remove a questionable segment than leave
             "output_tokens": 0,
         }
         called = False
+        calls_made = 0
         refined: list[AdSpan] = []
 
         for idx, span in enumerate(ad_spans):
             if idx not in target_idx:
+                refined.append(span)
+                continue
+
+            if calls_made >= MEGA_REFINE_MAX_CALLS_PER_EPISODE:
+                # Cap reached: keep the original span (conservative). Avoids
+                # unbounded fan-out on pathological over-detection.
+                print(
+                    f"    Mega-span {span.start:.0f}-{span.end:.0f}s: refine cap "
+                    f"({MEGA_REFINE_MAX_CALLS_PER_EPISODE}) reached, keeping original"
+                )
                 refined.append(span)
                 continue
 
@@ -1417,7 +1462,7 @@ SPAN: {span.start:.0f}s to {span.end:.0f}s
 KNOWN SPONSORS: {sponsor_names}
 
 TRANSCRIPT (timestamps in seconds):
-{transcript[:8000]}
+{self._truncate_transcript_head_tail(transcript, MEGA_REFINE_TRANSCRIPT_BUDGET)}
 
 Return the true ad sub-ranges. Each must be a tight window around actual ad/
 sponsor copy (host read, promo code, "brought to you by", URL/CTA). Do NOT
@@ -1445,6 +1490,7 @@ range. If you cannot find any clear ad copy, return an empty list."""
                     response_format={"type": "json_object"},
                 )
                 called = True
+                calls_made += 1
                 if response.usage:
                     usage_total["input_tokens"] += response.usage.prompt_tokens
                     usage_total["output_tokens"] += response.usage.completion_tokens

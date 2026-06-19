@@ -10,7 +10,11 @@ import json
 import types
 
 from adnihilator.models import AdSpan, Sponsor, SponsorInfo, TranscriptSegment
-from worker.daemon import WorkerDaemon
+from worker.daemon import (
+    MEGA_REFINE_MAX_CALLS_PER_EPISODE,
+    MEGA_REFINE_TRANSCRIPT_BUDGET,
+    WorkerDaemon,
+)
 
 
 def _seg(index: int, start: float, end: float, text: str) -> TranscriptSegment:
@@ -313,3 +317,93 @@ def test_mega_span_subranges_clamped_within_span(monkeypatch) -> None:
     assert len(result) == 1
     assert result[0].start == 200.0
     assert result[0].end == 1000.0
+
+
+def test_mega_span_refine_call_cap(monkeypatch) -> None:
+    """More mega spans than the per-episode cap -> excess keep original."""
+    d = _daemon_with_config()
+    n = MEGA_REFINE_MAX_CALLS_PER_EPISODE + 2
+    spans = [
+        AdSpan(start=i * 2000.0, end=i * 2000.0 + 800.0, confidence=0.9, reason="Keywords")
+        for i in range(n)
+    ]
+    segments = [_seg(i, s.start, s.end, "Acme sponsor read") for i, s in enumerate(spans)]
+    sponsors = SponsorInfo(sponsors=[Sponsor(name="Acme")], extraction_method="patterns")
+    called = []
+
+    # Fake returns a tight in-bounds sub-range for whichever span is sent, so a
+    # refined span shrinks and is distinguishable from a capped (original) one.
+    import worker.daemon as daemon_mod
+
+    monkeypatch.setattr(daemon_mod, "create_llm_client", lambda config: _FakeOpenAIClient())
+    monkeypatch.setattr(daemon_mod, "OpenAIClient", _FakeOpenAIClient)
+
+    class _Resp:
+        def __init__(self, content):
+            self.choices = [types.SimpleNamespace(message=types.SimpleNamespace(content=content))]
+            self.usage = types.SimpleNamespace(prompt_tokens=10, completion_tokens=5)
+
+    class _Completions:
+        def create(self, **kwargs):
+            called.append(kwargs)
+            prompt = kwargs["messages"][0]["content"]
+            # Parse "SPAN: <start>s to <end>s" to return an in-bounds window.
+            import re as _re
+            m = _re.search(r"SPAN: ([\d.]+)s to ([\d.]+)s", prompt)
+            start = float(m.group(1))
+            payload = {"ad_ranges": [{"start": start, "end": start + 60.0}]}
+            return _Resp(json.dumps(payload))
+
+    class _Chat:
+        completions = _Completions()
+
+    class _FakeOpenAI:
+        def __init__(self, *a, **k):
+            self.chat = _Chat()
+
+    import openai
+    monkeypatch.setattr(openai, "OpenAI", _FakeOpenAI)
+
+    result, _ = d._refine_mega_spans(spans, segments, sponsors)
+
+    assert len(called) == MEGA_REFINE_MAX_CALLS_PER_EPISODE
+    # The 2 spans past the cap are returned at their original (>600s) length.
+    long_spans = [s for s in result if (s.end - s.start) > 600.0]
+    assert len(long_spans) == 2
+
+
+def test_mega_span_transcript_head_and_tail_sent(monkeypatch) -> None:
+    """Over-budget transcript sends both head and tail so a late ad survives."""
+    d = _daemon_with_config()
+    spans = [AdSpan(start=0.0, end=4000.0, confidence=0.9, reason="Keywords")]
+    # One early ad seg, a huge filler seg, one late ad seg. The filler alone
+    # exceeds the char budget, so head-only truncation would drop the late ad.
+    filler = "normal show conversation " * 1000
+    segments = [
+        _seg(0, 0.0, 60.0, "HEAD_AD brought to you by Acme"),
+        _seg(1, 60.0, 3900.0, filler),
+        _seg(2, 3900.0, 4000.0, "TAIL_AD our sponsor Globex promo code SAVE"),
+    ]
+    sponsors = SponsorInfo(sponsors=[Sponsor(name="Acme")], extraction_method="patterns")
+    called = []
+    _install_fake_llm(monkeypatch, {"ad_ranges": []}, capture=called)
+
+    d._refine_mega_spans(spans, segments, sponsors)
+
+    prompt = called[0]["messages"][0]["content"]
+    assert "HEAD_AD" in prompt
+    assert "TAIL_AD" in prompt, "late ad must survive truncation"
+    assert "middle of span omitted" in prompt
+
+
+def test_truncate_head_tail_under_budget_unchanged() -> None:
+    text = "[0-1] a\n[1-2] b"
+    assert WorkerDaemon._truncate_transcript_head_tail(text, 1000) == text
+
+
+def test_truncate_head_tail_respects_budget_and_marker() -> None:
+    text = "\n".join(f"[{i}-{i+1}] line content here" for i in range(2000))
+    out = WorkerDaemon._truncate_transcript_head_tail(text, MEGA_REFINE_TRANSCRIPT_BUDGET)
+    assert "middle of span omitted" in out
+    assert out.startswith("[0-1]")
+    assert out.rstrip().endswith("line content here")

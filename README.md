@@ -23,6 +23,10 @@ AdNihilator uses a three-tier detection strategy, choosing the cheapest effectiv
 - Uses Google's Gemini 2.0 Flash for direct audio analysis
 - ~60 seconds processing vs 5-12 minutes for Whisper
 - No transcription needed - analyzes audio directly
+- May make a rare, targeted OpenAI text-refinement call when keyword
+  over-detection produces an implausibly long (>10 min) merged ad span. This
+  fires on a small minority of episodes; the cost estimate above is provisional
+  for those until measured live.
 
 **Tier 3 - Whisper + LLM (~$0.004/episode)**
 - Whisper transcribes audio to timestamped text segments
@@ -401,6 +405,8 @@ This is faster and free, but less accurate than LLM refinement.
 - **Whisper transcription**: Free (runs locally)
 - **Gemini audio detection**: ~$0.10 per episode (~60 seconds processing)
 - **OpenAI LLM refinement**: ~$0.004 per episode with GPT-4o-mini
+- **Mega-span refinement**: rare extra GPT-4o-mini call on the few episodes
+  whose keyword detection yields a >10 min merged span (capped per episode)
 - **Cloudflare R2 storage**: ~$0.015/GB/month + minimal egress fees
 
 | Method | Cost/Episode | Processing Time | Accuracy |
