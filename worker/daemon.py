@@ -504,6 +504,7 @@ class WorkerDaemon:
         threshold: float = LONG_AD_SPAN_THRESHOLD,
         buffer: float = 15.0,  # Buffer around detected boundaries
         max_evidence_gap: float = 60.0,  # Max evidence-free gap before splitting
+        gemini_candidates: list[dict] | None = None,
     ) -> list[AdSpan]:
         """Verify and trim ad spans that exceed the threshold duration.
 
@@ -561,6 +562,15 @@ class WorkerDaemon:
 
             # Short ads pass through unchanged
             if duration <= threshold:
+                verified_spans.append(ad)
+                continue
+
+            # A long span a Gemini host_read independently vouches for is a
+            # genuine continuous read (e.g. a TWiT host read). Protect it from
+            # trimming/splitting so the host-read guardrail holds end-to-end,
+            # not just at the mega-refine stage.
+            if self._gemini_vouches_long_read(ad, gemini_candidates):
+                print(f"    Keeping long span {ad.start:.0f}-{ad.end:.0f}s (Gemini host_read vouched)")
                 verified_spans.append(ad)
                 continue
 
@@ -1292,16 +1302,33 @@ If in doubt, keep the ad (it's safer to remove a questionable segment than leave
             if new_start == span.start and new_end == span.end:
                 clamped.append(span)
                 continue
-            clamped.append(AdSpan(
-                start=new_start,
-                end=new_end,
-                confidence=span.confidence,
-                reason=span.reason,
-                candidate_indices=span.candidate_indices,
-                sources=span.sources,
-                ad_type=span.ad_type,
-            ))
+            clamped.append(span.model_copy(update={"start": new_start, "end": new_end}))
         return clamped
+
+    @staticmethod
+    def _gemini_vouches_long_read(
+        span: AdSpan,
+        gemini_candidates: list[dict],
+        coverage: float = 0.8,
+    ) -> bool:
+        """True if a Gemini ``host_read`` independently covers most of ``span``.
+
+        When Gemini (audio-based) saw a single continuous host read spanning
+        ``coverage`` of this span, the span is treated as a genuine long read
+        (e.g. a TWiT host read) and is protected from any shortening. This is
+        the guardrail that keeps real long reads intact end-to-end.
+        """
+        span_len = span.end - span.start
+        if span_len <= 0:
+            return False
+        for c in gemini_candidates or []:
+            if c.get("ad_type") != "host_read":
+                continue
+            overlap = min(span.end, c.get("end", 0.0)) - max(span.start, c.get("start", 0.0))
+            c_len = c.get("end", 0.0) - c.get("start", 0.0)
+            if overlap >= coverage * span_len and c_len >= coverage * span_len:
+                return True
+        return False
 
     def _refine_mega_spans(
         self,
@@ -1321,48 +1348,31 @@ If in doubt, keep the ad (it's safer to remove a questionable segment than leave
 
         This is tightly gated so it costs almost nothing:
         - Only mega spans are sent (a tiny fraction of episodes have any).
-        - A mega span fully corroborated by a Gemini host_read of similar
-          length is left alone (Gemini already vouches for a long continuous
-          read, e.g. a genuine TWiT host read), so real long reads are never
+        - A mega span a long Gemini host_read already vouches for is left alone
+          (see ``_gemini_vouches_long_read``), so real long reads are never
           shortened.
 
-        Conservative by construction: on any failure, empty/❲invalid❳ response,
-        or a model that isn't OpenAI, the original span is kept unchanged.
+        Conservative by construction: on any failure, empty/malformed response,
+        or a model that isn't OpenAI, the original span is kept unchanged. If
+        the LLM returns a partially malformed ``ad_ranges`` list, the whole
+        original span is kept rather than risk dropping part of a real ad.
 
         Returns ``(ad_spans, usage_or_None)``.
         """
-        mega = [s for s in ad_spans if (s.end - s.start) > threshold]
-        if not mega or not segments:
-            return ad_spans, None
-
-        # Leave mega spans that a long Gemini host_read already vouches for.
         gemini_candidates = gemini_candidates or []
-        def _gemini_vouches(span: AdSpan) -> bool:
-            span_len = span.end - span.start
-            for c in gemini_candidates:
-                if c.get("ad_type") != "host_read":
-                    continue
-                overlap = min(span.end, c.get("end", 0.0)) - max(span.start, c.get("start", 0.0))
-                c_len = c.get("end", 0.0) - c.get("start", 0.0)
-                # Gemini independently saw a continuous read covering most of
-                # this span -> trust it as a genuine long host read.
-                if overlap >= 0.8 * span_len and c_len >= 0.8 * span_len:
-                    return True
-            return False
-
-        targets = [s for s in mega if not _gemini_vouches(s)]
-        if not targets:
+        target_idx = {
+            i for i, s in enumerate(ad_spans)
+            if (s.end - s.start) > threshold
+            and not self._gemini_vouches_long_read(s, gemini_candidates)
+        }
+        if not target_idx or not segments:
             return ad_spans, None
 
         llm_client = create_llm_client(self.config)
         if not isinstance(llm_client, OpenAIClient):
             return ad_spans, None
 
-        from openai import OpenAI
-        import json
-
         sponsor_names = [s.name for s in sponsors.sponsors] if sponsors and sponsors.sponsors else []
-        client = OpenAI(api_key=llm_client.api_key, base_url=llm_client.base_url)
 
         usage_total = {
             "provider": "openai",
@@ -1372,10 +1382,9 @@ If in doubt, keep the ad (it's safer to remove a questionable segment than leave
         }
         called = False
         refined: list[AdSpan] = []
-        target_ids = {id(s) for s in targets}
 
-        for span in ad_spans:
-            if id(span) not in target_ids:
+        for idx, span in enumerate(ad_spans):
+            if idx not in target_idx:
                 refined.append(span)
                 continue
 
@@ -1412,7 +1421,14 @@ OUTPUT JSON:
 If the entire span really is one continuous ad, return it unchanged as a single
 range. If you cannot find any clear ad copy, return an empty list."""
 
+            # Import/client construction is inside the try so any failure
+            # (missing openai, bad creds, API error, parse error) falls back to
+            # keeping the original span rather than aborting the job.
             try:
+                from openai import OpenAI
+                import json
+
+                client = OpenAI(api_key=llm_client.api_key, base_url=llm_client.base_url)
                 response = client.chat.completions.create(
                     model=self.config.llm.model,
                     messages=[{"role": "user", "content": prompt}],
@@ -1430,18 +1446,23 @@ range. If you cannot find any clear ad copy, return an empty list."""
                 continue
 
             ranges = result.get("ad_ranges")
-            if ranges is None:
+            if not isinstance(ranges, list):
                 # Malformed response: keep the original rather than guess.
                 refined.append(span)
                 continue
 
             sub_spans: list[AdSpan] = []
+            malformed = False
             for r in ranges:
                 try:
                     rs = max(span.start, float(r["start"]))
                     re_ = min(span.end, float(r["end"]))
                 except (KeyError, TypeError, ValueError):
-                    continue
+                    # A malformed entry could be half of a real multi-part ad.
+                    # Bail to the conservative original-span fallback rather
+                    # than keep only the entries that happened to parse.
+                    malformed = True
+                    break
                 if re_ <= rs:
                     continue
                 sub_spans.append(AdSpan(
@@ -1453,6 +1474,11 @@ range. If you cannot find any clear ad copy, return an empty list."""
                     sources=list(dict.fromkeys((span.sources or []) + ["llm_refine"])),
                     ad_type=span.ad_type,
                 ))
+
+            if malformed:
+                print(f"    Mega-span {span.start:.0f}-{span.end:.0f}s: malformed range entry, keeping original")
+                refined.append(span)
+                continue
 
             if not sub_spans:
                 # Empty list means "no clear ad copy found". Removing the whole
@@ -1742,7 +1768,8 @@ range. If you cannot find any clear ad copy, return an empty list."""
                                     print(f"    Mega-span refine cost: ${mega_cost:.4f}")
 
                                 ad_spans = self._verify_long_ad_spans(
-                                    ad_spans, segments, sponsor_info
+                                    ad_spans, segments, sponsor_info,
+                                    gemini_candidates=gemini_candidates,
                                 )
 
                                 # Trust Gemini's tighter audio-based boundaries
@@ -1989,14 +2016,16 @@ range. If you cannot find any clear ad copy, return an empty list."""
 
             # Final safety net for every detection path: keep spans in range so
             # the splicer never tries to cut audio outside [0, duration].
-            if ad_spans:
-                before_clamp = len(ad_spans)
-                ad_spans = self._clamp_spans_to_duration(ad_spans, duration)
-                if len(ad_spans) != before_clamp:
-                    print(
-                        f"  Clamped spans to [0, {duration:.0f}s]: "
-                        f"{before_clamp} -> {len(ad_spans)}"
-                    )
+            before_total = sum(s.end - s.start for s in ad_spans)
+            before_count = len(ad_spans)
+            ad_spans = self._clamp_spans_to_duration(ad_spans, duration)
+            after_total = sum(s.end - s.start for s in ad_spans)
+            if len(ad_spans) != before_count or abs(after_total - before_total) > 0.01:
+                print(
+                    f"  Clamped spans to [0, {duration:.0f}s]: "
+                    f"{before_count}->{len(ad_spans)} spans, "
+                    f"{before_total:.0f}s->{after_total:.0f}s"
+                )
 
             # Save detection result artifact if artifacts_dir is set
             detection_result_path = None

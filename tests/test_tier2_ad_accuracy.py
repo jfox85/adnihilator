@@ -52,6 +52,7 @@ def test_clamp_leaves_in_range_spans_untouched() -> None:
 def test_clamp_noop_when_duration_unknown() -> None:
     spans = [AdSpan(start=10.0, end=9999.0, confidence=1.0, reason="x")]
     assert WorkerDaemon._clamp_spans_to_duration(spans, 0.0) == spans
+    assert WorkerDaemon._clamp_spans_to_duration(spans, -1.0) == spans
 
 
 # --- _refine_mega_spans ------------------------------------------------------
@@ -188,6 +189,71 @@ def test_mega_span_malformed_response_keeps_original(monkeypatch) -> None:
 
     assert len(result) == 1
     assert result[0].end == 900.0
+
+
+def test_mega_span_partial_malformed_keeps_whole_original(monkeypatch) -> None:
+    """One valid + one malformed range -> keep the whole original span.
+
+    A malformed entry could be half of a real multi-part ad, so we must not keep
+    only the entries that happened to parse.
+    """
+    d = _daemon_with_config()
+    spans = [AdSpan(start=0.0, end=1200.0, confidence=0.9, reason="Keywords")]
+    segments = [_seg(0, 0.0, 1200.0, "Acme read then later Globex read")]
+    sponsors = SponsorInfo(sponsors=[Sponsor(name="Acme")], extraction_method="patterns")
+    payload = {"ad_ranges": [
+        {"start": 0.0, "end": 60.0, "reason": "Acme"},
+        {"start": "oops"},  # malformed
+    ]}
+    _install_fake_llm(monkeypatch, payload)
+
+    result, _ = d._refine_mega_spans(spans, segments, sponsors)
+
+    assert len(result) == 1
+    assert result[0].start == 0.0 and result[0].end == 1200.0
+
+
+def test_verify_long_span_protects_gemini_vouched_read() -> None:
+    """End-to-end: a Gemini host_read-vouched long span is not split/trimmed.
+
+    Even with sparse keyword evidence and >60s gaps (which would normally split
+    the span), a matching long Gemini host_read must keep it intact.
+    """
+    daemon = WorkerDaemon.__new__(WorkerDaemon)
+    sponsors = SponsorInfo(sponsors=[Sponsor(name="Meter")], extraction_method="patterns")
+    # 700s span with sponsor evidence only at the very start and very end
+    # (a >60s evidence gap in the middle would normally trigger a split).
+    segments = [
+        _seg(0, 100.0, 130.0, "brought to you by Meter, our sponsor"),
+        _seg(1, 130.0, 770.0, "continuous read with lots of product talk and detail"),
+        _seg(2, 770.0, 800.0, "Meter dot com promo code SAVE, our sponsor"),
+    ]
+    span = AdSpan(start=100.0, end=800.0, confidence=1.0, reason="host read")
+    gemini = [{"start": 95.0, "end": 805.0, "ad_type": "host_read"}]
+
+    result = daemon._verify_long_ad_spans(
+        [span], segments, sponsors, gemini_candidates=gemini
+    )
+
+    assert len(result) == 1
+    assert result[0].start == 100.0 and result[0].end == 800.0
+
+
+def test_verify_long_span_still_splits_without_gemini_vouch() -> None:
+    """Control: the same span WITHOUT a Gemini vouch is still trimmed/split."""
+    daemon = WorkerDaemon.__new__(WorkerDaemon)
+    sponsors = SponsorInfo(sponsors=[Sponsor(name="Meter")], extraction_method="patterns")
+    segments = [
+        _seg(0, 100.0, 130.0, "brought to you by Meter, our sponsor"),
+        _seg(1, 130.0, 770.0, "normal unrelated conversation for many minutes here"),
+        _seg(2, 770.0, 800.0, "Meter dot com promo code SAVE, our sponsor"),
+    ]
+    span = AdSpan(start=100.0, end=800.0, confidence=1.0, reason="host read")
+
+    result = daemon._verify_long_ad_spans([span], segments, sponsors)
+
+    # No Gemini vouch -> evidence gap splits into two sub-spans.
+    assert len(result) == 2
 
 
 def test_mega_span_subranges_clamped_within_span(monkeypatch) -> None:
