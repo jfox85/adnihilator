@@ -211,6 +211,19 @@ def test_merge_overlapping_spans_keeps_separated() -> None:
     assert len(result) == 2
 
 
+def test_merge_overlapping_spans_drops_degenerate() -> None:
+    """Zero/negative-length spans must be filtered out before splicing."""
+    daemon = WorkerDaemon.__new__(WorkerDaemon)
+    spans = [
+        AdSpan(start=10.0, end=10.0, confidence=0.9, reason="zero"),
+        AdSpan(start=30.0, end=20.0, confidence=0.9, reason="inverted"),
+        AdSpan(start=40.0, end=60.0, confidence=0.9, reason="ok"),
+    ]
+    result = daemon._merge_overlapping_spans(spans)
+    assert len(result) == 1
+    assert result[0].start == 40.0 and result[0].end == 60.0
+
+
 def test_final_review_skipped_on_clean_result() -> None:
     """All sponsors covered, no anomaly/hunt/long span -> skip the LLM review."""
     spans = [AdSpan(start=0.0, end=60.0, confidence=0.9, reason="ad")]

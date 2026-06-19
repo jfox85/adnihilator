@@ -658,11 +658,16 @@ class WorkerDaemon:
         ad_spans: list[AdSpan],
         gap: float = 1.0,
     ) -> list[AdSpan]:
-        """Merge ad spans that overlap or sit within ``gap`` seconds."""
-        if not ad_spans:
+        """Merge ad spans that overlap or sit within ``gap`` seconds.
+
+        Also drops degenerate (zero/negative-length) spans so the post-
+        processing pipeline never hands an invalid cut to the splicer.
+        """
+        valid = [s for s in ad_spans if s.end > s.start]
+        if not valid:
             return []
 
-        ordered = sorted(ad_spans, key=lambda s: s.start)
+        ordered = sorted(valid, key=lambda s: s.start)
         merged = [ordered[0]]
         for span in ordered[1:]:
             current = merged[-1]
