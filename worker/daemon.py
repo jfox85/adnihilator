@@ -1204,6 +1204,11 @@ If in doubt, keep the ad (it's safer to remove a questionable segment than leave
 
         The Gemini candidate must overlap at least ``min_overlap`` of the merged
         span to count as "the same ad".
+
+        A long span a Gemini ``host_read`` already vouches for is left untouched
+        (see ``_gemini_vouches_long_read``): Gemini's own boundaries are what we
+        would snap to anyway, and skipping it keeps the long-host-read guardrail
+        truly end-to-end (never shortened by any post-processing stage).
         """
         if not ad_spans or not gemini_candidates:
             return ad_spans
@@ -1212,6 +1217,10 @@ If in doubt, keep the ad (it's safer to remove a questionable segment than leave
         for span in ad_spans:
             span_len = span.end - span.start
             if span_len <= 0:
+                adjusted.append(span)
+                continue
+
+            if self._gemini_vouches_long_read(span, gemini_candidates):
                 adjusted.append(span)
                 continue
 

@@ -239,6 +239,32 @@ def test_verify_long_span_protects_gemini_vouched_read() -> None:
     assert result[0].start == 100.0 and result[0].end == 800.0
 
 
+def test_gemini_vouched_span_survives_full_postprocessing() -> None:
+    """End-to-end: a vouched long read is unchanged by verify + boundaries + merge.
+
+    _apply_gemini_boundaries is shrink-only and would otherwise tighten the span
+    to Gemini's slightly-inner edges; the guardrail must keep it fully intact.
+    """
+    daemon = WorkerDaemon.__new__(WorkerDaemon)
+    sponsors = SponsorInfo(sponsors=[Sponsor(name="Meter")], extraction_method="patterns")
+    segments = [
+        _seg(0, 100.0, 130.0, "brought to you by Meter, our sponsor"),
+        _seg(1, 130.0, 770.0, "continuous read with product talk"),
+        _seg(2, 770.0, 800.0, "Meter dot com, our sponsor"),
+    ]
+    span = AdSpan(start=100.0, end=800.0, confidence=1.0, reason="host read")
+    # Gemini host_read vouches (>=80% coverage) but with slightly inner edges
+    # (110-790); shrink-only snapping would tighten to those without the guard.
+    gemini = [{"start": 110.0, "end": 790.0, "ad_type": "host_read"}]
+
+    v = daemon._verify_long_ad_spans([span], segments, sponsors, gemini_candidates=gemini)
+    v = daemon._apply_gemini_boundaries(v, gemini)
+    v = daemon._merge_overlapping_spans(v)
+
+    assert len(v) == 1
+    assert v[0].start == 100.0 and v[0].end == 800.0
+
+
 def test_verify_long_span_still_splits_without_gemini_vouch() -> None:
     """Control: the same span WITHOUT a Gemini vouch is still trimmed/split."""
     daemon = WorkerDaemon.__new__(WorkerDaemon)
