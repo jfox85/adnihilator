@@ -491,11 +491,19 @@ class WorkerDaemon:
         sponsors,
         threshold: float = 240.0,  # 4 minutes
         buffer: float = 15.0,  # Buffer around detected boundaries
+        max_evidence_gap: float = 60.0,  # Max evidence-free gap before splitting
     ) -> list[AdSpan]:
         """Verify and trim ad spans that exceed the threshold duration.
 
         Long ad spans from LLM merge are often over-expanded. This verifies
         them against the transcript by looking for actual sponsor mentions.
+
+        Earlier versions anchored on the first and last segments with ad
+        evidence and kept everything between, so two scattered sponsor mentions
+        separated by minutes of ordinary conversation would bridge into one
+        huge span of real content. Instead, group evidence into contiguous
+        clusters (allowing brief evidence-free gaps for natural ad pacing) and
+        emit one trimmed sub-span per cluster.
 
         Args:
             ad_spans: List of AdSpan objects from LLM merge
@@ -503,6 +511,8 @@ class WorkerDaemon:
             sponsors: SponsorInfo object
             threshold: Duration threshold in seconds (spans longer get verified)
             buffer: Buffer to add around detected boundaries
+            max_evidence_gap: Maximum evidence-free gap (seconds) tolerated
+                within a single ad cluster before the span is split
 
         Returns:
             List of verified/trimmed AdSpan objects
@@ -557,10 +567,6 @@ class WorkerDaemon:
                 verified_spans.append(ad)
                 continue
 
-            # Find first and last segment with sponsor/ad evidence
-            first_ad_time = None
-            last_ad_time = None
-
             # First pass: identify segments with sponsor keywords
             # This is used to validate weak intro phrases
             segments_with_sponsor = set()
@@ -569,6 +575,8 @@ class WorkerDaemon:
                 if any(kw in text_lower for kw in sponsor_keywords):
                     segments_with_sponsor.add(i)
 
+            # Collect every segment that carries ad evidence (start, end)
+            evidence_intervals: list[tuple[float, float]] = []
             for i, seg in enumerate(span_segments):
                 text_lower = seg.text.lower()
 
@@ -593,38 +601,80 @@ class WorkerDaemon:
                 # - Has sponsor name directly, OR
                 # - Has strong standalone phrase, OR
                 # - Has weak intro phrase WITH sponsor nearby
-                is_ad_evidence = has_sponsor or has_standalone or weak_intro_valid
+                if has_sponsor or has_standalone or weak_intro_valid:
+                    evidence_intervals.append((seg.start, seg.end))
 
-                if is_ad_evidence:
-                    if first_ad_time is None:
-                        first_ad_time = seg.start
-                    last_ad_time = seg.end
-
-            if first_ad_time is None:
+            if not evidence_intervals:
                 # No ad evidence found - reject this span
                 print(f"      No sponsor/ad evidence found, rejecting span")
                 continue
 
-            # Calculate new boundaries with buffer
-            new_start = max(ad.start, first_ad_time - buffer)
-            new_end = min(ad.end, last_ad_time + buffer)
-            new_duration = new_end - new_start
+            # Group evidence into contiguous clusters. A gap larger than
+            # max_evidence_gap means the span bridged into unrelated content,
+            # so we split rather than keep the conversation between mentions.
+            clusters: list[list[tuple[float, float]]] = [[evidence_intervals[0]]]
+            for interval in evidence_intervals[1:]:
+                if interval[0] - clusters[-1][-1][1] <= max_evidence_gap:
+                    clusters[-1].append(interval)
+                else:
+                    clusters.append([interval])
 
-            if new_duration < duration * 0.5:
-                # Significant trim - report it
-                print(f"      Trimmed from {duration:.0f}s to {new_duration:.0f}s ({new_start:.0f}-{new_end:.0f}s)")
+            if len(clusters) > 1:
+                print(f"      Split into {len(clusters)} ad clusters (evidence gaps > {max_evidence_gap:.0f}s)")
 
-            verified_spans.append(AdSpan(
-                start=new_start,
-                end=new_end,
-                confidence=ad.confidence,
-                reason=ad.reason + " (verified)",
-                candidate_indices=ad.candidate_indices,
-                sources=ad.sources,
-                ad_type=ad.ad_type,
-            ))
+            for cluster in clusters:
+                cluster_start = cluster[0][0]
+                cluster_end = cluster[-1][1]
+                new_start = max(ad.start, cluster_start - buffer)
+                new_end = min(ad.end, cluster_end + buffer)
+                if new_end <= new_start:
+                    continue
+                new_duration = new_end - new_start
 
-        return verified_spans
+                if new_duration < duration * 0.5:
+                    # Significant trim - report it
+                    print(f"      Trimmed from {duration:.0f}s to {new_duration:.0f}s ({new_start:.0f}-{new_end:.0f}s)")
+
+                verified_spans.append(AdSpan(
+                    start=new_start,
+                    end=new_end,
+                    confidence=ad.confidence,
+                    reason=ad.reason + " (verified)",
+                    candidate_indices=ad.candidate_indices,
+                    sources=ad.sources,
+                    ad_type=ad.ad_type,
+                ))
+
+        # Splitting/trimming can create adjacent or overlapping sub-spans; merge
+        # any that now touch so downstream consumers see clean spans.
+        return self._merge_overlapping_spans(verified_spans)
+
+    def _merge_overlapping_spans(
+        self,
+        ad_spans: list[AdSpan],
+        gap: float = 1.0,
+    ) -> list[AdSpan]:
+        """Merge ad spans that overlap or sit within ``gap`` seconds."""
+        if not ad_spans:
+            return []
+
+        ordered = sorted(ad_spans, key=lambda s: s.start)
+        merged = [ordered[0]]
+        for span in ordered[1:]:
+            current = merged[-1]
+            if span.start <= current.end + gap:
+                merged[-1] = AdSpan(
+                    start=current.start,
+                    end=max(current.end, span.end),
+                    confidence=max(current.confidence, span.confidence),
+                    reason=current.reason,
+                    candidate_indices=current.candidate_indices,
+                    sources=current.sources,
+                    ad_type=current.ad_type,
+                )
+            else:
+                merged.append(span)
+        return merged
 
     def _validate_sponsor_coverage(
         self,
@@ -1101,6 +1151,85 @@ If in doubt, keep the ad (it's safer to remove a questionable segment than leave
         # No LLM client available - use simple merge
         return self._simple_merge_candidates(gemini_candidates, keyword_candidates), None
 
+    def _apply_gemini_boundaries(
+        self,
+        ad_spans: list[AdSpan],
+        gemini_candidates: list[dict],
+        min_overlap: float = 0.25,
+        max_snap: float = 45.0,
+    ) -> list[AdSpan]:
+        """Prefer Gemini's boundaries where Gemini and the merged span agree.
+
+        Gemini detects ads from audio characteristics (distinct voice, music,
+        production) and produces tighter, more reliable boundaries than the
+        keyword heuristic, which over-extends from scattered trigger words. When
+        a merged span overlaps a Gemini candidate, snap the merged span's
+        boundaries to Gemini's. Keywords still drive recall (which regions are
+        worth removing); Gemini drives the precise cut points.
+
+        Shrinking a span toward Gemini's tighter edges is always safe and is
+        the main win (over-extended keyword spans get trimmed). Expanding a
+        span outward is capped at ``max_snap`` seconds so a slightly misaligned
+        Gemini timestamp cannot balloon a span past its evidence. The Gemini
+        candidate must overlap at least ``min_overlap`` of the merged span to
+        count as "the same ad".
+        """
+        if not ad_spans or not gemini_candidates:
+            return ad_spans
+
+        adjusted: list[AdSpan] = []
+        for span in ad_spans:
+            span_len = span.end - span.start
+            if span_len <= 0:
+                adjusted.append(span)
+                continue
+
+            best = None
+            best_overlap = 0.0
+            for cand in gemini_candidates:
+                c_start = cand.get("start", 0.0)
+                c_end = cand.get("end", 0.0)
+                overlap = min(span.end, c_end) - max(span.start, c_start)
+                if overlap <= 0:
+                    continue
+                if overlap / span_len >= min_overlap and overlap > best_overlap:
+                    best = cand
+                    best_overlap = overlap
+
+            if best is None:
+                adjusted.append(span)
+                continue
+
+            new_start = span.start
+            new_end = span.end
+            # Start: moving later (Gemini start > span start) shrinks the span
+            # and is always allowed; moving earlier expands and is capped.
+            if best["start"] >= span.start or (span.start - best["start"]) <= max_snap:
+                new_start = best["start"]
+            # End: moving earlier (Gemini end < span end) shrinks the span and is
+            # always allowed; moving later expands and is capped.
+            if best["end"] <= span.end or (best["end"] - span.end) <= max_snap:
+                new_end = best["end"]
+
+            if new_end <= new_start:
+                adjusted.append(span)
+                continue
+
+            sources = list(span.sources)
+            if "gemini" not in sources:
+                sources.append("gemini")
+            adjusted.append(AdSpan(
+                start=new_start,
+                end=new_end,
+                confidence=span.confidence,
+                reason=span.reason,
+                candidate_indices=span.candidate_indices,
+                sources=sources,
+                ad_type=span.ad_type or best.get("ad_type"),
+            ))
+
+        return self._merge_overlapping_spans(adjusted)
+
     def process_job(self, job: EpisodeJob) -> None:
         """Process a single episode job.
 
@@ -1356,10 +1485,17 @@ If in doubt, keep the ad (it's safer to remove a questionable segment than leave
                                     ad_spans, segments, sponsor_info
                                 )
 
+                                # Trust Gemini's tighter audio-based boundaries
+                                # where it agrees with a merged span.
+                                ad_spans = self._apply_gemini_boundaries(
+                                    ad_spans, gemini_candidates
+                                )
+
                             print("  Validating sponsor coverage...")
                             covered, missing, validation_info = self._validate_sponsor_coverage(
                                 ad_spans, segments, sponsor_info, duration
                             )
+                            hunt_added = False
 
                             if missing and segments:
                                 print(f"  Hunting for {len(missing)} missing sponsors...")
@@ -1369,6 +1505,7 @@ If in doubt, keep the ad (it's safer to remove a questionable segment than leave
                                 if hunt_spans:
                                     ad_spans.extend(hunt_spans)
                                     ad_spans.sort(key=lambda x: x.start)
+                                    hunt_added = True
                                     print(f"    Found {len(hunt_spans)} additional ads")
                                 if hunt_usage:
                                     hunt_cost = self._calculate_llm_cost(
@@ -1380,21 +1517,38 @@ If in doubt, keep the ad (it's safer to remove a questionable segment than leave
                                     total_cost += hunt_cost
                                     all_usages.append(hunt_usage)
 
-                            print("  Running final LLM review...")
-                            self.api_client.update_progress(job.id, "reviewing")
-                            ad_spans, review_usage = self._final_llm_review(
-                                ad_spans, segments, sponsor_info, duration, validation_info
+                            # Gate the expensive final LLM review. A clean
+                            # result (all sponsors covered, no anomaly, no hunt
+                            # additions, no remaining long spans) is already
+                            # high-confidence, so paying for a review pass adds
+                            # cost without improving accuracy. Only review when
+                            # there is a concrete signal worth resolving.
+                            has_long_span = any((s.end - s.start) > 240.0 for s in ad_spans)
+                            needs_review = bool(
+                                missing
+                                or hunt_added
+                                or validation_info.get("anomaly")
+                                or has_long_span
                             )
-                            if review_usage:
-                                review_cost = self._calculate_llm_cost(
-                                    provider=review_usage.get("provider", "openai"),
-                                    model=review_usage.get("model", self.config.llm.model),
-                                    input_tokens=review_usage.get("input_tokens", 0),
-                                    output_tokens=review_usage.get("output_tokens", 0),
+
+                            if needs_review:
+                                print("  Running final LLM review...")
+                                self.api_client.update_progress(job.id, "reviewing")
+                                ad_spans, review_usage = self._final_llm_review(
+                                    ad_spans, segments, sponsor_info, duration, validation_info
                                 )
-                                total_cost += review_cost
-                                all_usages.append(review_usage)
-                                print(f"    Review cost: ${review_cost:.4f}")
+                                if review_usage:
+                                    review_cost = self._calculate_llm_cost(
+                                        provider=review_usage.get("provider", "openai"),
+                                        model=review_usage.get("model", self.config.llm.model),
+                                        input_tokens=review_usage.get("input_tokens", 0),
+                                        output_tokens=review_usage.get("output_tokens", 0),
+                                    )
+                                    total_cost += review_cost
+                                    all_usages.append(review_usage)
+                                    print(f"    Review cost: ${review_cost:.4f}")
+                            else:
+                                print("  Skipping final LLM review (clean result, no review signal)")
                             if merge_usage:
                                 if "input_tokens" in merge_usage:
                                     merge_cost = self._calculate_llm_cost(
