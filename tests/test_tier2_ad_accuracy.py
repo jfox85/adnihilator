@@ -9,8 +9,6 @@ Tier 2 adds two post-processing steps:
 import json
 import types
 
-import pytest
-
 from adnihilator.models import AdSpan, Sponsor, SponsorInfo, TranscriptSegment
 from worker.daemon import WorkerDaemon
 
@@ -189,6 +187,25 @@ def test_mega_span_malformed_response_keeps_original(monkeypatch) -> None:
 
     assert len(result) == 1
     assert result[0].end == 900.0
+
+
+def test_mega_span_non_dict_json_keeps_original(monkeypatch) -> None:
+    """A valid but non-object JSON response (list/str) must not crash the job.
+
+    An OpenAI-compatible backend that ignores response_format could return a
+    bare list; result.get must not be called on it. Keep the original span.
+    """
+    d = _daemon_with_config()
+    spans = [AdSpan(start=0.0, end=900.0, confidence=0.9, reason="Keywords")]
+    segments = [_seg(0, 0.0, 900.0, "brought to you by Acme then lots of talk")]
+    sponsors = SponsorInfo(sponsors=[Sponsor(name="Acme")], extraction_method="patterns")
+    # json.dumps([...]) -> a valid JSON array, i.e. not a dict.
+    _install_fake_llm(monkeypatch, [{"start": 0.0, "end": 60.0}])
+
+    result, _ = d._refine_mega_spans(spans, segments, sponsors)
+
+    assert len(result) == 1
+    assert result[0].start == 0.0 and result[0].end == 900.0
 
 
 def test_mega_span_partial_malformed_keeps_whole_original(monkeypatch) -> None:

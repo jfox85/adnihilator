@@ -1454,7 +1454,11 @@ range. If you cannot find any clear ad copy, return an empty list."""
                 refined.append(span)
                 continue
 
-            ranges = result.get("ad_ranges")
+            # A JSON-object response is expected, but an OpenAI-compatible
+            # backend that ignores response_format could return a valid
+            # non-object (list/str/number). Guard so .get cannot raise outside
+            # the fallback and fail the whole job.
+            ranges = result.get("ad_ranges") if isinstance(result, dict) else None
             if not isinstance(ranges, list):
                 # Malformed response: keep the original rather than guess.
                 refined.append(span)
