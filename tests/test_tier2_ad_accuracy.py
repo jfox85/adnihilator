@@ -407,3 +407,54 @@ def test_truncate_head_tail_respects_budget_and_marker() -> None:
     assert "middle of span omitted" in out
     assert out.startswith("[0-1]")
     assert out.rstrip().endswith("line content here")
+    # Marker length is reserved, so the result never exceeds the budget.
+    assert len(out) <= MEGA_REFINE_TRANSCRIPT_BUDGET
+
+
+def test_truncate_head_tail_single_oversized_line_stays_within_budget() -> None:
+    # A single newline-free line longer than the budget: no whole lines to keep,
+    # but the result must still respect the budget.
+    text = "x" * (MEGA_REFINE_TRANSCRIPT_BUDGET * 2)
+    out = WorkerDaemon._truncate_transcript_head_tail(text, MEGA_REFINE_TRANSCRIPT_BUDGET)
+    assert len(out) <= MEGA_REFINE_TRANSCRIPT_BUDGET
+    assert "middle of span omitted" in out
+
+
+def test_mega_span_refine_cap_counts_failed_attempts(monkeypatch) -> None:
+    """Failing API calls still consume the per-episode cap."""
+    d = _daemon_with_config()
+    n = MEGA_REFINE_MAX_CALLS_PER_EPISODE + 3
+    spans = [
+        AdSpan(start=i * 2000.0, end=i * 2000.0 + 800.0, confidence=0.9, reason="Keywords")
+        for i in range(n)
+    ]
+    segments = [_seg(i, s.start, s.end, "Acme sponsor read") for i, s in enumerate(spans)]
+    sponsors = SponsorInfo(sponsors=[Sponsor(name="Acme")], extraction_method="patterns")
+    attempts = []
+
+    import worker.daemon as daemon_mod
+
+    monkeypatch.setattr(daemon_mod, "create_llm_client", lambda config: _FakeOpenAIClient())
+    monkeypatch.setattr(daemon_mod, "OpenAIClient", _FakeOpenAIClient)
+
+    class _Completions:
+        def create(self, **kwargs):
+            attempts.append(kwargs)
+            raise RuntimeError("simulated API failure")
+
+    class _Chat:
+        completions = _Completions()
+
+    class _FakeOpenAI:
+        def __init__(self, *a, **k):
+            self.chat = _Chat()
+
+    import openai
+    monkeypatch.setattr(openai, "OpenAI", _FakeOpenAI)
+
+    result, _ = d._refine_mega_spans(spans, segments, sponsors)
+
+    # Cap bounds attempts even though every call fails.
+    assert len(attempts) == MEGA_REFINE_MAX_CALLS_PER_EPISODE
+    # All spans kept original (conservative) since nothing succeeded.
+    assert all((s.end - s.start) > 600.0 for s in result)

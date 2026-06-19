@@ -1363,15 +1363,19 @@ If in doubt, keep the ad (it's safer to remove a questionable segment than leave
         """
         if len(transcript) <= budget:
             return transcript
-        half = budget // 2
-        head = transcript[:half]
-        tail = transcript[-half:]
+        marker = "\n[... middle of span omitted for length ...]\n"
+        # Reserve room for the marker so the result stays within budget.
+        avail = max(budget - len(marker), 0)
+        head_len = avail // 2
+        tail_len = avail - head_len
+        head = transcript[:head_len]
+        tail = transcript[-tail_len:] if tail_len else ""
         # Trim partial lines at the cut points so timestamps aren't mangled.
         if "\n" in head:
             head = head[: head.rfind("\n")]
         if "\n" in tail:
             tail = tail[tail.find("\n") + 1:]
-        return f"{head}\n[... middle of span omitted for length ...]\n{tail}"
+        return f"{head}{marker}{tail}"
 
     def _refine_mega_spans(
         self,
@@ -1483,14 +1487,17 @@ range. If you cannot find any clear ad copy, return an empty list."""
                 import json
 
                 client = OpenAI(api_key=llm_client.api_key, base_url=llm_client.base_url)
+                # Count the attempt before the call so the cap bounds API
+                # attempts even when calls fail (timeout/5xx/auth), not just
+                # successful responses.
+                called = True
+                calls_made += 1
                 response = client.chat.completions.create(
                     model=self.config.llm.model,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.1,
                     response_format={"type": "json_object"},
                 )
-                called = True
-                calls_made += 1
                 if response.usage:
                     usage_total["input_tokens"] += response.usage.prompt_tokens
                     usage_total["output_tokens"] += response.usage.completion_tokens
