@@ -26,6 +26,10 @@ from adnihilator.two_pass import two_pass_detect
 from .client import WorkerClient, EpisodeJob
 from .r2 import R2Client
 
+# Ad spans longer than this (seconds) are treated as "long": they get
+# evidence-cluster verification and are a signal for the final LLM review.
+LONG_AD_SPAN_THRESHOLD = 240.0  # 4 minutes
+
 
 class WorkerDaemon:
     """Daemon that processes podcast episodes."""
@@ -489,7 +493,7 @@ class WorkerDaemon:
         ad_spans: list[AdSpan],
         segments: list,
         sponsors,
-        threshold: float = 240.0,  # 4 minutes
+        threshold: float = LONG_AD_SPAN_THRESHOLD,
         buffer: float = 15.0,  # Buffer around detected boundaries
         max_evidence_gap: float = 60.0,  # Max evidence-free gap before splitting
     ) -> list[AdSpan]:
@@ -668,9 +672,11 @@ class WorkerDaemon:
                     end=max(current.end, span.end),
                     confidence=max(current.confidence, span.confidence),
                     reason=current.reason,
-                    candidate_indices=current.candidate_indices,
-                    sources=current.sources,
-                    ad_type=current.ad_type,
+                    # Union provenance so merging never silently drops a
+                    # source (e.g. "gemini") or ad_type from a later span.
+                    candidate_indices=list(dict.fromkeys(current.candidate_indices + span.candidate_indices)),
+                    sources=list(dict.fromkeys(current.sources + span.sources)),
+                    ad_type=current.ad_type or span.ad_type,
                 )
             else:
                 merged.append(span)
@@ -1156,23 +1162,25 @@ If in doubt, keep the ad (it's safer to remove a questionable segment than leave
         ad_spans: list[AdSpan],
         gemini_candidates: list[dict],
         min_overlap: float = 0.25,
-        max_snap: float = 45.0,
     ) -> list[AdSpan]:
-        """Prefer Gemini's boundaries where Gemini and the merged span agree.
+        """Tighten merged spans toward an overlapping Gemini candidate's edges.
 
         Gemini detects ads from audio characteristics (distinct voice, music,
         production) and produces tighter, more reliable boundaries than the
         keyword heuristic, which over-extends from scattered trigger words. When
-        a merged span overlaps a Gemini candidate, snap the merged span's
-        boundaries to Gemini's. Keywords still drive recall (which regions are
-        worth removing); Gemini drives the precise cut points.
+        a merged span overlaps a Gemini candidate, shrink the merged span inward
+        toward the overlap region. Keywords still drive recall (which regions
+        are worth removing); Gemini drives the precise cut points.
 
-        Shrinking a span toward Gemini's tighter edges is always safe and is
-        the main win (over-extended keyword spans get trimmed). Expanding a
-        span outward is capped at ``max_snap`` seconds so a slightly misaligned
-        Gemini timestamp cannot balloon a span past its evidence. The Gemini
-        candidate must overlap at least ``min_overlap`` of the merged span to
-        count as "the same ad".
+        This is deliberately **shrink-only**: a boundary only moves inward, never
+        outward. That keeps the change a boundary *correction* (trimming
+        keyword over-extension) rather than a recall change that could remove
+        more audio, and it guarantees the result stays within the original
+        span's range (so timestamps remain non-negative and in-range, and two
+        spans sharing one wide Gemini candidate cannot collapse into one).
+
+        The Gemini candidate must overlap at least ``min_overlap`` of the merged
+        span to count as "the same ad".
         """
         if not ad_spans or not gemini_candidates:
             return ad_spans
@@ -1200,16 +1208,9 @@ If in doubt, keep the ad (it's safer to remove a questionable segment than leave
                 adjusted.append(span)
                 continue
 
-            new_start = span.start
-            new_end = span.end
-            # Start: moving later (Gemini start > span start) shrinks the span
-            # and is always allowed; moving earlier expands and is capped.
-            if best["start"] >= span.start or (span.start - best["start"]) <= max_snap:
-                new_start = best["start"]
-            # End: moving earlier (Gemini end < span end) shrinks the span and is
-            # always allowed; moving later expands and is capped.
-            if best["end"] <= span.end or (best["end"] - span.end) <= max_snap:
-                new_end = best["end"]
+            # Shrink-only: clamp each boundary inward to the Gemini candidate.
+            new_start = max(span.start, best.get("start", span.start))
+            new_end = min(span.end, best.get("end", span.end))
 
             if new_end <= new_start:
                 adjusted.append(span)
@@ -1228,7 +1229,30 @@ If in doubt, keep the ad (it's safer to remove a questionable segment than leave
                 ad_type=span.ad_type or best.get("ad_type"),
             ))
 
-        return self._merge_overlapping_spans(adjusted)
+        return adjusted
+
+    @staticmethod
+    def _needs_final_review(
+        ad_spans: list[AdSpan],
+        missing_sponsors: list[str],
+        hunt_added: bool,
+        validation_info: dict,
+    ) -> bool:
+        """Decide whether the expensive final LLM review pass is warranted.
+
+        A clean result (all sponsors covered, no anomaly, no hunt additions, no
+        remaining long spans, and sponsor coverage was actually checkable) is
+        already high-confidence, so the review pass would add cost without
+        improving accuracy. Review only when a concrete signal remains.
+        """
+        has_long_span = any((s.end - s.start) > LONG_AD_SPAN_THRESHOLD for s in ad_spans)
+        return bool(
+            missing_sponsors
+            or hunt_added
+            or validation_info.get("anomaly")
+            or validation_info.get("no_sponsors_in_description")
+            or has_long_span
+        )
 
     def process_job(self, job: EpisodeJob) -> None:
         """Process a single episode job.
@@ -1486,10 +1510,12 @@ If in doubt, keep the ad (it's safer to remove a questionable segment than leave
                                 )
 
                                 # Trust Gemini's tighter audio-based boundaries
-                                # where it agrees with a merged span.
+                                # where it agrees with a merged span, then merge
+                                # any spans that now touch.
                                 ad_spans = self._apply_gemini_boundaries(
                                     ad_spans, gemini_candidates
                                 )
+                                ad_spans = self._merge_overlapping_spans(ad_spans)
 
                             print("  Validating sponsor coverage...")
                             covered, missing, validation_info = self._validate_sponsor_coverage(
@@ -1507,6 +1533,12 @@ If in doubt, keep the ad (it's safer to remove a questionable segment than leave
                                     ad_spans.sort(key=lambda x: x.start)
                                     hunt_added = True
                                     print(f"    Found {len(hunt_spans)} additional ads")
+                                    # Recompute coverage so the review gate and
+                                    # the review prompt see sponsors the hunt
+                                    # just covered, not the pre-hunt state.
+                                    covered, missing, validation_info = self._validate_sponsor_coverage(
+                                        ad_spans, segments, sponsor_info, duration
+                                    )
                                 if hunt_usage:
                                     hunt_cost = self._calculate_llm_cost(
                                         provider=hunt_usage.get("provider", "openai"),
@@ -1523,12 +1555,8 @@ If in doubt, keep the ad (it's safer to remove a questionable segment than leave
                             # high-confidence, so paying for a review pass adds
                             # cost without improving accuracy. Only review when
                             # there is a concrete signal worth resolving.
-                            has_long_span = any((s.end - s.start) > 240.0 for s in ad_spans)
-                            needs_review = bool(
-                                missing
-                                or hunt_added
-                                or validation_info.get("anomaly")
-                                or has_long_span
+                            needs_review = self._needs_final_review(
+                                ad_spans, missing, hunt_added, validation_info
                             )
 
                             if needs_review:
