@@ -30,6 +30,14 @@ from .r2 import R2Client
 # evidence-cluster verification and are a signal for the final LLM review.
 LONG_AD_SPAN_THRESHOLD = 240.0  # 4 minutes
 
+# A single span longer than this (seconds) is implausible as one continuous ad
+# read. Even long TWiT-style host reads top out around 7-8 minutes, so a span
+# this large is almost always keyword over-detection that swept up real content
+# (recurring sponsor mentions across normal conversation). These get a targeted
+# LLM boundary-refine pass. Set comfortably above any real host read so genuine
+# long reads are never refined.
+MEGA_AD_SPAN_THRESHOLD = 600.0  # 10 minutes
+
 
 class WorkerDaemon:
     """Daemon that processes podcast episodes."""
@@ -1259,6 +1267,211 @@ If in doubt, keep the ad (it's safer to remove a questionable segment than leave
             or has_long_span
         )
 
+    @staticmethod
+    def _clamp_spans_to_duration(
+        ad_spans: list[AdSpan],
+        duration: float,
+    ) -> list[AdSpan]:
+        """Clamp every span to ``[0, duration]`` and drop degenerate ones.
+
+        Detection sources (notably Gemini) occasionally emit timestamps past the
+        end of the file or below zero. Splicing those verbatim removes audio
+        that does not exist or over-cuts a short episode. This is a final,
+        no-inference safety net: clamp boundaries into range and drop any span
+        that starts at/after the end or collapses to non-positive length.
+        """
+        if duration <= 0:
+            return ad_spans
+
+        clamped: list[AdSpan] = []
+        for span in ad_spans:
+            new_start = max(0.0, span.start)
+            new_end = min(duration, span.end)
+            if new_end <= new_start:
+                continue
+            if new_start == span.start and new_end == span.end:
+                clamped.append(span)
+                continue
+            clamped.append(AdSpan(
+                start=new_start,
+                end=new_end,
+                confidence=span.confidence,
+                reason=span.reason,
+                candidate_indices=span.candidate_indices,
+                sources=span.sources,
+                ad_type=span.ad_type,
+            ))
+        return clamped
+
+    def _refine_mega_spans(
+        self,
+        ad_spans: list[AdSpan],
+        segments: list,
+        sponsors,
+        gemini_candidates: list[dict] | None = None,
+        threshold: float = MEGA_AD_SPAN_THRESHOLD,
+    ) -> tuple[list[AdSpan], dict | None]:
+        """Targeted LLM refine for implausibly long ("mega") ad spans.
+
+        A span longer than ``threshold`` (~10 min) is almost never one real ad
+        read; it is keyword over-detection that swept up ordinary conversation
+        between recurring sponsor mentions. Evidence clustering alone keeps too
+        much of it because the mentions recur throughout. Ask the LLM to return
+        the true ad sub-range(s) inside each mega span using the transcript.
+
+        This is tightly gated so it costs almost nothing:
+        - Only mega spans are sent (a tiny fraction of episodes have any).
+        - A mega span fully corroborated by a Gemini host_read of similar
+          length is left alone (Gemini already vouches for a long continuous
+          read, e.g. a genuine TWiT host read), so real long reads are never
+          shortened.
+
+        Conservative by construction: on any failure, empty/❲invalid❳ response,
+        or a model that isn't OpenAI, the original span is kept unchanged.
+
+        Returns ``(ad_spans, usage_or_None)``.
+        """
+        mega = [s for s in ad_spans if (s.end - s.start) > threshold]
+        if not mega or not segments:
+            return ad_spans, None
+
+        # Leave mega spans that a long Gemini host_read already vouches for.
+        gemini_candidates = gemini_candidates or []
+        def _gemini_vouches(span: AdSpan) -> bool:
+            span_len = span.end - span.start
+            for c in gemini_candidates:
+                if c.get("ad_type") != "host_read":
+                    continue
+                overlap = min(span.end, c.get("end", 0.0)) - max(span.start, c.get("start", 0.0))
+                c_len = c.get("end", 0.0) - c.get("start", 0.0)
+                # Gemini independently saw a continuous read covering most of
+                # this span -> trust it as a genuine long host read.
+                if overlap >= 0.8 * span_len and c_len >= 0.8 * span_len:
+                    return True
+            return False
+
+        targets = [s for s in mega if not _gemini_vouches(s)]
+        if not targets:
+            return ad_spans, None
+
+        llm_client = create_llm_client(self.config)
+        if not isinstance(llm_client, OpenAIClient):
+            return ad_spans, None
+
+        from openai import OpenAI
+        import json
+
+        sponsor_names = [s.name for s in sponsors.sponsors] if sponsors and sponsors.sponsors else []
+        client = OpenAI(api_key=llm_client.api_key, base_url=llm_client.base_url)
+
+        usage_total = {
+            "provider": "openai",
+            "model": self.config.llm.model,
+            "input_tokens": 0,
+            "output_tokens": 0,
+        }
+        called = False
+        refined: list[AdSpan] = []
+        target_ids = {id(s) for s in targets}
+
+        for span in ad_spans:
+            if id(span) not in target_ids:
+                refined.append(span)
+                continue
+
+            span_segments = [
+                seg for seg in segments
+                if seg.end >= span.start and seg.start <= span.end
+            ]
+            transcript = "\n".join(
+                f"[{seg.start:.0f}-{seg.end:.0f}] {seg.text}" for seg in span_segments
+            )
+            if not transcript.strip():
+                refined.append(span)
+                continue
+
+            prompt = f"""This is a single "ad" region detected by keyword heuristics, but it is
+{span.end - span.start:.0f} seconds long ({(span.end - span.start)/60:.1f} min) - far too long for one
+continuous ad read. It almost certainly swept up ordinary show content between
+sponsor mentions. Identify ONLY the actual advertisement sub-range(s) inside it.
+
+SPAN: {span.start:.0f}s to {span.end:.0f}s
+KNOWN SPONSORS: {sponsor_names}
+
+TRANSCRIPT (timestamps in seconds):
+{transcript[:8000]}
+
+Return the true ad sub-ranges. Each must be a tight window around actual ad/
+sponsor copy (host read, promo code, "brought to you by", URL/CTA). Do NOT
+include normal discussion, interviews, or banter even if a sponsor is mentioned
+in passing.
+
+OUTPUT JSON:
+{{"ad_ranges": [{{"start": <sec>, "end": <sec>, "reason": "<short>"}}]}}
+
+If the entire span really is one continuous ad, return it unchanged as a single
+range. If you cannot find any clear ad copy, return an empty list."""
+
+            try:
+                response = client.chat.completions.create(
+                    model=self.config.llm.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.1,
+                    response_format={"type": "json_object"},
+                )
+                called = True
+                if response.usage:
+                    usage_total["input_tokens"] += response.usage.prompt_tokens
+                    usage_total["output_tokens"] += response.usage.completion_tokens
+                result = json.loads(response.choices[0].message.content or "{}")
+            except Exception as e:
+                print(f"    Mega-span refine failed ({e}), keeping original span")
+                refined.append(span)
+                continue
+
+            ranges = result.get("ad_ranges")
+            if ranges is None:
+                # Malformed response: keep the original rather than guess.
+                refined.append(span)
+                continue
+
+            sub_spans: list[AdSpan] = []
+            for r in ranges:
+                try:
+                    rs = max(span.start, float(r["start"]))
+                    re_ = min(span.end, float(r["end"]))
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if re_ <= rs:
+                    continue
+                sub_spans.append(AdSpan(
+                    start=rs,
+                    end=re_,
+                    confidence=span.confidence,
+                    reason=f"mega-refine: {r.get('reason', span.reason)}"[:200],
+                    candidate_indices=span.candidate_indices,
+                    sources=list(dict.fromkeys((span.sources or []) + ["llm_refine"])),
+                    ad_type=span.ad_type,
+                ))
+
+            if not sub_spans:
+                # Empty list means "no clear ad copy found". Removing the whole
+                # span risks leaving a real ad in, so keep the original
+                # (conservative: prefer over-removal we already had).
+                refined.append(span)
+                print(f"    Mega-span {span.start:.0f}-{span.end:.0f}s: no sub-ranges returned, keeping original")
+                continue
+
+            removed = (span.end - span.start) - sum(s.end - s.start for s in sub_spans)
+            print(
+                f"    Mega-span {span.start:.0f}-{span.end:.0f}s refined into "
+                f"{len(sub_spans)} sub-span(s), freed {removed:.0f}s"
+            )
+            refined.extend(sub_spans)
+
+        usage = usage_total if called else None
+        return self._merge_overlapping_spans(refined), usage
+
     def process_job(self, job: EpisodeJob) -> None:
         """Process a single episode job.
 
@@ -1510,6 +1723,24 @@ If in doubt, keep the ad (it's safer to remove a questionable segment than leave
                             detection_source = "parallel"
 
                             if ad_spans:
+                                # Refine implausibly long ("mega") merged spans
+                                # first, while they still exist as one span.
+                                # Verify/cluster below would otherwise fragment
+                                # them and obscure that the bulk is real content.
+                                ad_spans, mega_usage = self._refine_mega_spans(
+                                    ad_spans, segments, sponsor_info, gemini_candidates
+                                )
+                                if mega_usage:
+                                    mega_cost = self._calculate_llm_cost(
+                                        provider=mega_usage.get("provider", "openai"),
+                                        model=mega_usage.get("model", self.config.llm.model),
+                                        input_tokens=mega_usage.get("input_tokens", 0),
+                                        output_tokens=mega_usage.get("output_tokens", 0),
+                                    )
+                                    total_cost += mega_cost
+                                    all_usages.append(mega_usage)
+                                    print(f"    Mega-span refine cost: ${mega_cost:.4f}")
+
                                 ad_spans = self._verify_long_ad_spans(
                                     ad_spans, segments, sponsor_info
                                 )
@@ -1582,6 +1813,7 @@ If in doubt, keep the ad (it's safer to remove a questionable segment than leave
                                     print(f"    Review cost: ${review_cost:.4f}")
                             else:
                                 print("  Skipping final LLM review (clean result, no review signal)")
+
                             if merge_usage:
                                 if "input_tokens" in merge_usage:
                                     merge_cost = self._calculate_llm_cost(
@@ -1753,6 +1985,17 @@ If in doubt, keep the ad (it's safer to remove a questionable segment than leave
                     ad_spans = llm_client.refine_candidates(
                         segments, candidates, self.config,
                         sponsors=sponsor_info, podcast_title=job.podcast_title
+                    )
+
+            # Final safety net for every detection path: keep spans in range so
+            # the splicer never tries to cut audio outside [0, duration].
+            if ad_spans:
+                before_clamp = len(ad_spans)
+                ad_spans = self._clamp_spans_to_duration(ad_spans, duration)
+                if len(ad_spans) != before_clamp:
+                    print(
+                        f"  Clamped spans to [0, {duration:.0f}s]: "
+                        f"{before_clamp} -> {len(ad_spans)}"
                     )
 
             # Save detection result artifact if artifacts_dir is set
