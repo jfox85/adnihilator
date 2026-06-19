@@ -1364,8 +1364,12 @@ If in doubt, keep the ad (it's safer to remove a questionable segment than leave
         if len(transcript) <= budget:
             return transcript
         marker = "\n[... middle of span omitted for length ...]\n"
+        if budget < len(marker):
+            # Budget too small to fit the elision marker; degrade to a plain
+            # head truncation so the result still respects the budget.
+            return transcript[:budget]
         # Reserve room for the marker so the result stays within budget.
-        avail = max(budget - len(marker), 0)
+        avail = budget - len(marker)
         head_len = avail // 2
         tail_len = avail - head_len
         head = transcript[:head_len]

@@ -420,6 +420,15 @@ def test_truncate_head_tail_single_oversized_line_stays_within_budget() -> None:
     assert "middle of span omitted" in out
 
 
+def test_truncate_head_tail_below_marker_budget_respects_budget() -> None:
+    # Budget smaller than the elision marker: degrade to plain head truncation,
+    # never exceeding the budget.
+    text = "x" * 1000
+    for budget in (0, 1, 10, 40):
+        out = WorkerDaemon._truncate_transcript_head_tail(text, budget)
+        assert len(out) <= budget
+
+
 def test_mega_span_refine_cap_counts_failed_attempts(monkeypatch) -> None:
     """Failing API calls still consume the per-episode cap."""
     d = _daemon_with_config()
