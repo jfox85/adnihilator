@@ -1,5 +1,7 @@
 """Heuristic-based advertisement detection using keyword patterns."""
 
+import re
+
 from .models import AdCandidate, TranscriptSegment, SponsorInfo
 from .sponsors import generate_sponsor_keywords
 
@@ -85,6 +87,24 @@ OUTRO_REGION_DURATION = 120.0  # Last 2 minutes (matches pre-roll)
 OUTRO_MIN_EPISODE_LENGTH = 180.0  # Only add outro region for episodes > 3 minutes
 
 
+def _contains_phrase(text: str, phrase: str) -> bool:
+    """Return whether phrase appears as a standalone phrase in text.
+
+    Plain substring matching caused short sponsor names such as "Scribe" to
+    match ordinary words like "describe" and "subscribed", producing noisy
+    keyword spans. Keep punctuation-heavy URL patterns substring-based, but
+    require alphanumeric phrases to start/end on non-word boundaries.
+    """
+    phrase = phrase.strip().lower()
+    if not phrase:
+        return False
+
+    if not (phrase[0].isalnum() and phrase[-1].isalnum()):
+        return phrase in text
+
+    return re.search(rf"(?<![a-z0-9]){re.escape(phrase)}(?![a-z0-9])", text) is not None
+
+
 def score_segment(
     segment: TranscriptSegment,
     duration: float,
@@ -113,7 +133,10 @@ def score_segment(
     is_strong = False
     sponsors_found: list[str] = []
 
-    # Check for keyword matches
+    # Check for built-in keyword matches. These remain substring-based to
+    # preserve recall for messy transcripts (for example, host-read CTAs can be
+    # transcribed loosely). Sponsor-specific matching below is stricter because
+    # short sponsor names such as "Scribe" otherwise match "describe".
     for pattern, category in KEYWORD_PATTERNS:
         if pattern in search_text:
             weight = CATEGORY_WEIGHTS.get(category, 0.1)
@@ -127,7 +150,15 @@ def score_segment(
         for sponsor in sponsors.sponsors:
             keywords = generate_sponsor_keywords(sponsor, podcast_name)
             for keyword in keywords:
-                if keyword in search_text:
+                # Very short sponsor/code keywords (for example "IM") are too
+                # ambiguous in transcripts and can chain-merge huge stretches of
+                # normal conversation. Keep URL/punctuation-heavy keywords, but
+                # require plain alphanumeric terms to be at least 3 characters.
+                alnum_keyword = re.sub(r"[^a-z0-9]", "", keyword.lower())
+                if keyword.replace(" ", "").isalnum() and len(alnum_keyword) < 3:
+                    continue
+
+                if _contains_phrase(search_text, keyword):
                     score += 0.3  # Sponsor match weight
                     triggers.append(f"sponsor:{keyword}")
                     if sponsor.name not in sponsors_found:

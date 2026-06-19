@@ -405,6 +405,7 @@ def splice(
             ad_spans=result.ad_spans,
             duration=result.duration,
             min_confidence=min_confidence,
+            segments=result.segments,
         )
     except SpliceError as e:
         typer.echo(f"Error: {e}", err=True)

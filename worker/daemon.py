@@ -159,6 +159,136 @@ class WorkerDaemon:
 
         return input_cost + output_cost + audio_cost
 
+    def _extract_gemini_brand_terms(self, candidate: dict) -> list[str]:
+        """Extract likely advertiser/product terms from a Gemini reason string."""
+        reason = candidate.get("reason", "")
+        match = re.search(r":\s*(.*?)(?:\s*\([a-z]{2}\)|\s*-\s*|$)", reason, re.IGNORECASE)
+        raw = match.group(1) if match else reason
+        raw = re.sub(r"^Gemini\s+chunked:\s*", "", raw, flags=re.IGNORECASE)
+
+        terms = []
+        for part in re.split(r"[/,;&+]", raw):
+            part = part.strip(" .:-_\t\n")
+            if not part:
+                continue
+            lowered = part.lower()
+            if lowered in {"gemini", "chunked", "host read", "host_read", "dynamic insertion"}:
+                continue
+            terms.append(part)
+            # Include the first content word as a fallback for phrases such as
+            # "Walmart Business" matching "business.walmart.com" in transcript.
+            first_word = re.sub(r"[^A-Za-z0-9]", "", part.split()[0]) if part.split() else ""
+            if len(first_word) >= 4 and first_word.lower() != lowered:
+                terms.append(first_word)
+
+        # De-duplicate while preserving order.
+        seen = set()
+        result = []
+        for term in terms:
+            key = term.lower()
+            if key not in seen:
+                seen.add(key)
+                result.append(term)
+        return result
+
+    def _contains_term(self, text: str, term: str) -> bool:
+        """Case-insensitive standalone term match for transcript validation."""
+        term = term.strip().lower()
+        if not term:
+            return False
+        text = text.lower()
+        if not (term[0].isalnum() and term[-1].isalnum()):
+            return term in text
+        return re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", text) is not None
+
+    def _rescue_misaligned_gemini_candidate(
+        self,
+        candidate: dict,
+        segments: list,
+        sponsor_keywords: set[str],
+        duration: float,
+        search_before_seconds: float = 120.0,
+        search_after_seconds: float = 90.0,
+        max_gap_seconds: float = 12.0,
+    ) -> dict | None:
+        """Shift a rejected Gemini candidate to nearby transcript ad evidence.
+
+        Gemini is good at identifying that a dynamic insertion exists, but on
+        chunked audio it can be late/early by tens of seconds. If validation at
+        the reported timestamp fails, scan a bounded nearby window for the
+        advertiser terms Gemini named plus strong CTA/URL evidence and return a
+        corrected candidate around the contiguous evidence block.
+        """
+        ad_type = candidate.get("ad_type", "unknown")
+        if ad_type not in {"dynamic_insertion", "network_bumper"}:
+            return None
+
+        start = candidate.get("start", 0.0)
+        end = candidate.get("end", 0.0)
+        window_start = max(0.0, start - search_before_seconds)
+        window_end = min(duration or float("inf"), end + search_after_seconds)
+
+        brand_terms = {t.lower() for t in self._extract_gemini_brand_terms(candidate)}
+        brand_terms.update(sponsor_keywords)
+        if not brand_terms:
+            return None
+
+        strong_ad_phrases = {
+            "learn more", "terms apply", "free delivery", "free trial",
+            "get started", "sign up", "visit", "go to", "dot com", ".com",
+            "promo code", "use code", "discount", "wherever you buy",
+        }
+
+        evidence_segments = []
+        for seg in segments:
+            if seg.end < window_start or seg.start > window_end:
+                continue
+            text = seg.text.lower()
+            has_brand = any(self._contains_term(text, term) for term in brand_terms)
+            has_cta = any(phrase in text for phrase in strong_ad_phrases)
+            # Require brand evidence, or a CTA directly adjacent to an already
+            # branded product pitch. This avoids generic show-content CTAs.
+            if has_brand or has_cta:
+                evidence_segments.append((seg, has_brand))
+
+        if not evidence_segments:
+            return None
+
+        # Choose the contiguous evidence cluster nearest the original Gemini
+        # candidate. Merge brief gaps so multi-ad dynamic blocks remain intact.
+        clusters = []
+        current = [evidence_segments[0]]
+        for item in evidence_segments[1:]:
+            previous_seg = current[-1][0]
+            seg = item[0]
+            if seg.start - previous_seg.end <= max_gap_seconds:
+                current.append(item)
+            else:
+                clusters.append(current)
+                current = [item]
+        clusters.append(current)
+
+        branded_clusters = [cluster for cluster in clusters if any(has_brand for _, has_brand in cluster)]
+        if not branded_clusters:
+            return None
+
+        def cluster_distance(cluster: list[tuple[object, bool]]) -> float:
+            cluster_start = cluster[0][0].start
+            cluster_end = cluster[-1][0].end
+            if cluster_end < start:
+                return start - cluster_end
+            if cluster_start > end:
+                return cluster_start - end
+            return 0.0
+
+        cluster = min(branded_clusters, key=cluster_distance)
+        corrected = candidate.copy()
+        corrected["start"] = max(0.0, cluster[0][0].start - 1.0)
+        corrected["end"] = min(duration or cluster[-1][0].end, cluster[-1][0].end + 1.0)
+        corrected["reason"] = f"{candidate.get('reason', 'Gemini candidate')} (timestamp rescued from transcript)"
+        corrected["source"] = candidate.get("source", "gemini")
+        return corrected
+
     def _validate_gemini_candidates(
         self,
         gemini_candidates: list[dict],
@@ -247,8 +377,21 @@ class WorkerDaemon:
             if has_sponsor or has_ad_keyword or has_gemini_sponsor:
                 validated.append(candidate)
             else:
-                rejected.append(candidate)
-                print(f"    Rejected Gemini candidate {start:.0f}-{end:.0f}s: no ad evidence in transcript")
+                rescued = self._rescue_misaligned_gemini_candidate(
+                    candidate,
+                    segments,
+                    sponsor_keywords,
+                    duration,
+                )
+                if rescued:
+                    validated.append(rescued)
+                    print(
+                        f"    Rescued Gemini candidate {start:.0f}-{end:.0f}s "
+                        f"-> {rescued['start']:.0f}-{rescued['end']:.0f}s via transcript evidence"
+                    )
+                else:
+                    rejected.append(candidate)
+                    print(f"    Rejected Gemini candidate {start:.0f}-{end:.0f}s: no ad evidence in transcript")
 
         return validated, rejected
 
@@ -1475,6 +1618,7 @@ If in doubt, keep the ad (it's safer to remove a questionable segment than leave
                 str(output_path),
                 ad_spans,
                 duration,
+                segments=segments,
             )
 
             # Upload to R2

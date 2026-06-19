@@ -129,6 +129,7 @@ def reprocess_episode(
             str(output_path),
             ad_spans,
             existing.duration,
+            segments=existing.segments,
         )
         print(f"    Removed {stats['time_removed']:.0f}s, new duration: {stats['new_duration']:.0f}s")
 
