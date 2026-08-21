@@ -18,6 +18,10 @@ KEYWORD_PATTERNS: list[tuple[str, str]] = [
     ("thank our sponsor", "intro_sponsor"),
     ("word from our sponsor", "intro_sponsor"),
     ("message from our sponsor", "intro_sponsor"),
+    ("let's take a quick break", "intro_sponsor"),
+    ("let us take a quick break", "intro_sponsor"),
+    ("thank you to our friends at", "intro_sponsor"),
+    ("thanks to our friends at", "intro_sponsor"),
     # Promo codes and CTAs
     ("promo code", "promo_code"),
     ("use code", "promo_code"),
@@ -30,11 +34,15 @@ KEYWORD_PATTERNS: list[tuple[str, str]] = [
     ("go to", "cta"),
     ("head over to", "cta"),
     ("check out", "cta"),
+    ("click the link", "cta"),
+    ("scan the qr", "cta"),
     ("sign up at", "cta"),
     ("get started at", "cta"),
     # URL patterns (including spelled-out slashes from transcription)
     (".com/", "url"),
     (".com slash", "url"),  # Transcribed "slash" (e.g., "human.com slash tim")
+    (".com", "url"),
+    ("the url is", "url"),
     (".io/", "url"),
     (".io slash", "url"),
     (".co/", "url"),
@@ -47,6 +55,7 @@ KEYWORD_PATTERNS: list[tuple[str, str]] = [
     ("percent off", "offer"),
     ("% off", "offer"),
     ("first month free", "offer"),
+    ("free guide", "offer"),
     ("risk free", "offer"),
     ("money back guarantee", "offer"),
 ]
@@ -69,6 +78,10 @@ STRONG_AD_PATTERNS = [
     "sponsored by",
     "word from our sponsor",
     "message from our sponsor",
+    "let's take a quick break",
+    "let us take a quick break",
+    "thank you to our friends at",
+    "thanks to our friends at",
 ]
 
 # Threshold for considering a segment "ad-like"

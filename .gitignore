@@ -94,3 +94,17 @@ scripts/run-worker.sh
 
 # Whisper models cache
 whisper_models/
+
+# DevX keeps generated secrets, databases, logs, and archives under .devx/.
+.devx/*
+!.devx/README.md
+!.devx/bootstrap.sh
+!.devx/config.yaml
+!.devx/python.sh
+!.devx/session.yaml.tmpl
+!.devx/start_service.sh
+
+# DevX session worktrees are generated from committed branches.
+.worktrees/
+.envrc
+.tmuxp.yaml

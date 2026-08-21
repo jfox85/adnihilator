@@ -6,6 +6,7 @@ import re
 import subprocess
 import tempfile
 import time
+import warnings
 from pathlib import Path
 from typing import Optional
 
@@ -50,6 +51,18 @@ MEGA_REFINE_MAX_CALLS_PER_EPISODE = 4
 # send head + tail so ad copy at either end still reaches the model.
 MEGA_REFINE_TRANSCRIPT_BUDGET = 8000
 
+# Gemini's audio timestamps are estimates. A candidate is considered materially
+# misaligned when its transcript-localized boundary differs by more than this.
+GEMINI_MAX_BOUNDARY_DRIFT_SECONDS = 15.0
+
+# Reported and transcript-localized durations may differ slightly because the
+# transcript omits silence/music. Larger ratios indicate unreliable boundaries.
+GEMINI_MAX_DURATION_RATIO = 2.5
+
+
+class DetectionSafetyError(RuntimeError):
+    """Raised when required ad-detection safety checks cannot run."""
+
 
 class WorkerDaemon:
     """Daemon that processes podcast episodes."""
@@ -81,6 +94,62 @@ class WorkerDaemon:
         self.config = load_config(str(config_path)) if config_path.exists() else load_config()
 
         self.artifacts_dir = Path(artifacts_dir) if artifacts_dir else None
+        self._validate_runtime_dependencies()
+
+    def _validate_runtime_dependencies(self) -> None:
+        """Fail at startup when a required detection runtime is unavailable.
+
+        The worker must not silently process episodes with a cross-architecture
+        OpenAI installation because merge/review failures can publish unsafe
+        cuts. Gemini is also required when enabled because transcript-only
+        processing would silently reduce detection coverage.
+        """
+        if self.config.llm.provider == "openai":
+            if not self.config.llm.api_key:
+                raise DetectionSafetyError(
+                    "OPENAI_API_KEY is required; refusing to start worker"
+                )
+
+            try:
+                from openai import OpenAI
+
+                OpenAI(api_key=self.config.llm.api_key)
+            except Exception as e:
+                raise DetectionSafetyError(
+                    f"OpenAI runtime is unavailable; refusing to start worker: {e}"
+                ) from e
+
+        if self.config.gemini.enabled:
+            if not self.config.gemini.api_key:
+                raise DetectionSafetyError(
+                    "GEMINI_API_KEY is required when Gemini detection is enabled; "
+                    "refusing to start worker"
+                )
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", FutureWarning)
+                    import google.generativeai  # noqa: F401
+            except Exception as e:
+                raise DetectionSafetyError(
+                    f"Gemini runtime is unavailable; refusing to start worker: {e}"
+                ) from e
+
+    @staticmethod
+    def _ensure_parallel_detection_succeeded(
+        gemini_error: str | None,
+        transcript_error: str | None,
+    ) -> None:
+        """Reject an episode when either required detection lane fails."""
+        if gemini_error:
+            raise DetectionSafetyError(
+                "Required Gemini detection failed; refusing to splice episode: "
+                f"{gemini_error}"
+            )
+        if transcript_error:
+            raise DetectionSafetyError(
+                "Required transcript/keyword detection failed; refusing to splice "
+                f"episode: {transcript_error}"
+            )
 
     def _get_openai_client(self):
         """Get OpenAI client for sponsor extraction LLM fallback."""
@@ -233,18 +302,19 @@ class WorkerDaemon:
         duration: float,
         search_before_seconds: float = 120.0,
         search_after_seconds: float = 90.0,
-        max_gap_seconds: float = 12.0,
+        max_gap_seconds: float = 30.0,
     ) -> dict | None:
-        """Shift a rejected Gemini candidate to nearby transcript ad evidence.
+        """Shift a Gemini candidate to nearby transcript ad evidence.
 
         Gemini is good at identifying that a dynamic insertion exists, but on
-        chunked audio it can be late/early by tens of seconds. If validation at
-        the reported timestamp fails, scan a bounded nearby window for the
-        advertiser terms Gemini named plus strong CTA/URL evidence and return a
-        corrected candidate around the contiguous evidence block.
+        chunked audio it can be late/early by tens of seconds. Scan a bounded
+        nearby window for the advertiser terms Gemini named plus strong CTA/URL
+        evidence and return a corrected candidate around the contiguous
+        evidence block. Host reads need this too: Gemini frequently identifies
+        the correct sponsor but places the read near the wrong part of a chunk.
         """
         ad_type = candidate.get("ad_type", "unknown")
-        if ad_type not in {"dynamic_insertion", "network_bumper"}:
+        if ad_type not in {"dynamic_insertion", "network_bumper", "host_read"}:
             return None
 
         start = candidate.get("start", 0.0)
@@ -261,6 +331,7 @@ class WorkerDaemon:
             "learn more", "terms apply", "free delivery", "free trial",
             "get started", "sign up", "visit", "go to", "dot com", ".com",
             "promo code", "use code", "discount", "wherever you buy",
+            "click the link", "link in the description", "scan the qr",
         }
 
         evidence_segments = []
@@ -306,12 +377,203 @@ class WorkerDaemon:
             return 0.0
 
         cluster = min(branded_clusters, key=cluster_distance)
+        cluster_start = cluster[0][0].start
+        cluster_end = cluster[-1][0].end
+
+        # Include a nearby explicit intro or transition. Brand evidence often
+        # starts several seconds after "let's take a quick break", while the CTA
+        # may be followed by "back to the show".
+        intro_phrases = {
+            "brought to you by", "sponsored by", "thanks to our",
+            "thank you to our", "let's take a quick break",
+            "let us take a quick break", "today's podcast is brought",
+            "i want to tell you about",
+        }
+        end_phrases = {
+            "back to the show", "now back to the show",
+            "wherever you get your podcasts", "terms apply",
+            "members fdic",
+        }
+        nearby_segments = [
+            seg for seg in segments
+            if seg.end >= window_start and seg.start <= window_end
+        ]
+
+        for seg in reversed(nearby_segments):
+            if seg.end > cluster_start or cluster_start - seg.end > 45.0:
+                continue
+            if any(phrase in seg.text.lower() for phrase in intro_phrases):
+                cluster_start = seg.start
+                break
+
+        for seg in nearby_segments:
+            if seg.start < cluster_end or seg.start - cluster_end > 30.0:
+                continue
+            if any(phrase in seg.text.lower() for phrase in end_phrases):
+                cluster_end = seg.end
+                break
+
+        reported_duration = max(0.0, end - start)
+        localized_duration = max(0.0, cluster_end - cluster_start)
+        duration_note = ""
+        if reported_duration > 0 and localized_duration > 0:
+            duration_ratio = max(
+                reported_duration / localized_duration,
+                localized_duration / reported_duration,
+            )
+            # Surface moderate length disagreement for auditability even when
+            # boundary drift/overlap is the condition that forces relocation.
+            if duration_ratio > 1.5:
+                duration_note = (
+                    f"; duration mismatch {reported_duration:.0f}s reported/"
+                    f"{localized_duration:.0f}s localized"
+                )
+
         corrected = candidate.copy()
-        corrected["start"] = max(0.0, cluster[0][0].start - 1.0)
-        corrected["end"] = min(duration or cluster[-1][0].end, cluster[-1][0].end + 1.0)
-        corrected["reason"] = f"{candidate.get('reason', 'Gemini candidate')} (timestamp rescued from transcript)"
+        corrected["start"] = max(0.0, cluster_start - 1.0)
+        corrected["end"] = min(duration or cluster_end, cluster_end + 1.0)
+        corrected["reason"] = (
+            f"{candidate.get('reason', 'Gemini candidate')} "
+            f"(timestamp rescued from transcript{duration_note})"
+        )
         corrected["source"] = candidate.get("source", "gemini")
         return corrected
+
+    @staticmethod
+    def _candidate_alignment_is_unsafe(
+        candidate: dict,
+        localized: dict,
+    ) -> bool:
+        """Return whether Gemini and transcript-localized boundaries disagree."""
+        start = float(candidate.get("start", 0.0))
+        end = float(candidate.get("end", 0.0))
+        localized_start = float(localized.get("start", 0.0))
+        localized_end = float(localized.get("end", 0.0))
+
+        reported_duration = max(0.0, end - start)
+        localized_duration = max(0.0, localized_end - localized_start)
+        if reported_duration <= 0 or localized_duration <= 0:
+            return True
+
+        overlap = max(0.0, min(end, localized_end) - max(start, localized_start))
+        overlap_ratio = overlap / min(reported_duration, localized_duration)
+        boundary_drift = max(
+            abs(start - localized_start),
+            abs(end - localized_end),
+        )
+        duration_ratio = max(
+            reported_duration / localized_duration,
+            localized_duration / reported_duration,
+        )
+
+        return bool(
+            overlap_ratio < 0.5
+            or boundary_drift > GEMINI_MAX_BOUNDARY_DRIFT_SECONDS
+            or duration_ratio > GEMINI_MAX_DURATION_RATIO
+        )
+
+    def _find_explicit_transcript_ad_spans(
+        self,
+        segments: list,
+        duration: float,
+        max_ad_duration: float = 120.0,
+    ) -> list[AdSpan]:
+        """Find ads with both an explicit intro and CTA/legal ending.
+
+        This deterministic lane preserves recall when Gemini omits an ad and
+        keeps boundaries narrow enough to be safe. A transition alone is not
+        sufficient; the following block must also contain promotional or legal
+        ending evidence.
+        """
+        intro_phrases = {
+            "brought to you by", "sponsored by", "thanks to our sponsor",
+            "our sponsor today", "today's sponsor", "today's podcast is brought",
+            "let's take a quick break", "let us take a quick break",
+            "i want to tell you about",
+        }
+        ending_phrases = {
+            ".com", "promo code", "use code", "learn more", "sign up",
+            "click the link", "link in the description", "scan the qr",
+            "members fdic", "terms apply", "back to the show",
+            "wherever you get your podcasts",
+        }
+        sorted_segments = sorted(segments, key=lambda seg: seg.start)
+        spans = []
+
+        for intro in sorted_segments:
+            intro_text = intro.text.lower()
+            matched_intro = next(
+                (phrase for phrase in intro_phrases if phrase in intro_text),
+                None,
+            )
+            if not matched_intro:
+                continue
+
+            window_end = min(duration, intro.start + max_ad_duration)
+            evidence_segments = [
+                seg for seg in sorted_segments
+                if seg.start >= intro.start and seg.start <= window_end
+                and any(phrase in seg.text.lower() for phrase in ending_phrases)
+                and (
+                    seg is not intro
+                    or any(
+                        phrase in seg.text.lower()
+                        for phrase in ending_phrases - {".com"}
+                    )
+                )
+            ]
+            if not evidence_segments:
+                continue
+
+            end_segment = evidence_segments[-1]
+            spans.append(AdSpan(
+                start=max(0.0, intro.start - 0.5),
+                end=min(duration, end_segment.end + 0.5),
+                confidence=0.9,
+                reason=(
+                    f"Explicit transcript ad: {matched_intro}; "
+                    "promotional/legal ending"
+                ),
+                candidate_indices=[],
+                sources=["transcript_explicit"],
+                ad_type="host_read",
+            ))
+
+        return self._merge_overlapping_spans(spans)
+
+    @staticmethod
+    def _apply_explicit_transcript_spans(
+        ad_spans: list[AdSpan],
+        explicit_spans: list[AdSpan],
+    ) -> list[AdSpan]:
+        """Replace broader overlapping guesses with exact explicit spans."""
+        result = list(ad_spans)
+        for explicit in explicit_spans:
+            overlapping = [
+                span for span in result
+                if min(span.end, explicit.end) > max(span.start, explicit.start)
+            ]
+            result = [span for span in result if span not in overlapping]
+
+            sources = list(explicit.sources)
+            for span in overlapping:
+                for source in span.sources:
+                    if source not in sources:
+                        sources.append(source)
+
+            result.append(AdSpan(
+                start=explicit.start,
+                end=explicit.end,
+                confidence=max(
+                    [explicit.confidence] + [span.confidence for span in overlapping]
+                ),
+                reason=explicit.reason,
+                candidate_indices=[],
+                sources=sources,
+                ad_type=explicit.ad_type,
+            ))
+
+        return sorted(result, key=lambda span: span.start)
 
     def _validate_gemini_candidates(
         self,
@@ -377,6 +639,25 @@ class WorkerDaemon:
                 validated.append(candidate)
                 continue
 
+            # Independently localize named-brand evidence even when the original
+            # candidate happens to contain a generic CTA. Validation alone used
+            # to accept shifted spans such as a Hampton ad reported one minute
+            # late because "check out" appeared inside the ±30s buffer.
+            localized = self._rescue_misaligned_gemini_candidate(
+                candidate,
+                segments,
+                sponsor_keywords,
+                duration,
+            )
+            if localized and self._candidate_alignment_is_unsafe(candidate, localized):
+                validated.append(localized)
+                print(
+                    f"    Relocated unsafe Gemini candidate {start:.0f}-{end:.0f}s "
+                    f"-> {localized['start']:.0f}-{localized['end']:.0f}s "
+                    f"after boundary/length check"
+                )
+                continue
+
             # Mid-roll ads need transcript validation (Gemini hallucinates these more)
             context_start = max(0, start - buffer_seconds)
             context_end = end + buffer_seconds
@@ -426,34 +707,57 @@ class WorkerDaemon:
         buffer_seconds: float = 30.0,
         max_chars: int = 15000,
     ) -> str:
-        """Extract single contiguous transcript block around all candidates.
+        """Extract candidate-centered transcript blocks without losing the tail.
 
-        More efficient than per-candidate extraction - sends one block to LLM.
+        A single min/max window can span an entire long episode. Head-only
+        truncation then hides late candidates such as post-roll ads. Build one
+        bounded block per candidate and, if necessary, divide the character
+        budget across blocks so every candidate remains represented.
         """
         if not candidates or not segments:
             return ""
 
-        # Find min/max across all candidates
-        min_start = min(c["start"] for c in candidates)
-        max_end = max(c["end"] for c in candidates)
+        blocks = []
+        for index, candidate in enumerate(sorted(candidates, key=lambda c: c["start"])):
+            context_start = max(0.0, candidate["start"] - buffer_seconds)
+            context_end = candidate["end"] + buffer_seconds
+            parts = [
+                f"[{seg.start:.0f}s] {seg.text}"
+                for seg in segments
+                if seg.end >= context_start and seg.start <= context_end
+            ]
+            if parts:
+                blocks.append(
+                    f"--- Candidate {index + 1}: "
+                    f"{candidate['start']:.0f}-{candidate['end']:.0f}s ---\n"
+                    + "\n".join(parts)
+                )
 
-        # Add buffer
-        context_start = max(0, min_start - buffer_seconds)
-        context_end = max_end + buffer_seconds
+        if not blocks:
+            return ""
 
-        # Extract text with timestamps
-        parts = []
-        for seg in segments:
-            if seg.end >= context_start and seg.start <= context_end:
-                parts.append(f"[{seg.start:.0f}s] {seg.text}")
+        result = "\n\n".join(blocks)
+        if len(result) <= max_chars:
+            return result
 
-        result = "\n".join(parts)
+        separator_budget = max(0, (len(blocks) - 1) * 2)
+        per_block_budget = max(1, (max_chars - separator_budget) // len(blocks))
+        marker = "\n[...candidate context truncated...]\n"
+        truncated_blocks = []
+        for block in blocks:
+            if len(block) <= per_block_budget:
+                truncated_blocks.append(block)
+                continue
+            if per_block_budget <= len(marker):
+                truncated_blocks.append(block[:per_block_budget])
+                continue
+            side_budget = (per_block_budget - len(marker)) // 2
+            tail_budget = per_block_budget - len(marker) - side_budget
+            truncated_blocks.append(
+                block[:side_budget] + marker + block[-tail_budget:]
+            )
 
-        # Truncate if too long
-        if len(result) > max_chars:
-            result = result[:max_chars] + "\n[...truncated...]"
-
-        return result
+        return "\n\n".join(truncated_blocks)
 
     def _simple_merge_candidates(
         self,
@@ -464,7 +768,29 @@ class WorkerDaemon:
 
         Preserves source tracking.
         """
-        all_candidates = gemini_candidates + keyword_candidates
+        # Generic pre/outro regions are discovery hints, not verified ads. If a
+        # Gemini candidate overlaps one, omit the generic region so it cannot
+        # inherit Gemini's confidence and expand a short ad into a two-minute
+        # destructive cut.
+        filtered_keyword_candidates = []
+        for candidate in keyword_candidates:
+            matched = set(candidate.get("matched_keywords", []))
+            reason = candidate.get("reason", "")
+            is_positional_only = bool(
+                matched.intersection({"pre_roll_region", "outro_region"})
+                or "pre_roll_region" in reason
+                or "outro_region" in reason
+            )
+            overlaps_gemini = any(
+                min(candidate["end"], gemini["end"])
+                > max(candidate["start"], gemini["start"])
+                for gemini in gemini_candidates
+            )
+            if is_positional_only and overlaps_gemini:
+                continue
+            filtered_keyword_candidates.append(candidate)
+
+        all_candidates = gemini_candidates + filtered_keyword_candidates
         if not all_candidates:
             return []
 
@@ -1032,7 +1358,7 @@ Return JSON:
                 "confidence": ad.confidence,
                 "sources": ad.sources if hasattr(ad, 'sources') else [],
                 "reason": ad.reason,
-                "transcript_snippet": ad_text[:300] + "..." if len(ad_text) > 300 else ad_text,
+                "transcript_snippet": ad_text[:1200] + "..." if len(ad_text) > 1200 else ad_text,
             })
 
         sponsor_names = [s.name for s in sponsors.sponsors] if sponsors and sponsors.sponsors else []
@@ -1064,7 +1390,7 @@ REVIEW TASKS:
 3. Check if any ads should be MERGED (e.g., same sponsor split into multiple spans)
 4. Flag any concerns about the detection quality
 
-OUTPUT FORMAT:
+Return JSON in this exact format:
 {{
     "approved_ads": [<list of ad indices to KEEP>],
     "rejected_ads": [
@@ -1078,7 +1404,9 @@ OUTPUT FORMAT:
 }}
 
 Be CONSERVATIVE - only reject ads if you're confident they're false positives.
-If in doubt, keep the ad (it's safer to remove a questionable segment than leave an ad in)."""
+If in doubt, reject the cut: preserving podcast content is safer than removing
+a questionable segment. A missed ad can be corrected on reprocessing; deleted
+content cannot be recovered from the processed file."""
 
             response = client.chat.completions.create(
                 model=self.config.llm.model,
@@ -1110,6 +1438,12 @@ If in doubt, keep the ad (it's safer to remove a questionable segment than leave
                 reason = rej.get("reason", "unknown")
                 if idx is not None and 0 <= idx < len(ad_spans):
                     ad = ad_spans[idx]
+                    if "transcript_explicit" in ad.sources:
+                        print(
+                            f"    Keeping ad {idx} ({ad.start:.0f}-{ad.end:.0f}s): "
+                            "explicit transcript intro + ending evidence"
+                        )
+                        continue
                     print(f"    Rejecting ad {idx} ({ad.start:.0f}-{ad.end:.0f}s): {reason}")
                     approved_indices.discard(idx)
 
@@ -1141,8 +1475,9 @@ If in doubt, keep the ad (it's safer to remove a questionable segment than leave
             return final_spans, usage
 
         except Exception as e:
-            print(f"    Final review failed: {e}")
-            return ad_spans, None
+            raise DetectionSafetyError(
+                f"Required final LLM review failed; refusing to splice episode: {e}"
+            ) from e
 
     def _llm_merge_candidates(
         self,
@@ -1185,9 +1520,9 @@ If in doubt, keep the ad (it's safer to remove a questionable segment than leave
                 # Only fallback on actual exception (parse error, API error, etc.)
                 return spans, usage
             except Exception as e:
-                print(f"  Warning: LLM merge failed ({e}), using simple merge fallback")
-                # Fallback to simple merge on actual error (still return usage if available)
-                return self._simple_merge_candidates(gemini_candidates, keyword_candidates), usage
+                raise DetectionSafetyError(
+                    f"Required LLM merge failed; refusing to splice episode: {e}"
+                ) from e
 
         # No LLM client available - use simple merge
         return self._simple_merge_candidates(gemini_candidates, keyword_candidates), None
@@ -1766,10 +2101,10 @@ range. If you cannot find any clear ad copy, return an empty list."""
                     # Update status after parallel work completes
                     self.api_client.update_progress(job.id, "detecting")
 
-                    if gemini_error:
-                        print(f"  Warning: Gemini failed: {gemini_error}")
-                    if whisper_error:
-                        print(f"  Warning: Whisper/keywords failed: {whisper_error}")
+                    self._ensure_parallel_detection_succeeded(
+                        gemini_error,
+                        whisper_error,
+                    )
 
                     print(f"    Gemini: {len(gemini_candidates)} candidates")
                     print(f"    Keywords: {len(keyword_candidates)} candidates")
@@ -1849,6 +2184,18 @@ range. If you cannot find any clear ad copy, return an empty list."""
                                     ad_spans, gemini_candidates
                                 )
                                 ad_spans = self._merge_overlapping_spans(ad_spans)
+
+                            explicit_spans = self._find_explicit_transcript_ad_spans(
+                                segments, duration
+                            )
+                            if explicit_spans:
+                                ad_spans = self._apply_explicit_transcript_spans(
+                                    ad_spans, explicit_spans
+                                )
+                                print(
+                                    f"    Applied {len(explicit_spans)} explicit "
+                                    "transcript ad boundaries"
+                                )
 
                             print("  Validating sponsor coverage...")
                             covered, missing, validation_info = self._validate_sponsor_coverage(

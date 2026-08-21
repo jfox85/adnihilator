@@ -1,0 +1,69 @@
+session_name: AdNihilator - {{.Name}}
+start_directory: {{.Path}}
+suppress_history: false
+options:
+  base-index: 1
+  automatic-rename: "off"
+  mouse: on
+  status: on
+  status-interval: 5
+  status-left-length: 60
+  status-right-length: 120
+  status-left: '#[bold]AdNihilator - #{session_name}#[default] | #{window_index}:#{window_name}'
+  status-right: '#{pane_current_path} | %Y-%m-%d %H:%M'
+window_options:
+  window-status-format: ' #{window_index}:#{window_name} '
+  window-status-current-format: ' #[reverse]#{window_index}:#{window_name}#[default] '
+windows:
+  - window_name: agent
+    layout: tiled
+    shell_command_before:
+      - cd {{.Path}}{{range $name, $port := .Ports}}
+      - export {{$name}}={{$port}}{{end}}{{if .Routes}}{{range $service, $hostname := .Routes}}
+      - export {{toHostVar $service}}=http://{{$hostname}}{{end}}{{end}}
+      - export SESSION_NAME={{.Name}}
+    panes:
+      - pi -c
+
+  - window_name: codex
+    layout: tiled
+    shell_command_before:
+      - cd {{.Path}}{{range $name, $port := .Ports}}
+      - export {{$name}}={{$port}}{{end}}{{if .Routes}}{{range $service, $hostname := .Routes}}
+      - export {{toHostVar $service}}=http://{{$hostname}}{{end}}{{end}}
+      - export SESSION_NAME={{.Name}}
+    panes:
+      - codex resume --last || codex
+
+  - window_name: service
+    layout: main-horizontal
+    shell_command_before:
+      - cd {{.Path}}{{range $name, $port := .Ports}}
+      - export {{$name}}={{$port}}{{end}}{{if .Routes}}{{range $service, $hostname := .Routes}}
+      - export {{toHostVar $service}}=http://{{$hostname}}{{end}}{{end}}
+      - export SESSION_NAME={{.Name}}
+    panes:
+      - pane_name: web
+        shell_command: {{.Path}}/.devx/start_service.sh
+      - pane_name: shell
+        shell_command: >-
+          echo "Direct API: http://127.0.0.1:$API" &&
+          echo "DevX route: ${API_HOST:-not configured}" &&
+          echo "Health: curl -fsS http://127.0.0.1:$API/health" &&
+          echo "Local credentials: .devx/runtime/web.env" &&
+          bash
+
+  - window_name: tests
+    layout: tiled
+    shell_command_before:
+      - cd {{.Path}}{{range $name, $port := .Ports}}
+      - export {{$name}}={{$port}}{{end}}
+      - export SESSION_NAME={{.Name}}
+    panes:
+      - >-
+        echo '.devx/bootstrap.sh && .devx/python.sh -m pytest -q' &&
+        bash
+      - >-
+        echo '.devx/python.sh -m compileall -q adnihilator web worker tests' &&
+        echo 'The production worker is intentionally not started by DevX.' &&
+        bash
