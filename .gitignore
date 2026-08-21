@@ -106,3 +106,5 @@ whisper_models/
 
 # DevX session worktrees are generated from committed branches.
 .worktrees/
+.envrc
+.tmuxp.yaml
