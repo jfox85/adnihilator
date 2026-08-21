@@ -61,9 +61,9 @@ windows:
       - export SESSION_NAME={{.Name}}
     panes:
       - >-
-        echo '.devx/bootstrap.sh && .venv/bin/python -m pytest -q' &&
+        echo '.devx/bootstrap.sh && .devx/python.sh -m pytest -q' &&
         bash
       - >-
-        echo '.venv/bin/python -m compileall -q adnihilator web worker tests' &&
+        echo '.devx/python.sh -m compileall -q adnihilator web worker tests' &&
         echo 'The production worker is intentionally not started by DevX.' &&
         bash

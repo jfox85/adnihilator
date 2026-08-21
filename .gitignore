@@ -100,5 +100,9 @@ whisper_models/
 !.devx/README.md
 !.devx/bootstrap.sh
 !.devx/config.yaml
+!.devx/python.sh
 !.devx/session.yaml.tmpl
 !.devx/start_service.sh
+
+# DevX session worktrees are generated from committed branches.
+.worktrees/

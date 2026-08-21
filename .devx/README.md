@@ -17,6 +17,11 @@ Generated state stays inside the session worktree under `.devx/runtime/`:
   credentials and is created with mode `0600`.
 - `bootstrap.sha256` records the installed `pyproject.toml` dependency state.
 
+On Apple Silicon, the bootstrap and `python.sh` wrapper force native arm64
+execution even when a long-lived tmux server was originally started through
+Rosetta. This keeps compiled Python extensions consistent across service,
+interactive, and non-interactive commands.
+
 Feed synchronization is disabled with `FEED_SYNC_ENABLED=false`, so starting a
 session does not fetch subscribed feeds in the background. The generated worker
 key exists only so the web API can initialize safely; no worker is launched.
@@ -28,7 +33,7 @@ session worktree. Do not reuse these generated values outside the session.
 
 ```bash
 .devx/bootstrap.sh
-.venv/bin/python -m pytest -q
-.venv/bin/python -m compileall -q adnihilator web worker tests
+.devx/python.sh -m pytest -q
+.devx/python.sh -m compileall -q adnihilator web worker tests
 curl -fsS "http://127.0.0.1:$API/health"
 ```

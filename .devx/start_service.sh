@@ -14,8 +14,8 @@ credentials_file="$runtime_dir/web.env"
 mkdir -p "$runtime_dir"
 
 if [[ ! -f "$credentials_file" ]]; then
-  admin_password="$(.venv/bin/python -c 'import secrets; print(secrets.token_hex(24))')"
-  worker_api_key="$(.venv/bin/python -c 'import secrets; print(secrets.token_hex(24))')"
+  admin_password="$(.devx/python.sh -c 'import secrets; print(secrets.token_hex(24))')"
+  worker_api_key="$(.devx/python.sh -c 'import secrets; print(secrets.token_hex(24))')"
   {
     printf 'ADMIN_USERNAME=%s\n' 'devx-admin'
     printf 'ADMIN_PASSWORD=%s\n' "$admin_password"
@@ -36,7 +36,7 @@ export DATABASE_PATH="$runtime_dir/adnihilator.db"
 export FEED_SYNC_ENABLED=false
 export R2_PUBLIC_URL=""
 
-exec .venv/bin/python -m uvicorn web.app:app \
+exec .devx/python.sh -m uvicorn web.app:app \
   --host 127.0.0.1 \
   --port "$API" \
   --reload
