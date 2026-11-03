@@ -395,7 +395,6 @@ class GeminiChunkedClient:
         Returns:
             Tuple of (list of AdSpan, usage stats dict)
         """
-        import threading
         import time
 
         client = self._get_client()
@@ -417,7 +416,6 @@ class GeminiChunkedClient:
             all_detections = []
             errors = []
             usage_totals: dict[str, int] = {}
-            usage_lock = threading.Lock()
 
             def process_chunk(chunk_info):
                 chunk_path, chunk_start, chunk_end = chunk_info
@@ -428,10 +426,7 @@ class GeminiChunkedClient:
                     thinking_level=self.thinking_level,
                     usage_totals=chunk_usage,
                 )
-                with usage_lock:
-                    for key, value in chunk_usage.items():
-                        usage_totals[key] = usage_totals.get(key, 0) + value
-                return detections
+                return detections, chunk_usage
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_parallel) as executor:
                 futures = {executor.submit(process_chunk, c): c for c in chunks}
@@ -439,8 +434,10 @@ class GeminiChunkedClient:
                 for future in concurrent.futures.as_completed(futures):
                     chunk_info = futures[future]
                     try:
-                        detections = future.result()
+                        detections, chunk_usage = future.result()
                         all_detections.extend(detections)
+                        for key, value in chunk_usage.items():
+                            usage_totals[key] = usage_totals.get(key, 0) + value
                         logger.info(f"Chunk {chunk_info[1]:.0f}-{chunk_info[2]:.0f}s: {len(detections)} ads")
                     except Exception as e:
                         logger.error(f"Chunk {chunk_info[1]:.0f}-{chunk_info[2]:.0f}s failed: {e}")

@@ -268,3 +268,34 @@ class TestWorkerIntegration:
             )
             # Audio is billed as input tokens; no per-second surcharge.
             assert cost == pytest.approx(0.30 + 2.50)
+        prefixed = daemon._calculate_llm_cost(
+            provider="gemini", model="models/gemini-3.5-flash-lite",
+            input_tokens=1_000_000, output_tokens=0,
+        )
+        assert prefixed == pytest.approx(0.30)
+
+    def test_legacy_override_pricing_unchanged(self):
+        daemon = WorkerDaemon.__new__(WorkerDaemon)
+        cost = daemon._calculate_llm_cost(
+            provider="gemini", model="gemini-2.5-flash",
+            input_tokens=1_000_000, output_tokens=1_000_000, audio_duration_seconds=100.0,
+        )
+        assert cost == pytest.approx(0.15 + 0.60 + 100 * 0.000025)
+
+    def test_chunk_failure_fails_whole_run(self, tmp_path: Path, monkeypatch):
+        """Any failed chunk still refuses to return partial ad coverage."""
+        audio = tmp_path / "ep.mp3"
+        audio.touch()
+        chunks = [(tmp_path / "c0.mp3", 0.0, 300.0), (tmp_path / "c1.mp3", 300.0, 600.0)]
+        for path, _, _ in chunks:
+            path.touch()
+        monkeypatch.setattr(gemini_chunked, "split_audio_into_chunks",
+                            lambda *_a, **_k: chunks)
+        client = _mock_client('{"ads": []}')
+        client.models.generate_content.side_effect = [
+            SimpleNamespace(text='{"ads": []}', usage_metadata=_usage(), candidates=[]),
+            SimpleNamespace(text="not JSON", usage_metadata=_usage(), candidates=[]),
+        ]
+        with patch.object(gemini_chunked, "create_genai_client", return_value=client):
+            with pytest.raises(RuntimeError, match="refusing to return incomplete"):
+                GeminiChunkedClient(api_key="k").detect_ads(audio, max_parallel=1)

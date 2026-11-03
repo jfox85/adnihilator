@@ -251,7 +251,7 @@ class WorkerDaemon:
             },
         }
 
-        pricing = PRICING.get(provider, {}).get(model)
+        pricing = PRICING.get(provider, {}).get(model.removeprefix("models/"))
         if not pricing:
             return 0.0
 
