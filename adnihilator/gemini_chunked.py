@@ -9,8 +9,16 @@ import logging
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
+from .gemini_common import (
+    DEFAULT_GEMINI_MODEL,
+    DEFAULT_THINKING_LEVEL,
+    build_generate_config,
+    create_genai_client,
+    extract_usage,
+    file_state_name,
+)
 from .models import AdSpan, SponsorInfo
 
 logger = logging.getLogger(__name__)
@@ -83,24 +91,28 @@ def split_audio_into_chunks(
 
 
 def detect_ads_in_chunk(
-    genai,
+    client: Any,
     chunk_path: Path,
     chunk_start: float,
     chunk_end: float,
     model_name: str,
     podcast_title: Optional[str] = None,
     max_retries: int = 3,
+    thinking_level: str = DEFAULT_THINKING_LEVEL,
+    usage_totals: Optional[dict[str, int]] = None,
 ) -> list[dict]:
     """Detect ads in a single chunk.
 
     Args:
-        genai: Configured google.generativeai module
+        client: google-genai ``Client`` (thread-safe; shared across chunks)
         chunk_path: Path to the chunk audio file
         chunk_start: Start time of this chunk in the original audio
         chunk_end: End time of this chunk in the original audio
         model_name: Gemini model name
         podcast_title: Optional podcast title for context
         max_retries: Maximum retries on rate limit errors
+        thinking_level: Gemini 3+ thinking level (ignored for older models)
+        usage_totals: Optional dict to accumulate token usage into
 
     Returns:
         List of ad detections with absolute timestamps
@@ -111,7 +123,7 @@ def detect_ads_in_chunk(
     # Upload chunk with retry
     for attempt in range(max_retries):
         try:
-            audio_file = genai.upload_file(path=str(chunk_path))
+            audio_file = client.files.upload(file=str(chunk_path))
             break
         except Exception as e:
             if "429" in str(e) and attempt < max_retries - 1:
@@ -124,13 +136,13 @@ def detect_ads_in_chunk(
     # Wait for processing
     max_wait = 60
     start_wait = time.time()
-    while audio_file.state.name == "PROCESSING":
+    while file_state_name(audio_file) == "PROCESSING":
         if time.time() - start_wait > max_wait:
             raise ValueError(f"Chunk upload timeout: {chunk_path}")
         time.sleep(2)
-        audio_file = genai.get_file(audio_file.name)
+        audio_file = client.files.get(name=audio_file.name)
 
-    if audio_file.state.name == "FAILED":
+    if file_state_name(audio_file) == "FAILED":
         raise ValueError(f"Chunk upload failed: {chunk_path}")
 
     # Build prompt
@@ -179,12 +191,17 @@ Return JSON with start_time and end_time in SECONDS from clip start:
 
 If no ads found: {{"ads": []}}"""
 
-    # Call Gemini with retry on rate limit
-    model = genai.GenerativeModel(model_name)
+    # Call Gemini with retry on rate limit. Single user turn (prompt + audio);
+    # no prefilled model turn and no deprecated sampling parameters.
+    config = build_generate_config(model_name, thinking_level)
     response = None
     for attempt in range(max_retries):
         try:
-            response = model.generate_content([prompt, audio_file])
+            response = client.models.generate_content(
+                model=model_name,
+                contents=[prompt, audio_file],
+                config=config,
+            )
             break
         except Exception as e:
             if "429" in str(e) and attempt < max_retries - 1:
@@ -194,11 +211,16 @@ If no ads found: {{"ads": []}}"""
             else:
                 raise
 
-    if not response or not hasattr(response, "text") or not response.text:
+    response_text = getattr(response, "text", None) if response else None
+    if not response_text:
         raise ValueError(f"Empty Gemini response for chunk {chunk_path}")
 
+    if usage_totals is not None:
+        for key, value in extract_usage(response).items():
+            usage_totals[key] = usage_totals.get(key, 0) + value
+
     # Parse response
-    text = response.text.strip()
+    text = response_text.strip()
     if "```json" in text:
         text = text.split("```json")[1].split("```")[0].strip()
     elif "```" in text:
@@ -334,23 +356,22 @@ def merge_chunk_detections(
 class GeminiChunkedClient:
     """Client for chunked Gemini audio-based ad detection."""
 
-    def __init__(self, api_key: str, model: str = "gemini-2.5-flash"):
+    def __init__(
+        self,
+        api_key: str,
+        model: str = DEFAULT_GEMINI_MODEL,
+        thinking_level: str = DEFAULT_THINKING_LEVEL,
+    ):
         self.api_key = api_key
         self.model = model
-        self._genai = None
+        self.thinking_level = thinking_level
+        self._client: Any = None
 
-    def _get_genai(self):
-        """Lazily import and configure google.generativeai."""
-        if self._genai is None:
-            try:
-                import google.generativeai as genai
-                genai.configure(api_key=self.api_key)
-                self._genai = genai
-            except ImportError:
-                raise ImportError(
-                    "google-generativeai required. Run: pip install google-generativeai"
-                )
-        return self._genai
+    def _get_client(self) -> Any:
+        """Lazily create the google-genai client."""
+        if self._client is None:
+            self._client = create_genai_client(self.api_key)
+        return self._client
 
     def detect_ads(
         self,
@@ -374,9 +395,10 @@ class GeminiChunkedClient:
         Returns:
             Tuple of (list of AdSpan, usage stats dict)
         """
+        import threading
         import time
 
-        genai = self._get_genai()
+        client = self._get_client()
 
         logger.info(f"Starting chunked detection for {audio_path}")
         start_time = time.time()
@@ -394,13 +416,22 @@ class GeminiChunkedClient:
             # Process chunks in parallel
             all_detections = []
             errors = []
+            usage_totals: dict[str, int] = {}
+            usage_lock = threading.Lock()
 
             def process_chunk(chunk_info):
                 chunk_path, chunk_start, chunk_end = chunk_info
-                return detect_ads_in_chunk(
-                    genai, chunk_path, chunk_start, chunk_end,
-                    self.model, podcast_title
+                chunk_usage: dict[str, int] = {}
+                detections = detect_ads_in_chunk(
+                    client, chunk_path, chunk_start, chunk_end,
+                    self.model, podcast_title,
+                    thinking_level=self.thinking_level,
+                    usage_totals=chunk_usage,
                 )
+                with usage_lock:
+                    for key, value in chunk_usage.items():
+                        usage_totals[key] = usage_totals.get(key, 0) + value
+                return detections
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_parallel) as executor:
                 futures = {executor.submit(process_chunk, c): c for c in chunks}
@@ -436,6 +467,10 @@ class GeminiChunkedClient:
             "chunks_failed": len(errors),
             "raw_detections": len(all_detections),
             "merged_detections": len(ad_spans),
+            "input_tokens": usage_totals.get("input_tokens", 0),
+            "output_tokens": usage_totals.get("output_tokens", 0),
+            "thinking_tokens": usage_totals.get("thinking_tokens", 0),
+            "total_tokens": usage_totals.get("total_tokens", 0),
             "processing_time": total_time,
             "audio_duration_seconds": duration or 0,
         }
