@@ -58,7 +58,7 @@ def splice_audio(
                 check=True,
             )
         except subprocess.CalledProcessError as e:
-            raise SpliceError(f"Failed to copy audio: {e.stderr.decode()}")
+            raise SpliceError(f"Failed to copy audio: {e.stderr.decode(errors='replace')}")
 
         return {
             "ads_removed": 0,
@@ -251,7 +251,7 @@ def _splice_with_filter_complex(
     try:
         result = subprocess.run(cmd, capture_output=True, check=True)
     except subprocess.CalledProcessError as e:
-        raise SpliceError(f"ffmpeg filter_complex failed: {e.stderr.decode()}")
+        raise SpliceError(f"ffmpeg filter_complex failed: {e.stderr.decode(errors='replace')}")
 
 
 def _splice_with_concat(
@@ -285,7 +285,7 @@ def _splice_with_concat(
             try:
                 subprocess.run(cmd, capture_output=True, check=True)
             except subprocess.CalledProcessError as e:
-                raise SpliceError(f"Failed to extract segment {i}: {e.stderr.decode()}")
+                raise SpliceError(f"Failed to extract segment {i}: {e.stderr.decode(errors='replace')}")
 
         # Create concat list file
         concat_list = tmpdir_path / "concat_list.txt"
@@ -307,4 +307,4 @@ def _splice_with_concat(
         try:
             subprocess.run(cmd, capture_output=True, check=True)
         except subprocess.CalledProcessError as e:
-            raise SpliceError(f"Failed to concatenate segments: {e.stderr.decode()}")
+            raise SpliceError(f"Failed to concatenate segments: {e.stderr.decode(errors='replace')}")

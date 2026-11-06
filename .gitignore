@@ -108,3 +108,5 @@ whisper_models/
 .worktrees/
 .envrc
 .tmuxp.yaml
+
+.pi/tmp/
