@@ -2,6 +2,7 @@
 
 import shutil
 import subprocess
+import traceback
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -10,7 +11,7 @@ import pytest
 
 from adnihilator.audio import get_duration
 from adnihilator.models import AdSpan
-from adnihilator.splice import SpliceError, _splice_with_concat, splice_audio
+from adnihilator.splice import SpliceError, _splice_with_concat, _splice_with_filter_complex, splice_audio
 
 INVALID_DIAGNOSTIC = b"x" * 2998 + b"\xe2 invalid ffmpeg diagnostic"
 
@@ -21,6 +22,44 @@ def ffmpeg_failure() -> subprocess.CalledProcessError:
 
 
 class TestSpliceDiagnostics:
+    @pytest.mark.parametrize("stage", ["copy", "filter", "extract", "concat"])
+    @pytest.mark.parametrize("suffix", [b"", b"\xe2 \xff"])
+    def test_formatted_failure_traceback_does_not_expose_credentials(
+        self, stage: str, suffix: bytes
+    ) -> None:
+        """Suppress the raw command exception as well as sanitizing stderr."""
+        source = "https://name:SYNTHPASSWORD@example.invalid/audio?key=SYNTHCANARY"
+        error = subprocess.CalledProcessError(
+            1, ["ffmpeg", "-i", source], stderr=f"failed {source}".encode() + suffix
+        )
+        effects = [subprocess.CompletedProcess([], 0), error] if stage == "concat" else [error]
+        with patch("adnihilator.splice.subprocess.run", side_effect=effects):
+            with pytest.raises(SpliceError) as failure:
+                if stage == "copy":
+                    splice_audio(source, "output.mp3", [], duration=6)
+                elif stage == "filter":
+                    _splice_with_filter_complex(source, "output.mp3", [(0, 1)])
+                else:
+                    _splice_with_concat(source, "output.mp3", [(0, 1)])
+        diagnostic = "".join(traceback.format_exception(failure.value))
+        assert "SYNTHCANARY" not in diagnostic
+        assert "SYNTHPASSWORD" not in diagnostic
+        assert "[REDACTED]" in diagnostic
+        assert "CalledProcessError" not in diagnostic
+
+    @pytest.mark.parametrize("suffix", [b"", b"\xe2 \xff"])
+    def test_copy_diagnostics_do_not_expose_credentials(self, suffix: bytes) -> None:
+        """ASCII and undecodable diagnostics both redact credential-shaped text."""
+        error = subprocess.CalledProcessError(
+            1, ["ffmpeg"], stderr=b"failed key=SYNTHCANARY https://name:SYNTHPASSWORD@example.invalid/ " + suffix
+        )
+        with patch("adnihilator.splice.subprocess.run", side_effect=error):
+            with pytest.raises(SpliceError) as failure:
+                splice_audio("input.mp3", "output.mp3", [], duration=6)
+        assert "SYNTHCANARY" not in str(failure.value)
+        assert "SYNTHPASSWORD" not in str(failure.value)
+        assert "Failed to copy audio" in str(failure.value)
+
     def test_invalid_filter_diagnostic_still_attempts_fallback(self) -> None:
         """An unreadable diagnostic cannot suppress the existing fallback."""
         span = AdSpan(start=1, end=2, confidence=0.9, reason="Synthetic cut")

@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 
 from .models import AdSpan, TranscriptSegment
+from .redaction import redact_secrets
 
 
 class SpliceError(Exception):
@@ -58,7 +59,7 @@ def splice_audio(
                 check=True,
             )
         except subprocess.CalledProcessError as e:
-            raise SpliceError(f"Failed to copy audio: {e.stderr.decode(errors='replace')}")
+            raise SpliceError(f"Failed to copy audio: {redact_secrets(e.stderr.decode(errors='replace'))}") from None
 
         return {
             "ads_removed": 0,
@@ -251,7 +252,7 @@ def _splice_with_filter_complex(
     try:
         result = subprocess.run(cmd, capture_output=True, check=True)
     except subprocess.CalledProcessError as e:
-        raise SpliceError(f"ffmpeg filter_complex failed: {e.stderr.decode(errors='replace')}")
+        raise SpliceError(f"ffmpeg filter_complex failed: {redact_secrets(e.stderr.decode(errors='replace'))}") from None
 
 
 def _splice_with_concat(
@@ -285,7 +286,7 @@ def _splice_with_concat(
             try:
                 subprocess.run(cmd, capture_output=True, check=True)
             except subprocess.CalledProcessError as e:
-                raise SpliceError(f"Failed to extract segment {i}: {e.stderr.decode(errors='replace')}")
+                raise SpliceError(f"Failed to extract segment {i}: {redact_secrets(e.stderr.decode(errors='replace'))}") from None
 
         # Create concat list file
         concat_list = tmpdir_path / "concat_list.txt"
@@ -307,4 +308,4 @@ def _splice_with_concat(
         try:
             subprocess.run(cmd, capture_output=True, check=True)
         except subprocess.CalledProcessError as e:
-            raise SpliceError(f"Failed to concatenate segments: {e.stderr.decode(errors='replace')}")
+            raise SpliceError(f"Failed to concatenate segments: {redact_secrets(e.stderr.decode(errors='replace'))}") from None
