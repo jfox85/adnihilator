@@ -128,7 +128,7 @@ class WorkerDaemon:
             try:
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", FutureWarning)
-                    import google.generativeai  # noqa: F401
+                    from google import genai  # noqa: F401
             except Exception as e:
                 raise DetectionSafetyError(
                     f"Gemini runtime is unavailable; refusing to start worker: {e}"
@@ -180,17 +180,22 @@ class WorkerDaemon:
             print("  Warning: Gemini enabled but GEMINI_API_KEY not set")
             return None
 
+        gemini = self.config.gemini
         try:
             # Use chunked client for long episodes
-            if duration > self.config.gemini.chunked_threshold:
+            if duration > gemini.chunked_threshold:
                 from adnihilator.gemini_chunked import GeminiChunkedClient
-                print(f"    Using chunked detection (episode > {self.config.gemini.chunked_threshold}s)")
-                return GeminiChunkedClient(api_key=api_key, model=self.config.gemini.model)
+                print(f"    Using chunked detection (episode > {gemini.chunked_threshold}s)")
+                return GeminiChunkedClient(
+                    api_key=api_key, model=gemini.model, thinking_level=gemini.thinking_level
+                )
             else:
                 from adnihilator.gemini_audio import GeminiAudioClient
-                return GeminiAudioClient(api_key=api_key, model=self.config.gemini.model)
+                return GeminiAudioClient(
+                    api_key=api_key, model=gemini.model, thinking_level=gemini.thinking_level
+                )
         except ImportError:
-            print("  Warning: google-generativeai not installed, Gemini disabled")
+            print("  Warning: google-genai not installed, Gemini disabled")
             return None
 
     def _calculate_llm_cost(
@@ -213,7 +218,14 @@ class WorkerDaemon:
         Returns:
             Total cost in USD
         """
-        # Pricing table (as of Dec 2024)
+        # Gemini 3.5 Flash-Lite bills audio as input tokens (no per-second rate);
+        # output price includes thinking tokens.
+        gemini_35_flash_lite = {
+            "input": 0.30 / 1_000_000,
+            "output": 2.50 / 1_000_000,
+        }
+
+        # Pricing table (OpenAI/Gemini 2.5 as of Dec 2024; Gemini 3.5 Flash-Lite Nov 2026)
         PRICING = {
             "openai": {
                 "gpt-4o-mini": {"input": 0.15 / 1_000_000, "output": 0.60 / 1_000_000},
@@ -221,6 +233,7 @@ class WorkerDaemon:
                 "gpt-4o": {"input": 2.50 / 1_000_000, "output": 10.00 / 1_000_000},
             },
             "gemini": {
+                "gemini-3.5-flash-lite": gemini_35_flash_lite,
                 "gemini-2.5-flash": {
                     "input": 0.15 / 1_000_000,
                     "output": 0.60 / 1_000_000,
@@ -229,6 +242,7 @@ class WorkerDaemon:
             },
             # Chunked Gemini uses same model pricing
             "gemini_chunked": {
+                "gemini-3.5-flash-lite": gemini_35_flash_lite,
                 "gemini-2.5-flash": {
                     "input": 0.15 / 1_000_000,
                     "output": 0.60 / 1_000_000,
@@ -237,7 +251,7 @@ class WorkerDaemon:
             },
         }
 
-        pricing = PRICING.get(provider, {}).get(model)
+        pricing = PRICING.get(provider, {}).get(model.removeprefix("models/"))
         if not pricing:
             return 0.0
 

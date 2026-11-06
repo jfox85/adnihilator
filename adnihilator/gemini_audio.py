@@ -1,16 +1,24 @@
 """Gemini audio-based ad detection client.
 
-Uses Gemini 2.0 Flash to detect advertisements directly from audio,
-without requiring transcription first. This is faster and more accurate
-than the Whisper + LLM pipeline, but costs more per episode (~$0.087).
+Uses Gemini (default: Gemini 3.5 Flash-Lite) to detect advertisements
+directly from audio via the google-genai SDK's generateContent API,
+without requiring transcription first.
 """
 
 import json
 import logging
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
+from .gemini_common import (
+    DEFAULT_GEMINI_MODEL,
+    DEFAULT_THINKING_LEVEL,
+    build_generate_config,
+    create_genai_client,
+    extract_usage,
+    file_state_name,
+)
 from .models import AdSpan, SponsorInfo
 
 logger = logging.getLogger(__name__)
@@ -19,31 +27,29 @@ logger = logging.getLogger(__name__)
 class GeminiAudioClient:
     """Client for Gemini audio-based ad detection."""
 
-    def __init__(self, api_key: str, model: str = "gemini-2.5-flash"):
+    def __init__(
+        self,
+        api_key: str,
+        model: str = DEFAULT_GEMINI_MODEL,
+        thinking_level: str = DEFAULT_THINKING_LEVEL,
+    ):
         """Initialize the Gemini client.
 
         Args:
             api_key: Gemini API key
-            model: Model name (default: gemini-2.5-flash)
+            model: Model name (default: gemini-3.5-flash-lite)
+            thinking_level: Gemini 3+ thinking level (ignored for older models)
         """
         self.api_key = api_key
         self.model = model
-        self._genai = None  # Lazy import
+        self.thinking_level = thinking_level
+        self._client: Any = None  # Lazy SDK client
 
-    def _get_genai(self):
-        """Lazily import and configure google.generativeai."""
-        if self._genai is None:
-            try:
-                import google.generativeai as genai
-
-                genai.configure(api_key=self.api_key)
-                self._genai = genai
-            except ImportError:
-                raise ImportError(
-                    "google-generativeai is required for Gemini detection. "
-                    "Run: pip install google-generativeai"
-                )
-        return self._genai
+    def _get_client(self) -> Any:
+        """Lazily create the google-genai client."""
+        if self._client is None:
+            self._client = create_genai_client(self.api_key)
+        return self._client
 
     def detect_ads(
         self,
@@ -66,28 +72,28 @@ class GeminiAudioClient:
         Raises:
             ValueError: If response parsing fails or API error occurs
         """
-        genai = self._get_genai()
-
         logger.info(f"Uploading audio to Gemini: {audio_path}")
         upload_start = time.time()
 
         try:
+            client = self._get_client()
+
             # Upload audio to Gemini Files API
-            audio_file = genai.upload_file(path=str(audio_path))
+            audio_file = client.files.upload(file=str(audio_path))
             upload_time = time.time() - upload_start
             logger.info(f"Upload complete in {upload_time:.2f}s, URI: {audio_file.uri}")
 
             # Wait for file to be processed
             max_wait = 120  # seconds
             start = time.time()
-            while audio_file.state.name == "PROCESSING":
+            while file_state_name(audio_file) == "PROCESSING":
                 if time.time() - start > max_wait:
                     raise ValueError("Gemini file upload timeout after 120s")
                 time.sleep(2)
-                audio_file = genai.get_file(audio_file.name)
-                logger.debug(f"File state: {audio_file.state.name}")
+                audio_file = client.files.get(name=audio_file.name)
+                logger.debug(f"File state: {file_state_name(audio_file)}")
 
-            if audio_file.state.name == "FAILED":
+            if file_state_name(audio_file) == "FAILED":
                 raise ValueError(f"Gemini file upload failed: {audio_file.state}")
 
             # Build prompt
@@ -103,8 +109,13 @@ class GeminiAudioClient:
             # Call Gemini
             logger.info(f"Sending audio to Gemini {self.model} for analysis...")
             analysis_start = time.time()
-            model = genai.GenerativeModel(self.model)
-            response = model.generate_content([prompt, audio_file])
+            # Single user turn (prompt + audio); no prefilled model turn and
+            # no deprecated sampling parameters.
+            response = client.models.generate_content(
+                model=self.model,
+                contents=[prompt, audio_file],
+                config=build_generate_config(self.model, self.thinking_level),
+            )
             analysis_time = time.time() - analysis_start
             logger.info(f"Analysis complete in {analysis_time:.2f}s")
 
@@ -112,39 +123,28 @@ class GeminiAudioClient:
             if not response:
                 raise ValueError("Empty response from Gemini API")
 
-            if not hasattr(response, "text") or not response.text:
-                # Check for safety block
-                if hasattr(response, "candidates") and response.candidates:
-                    candidate = response.candidates[0]
-                    if hasattr(candidate, "finish_reason"):
-                        raise ValueError(
-                            f"Gemini response blocked: {candidate.finish_reason}"
-                        )
+            response_text = getattr(response, "text", None)
+            if not response_text:
+                # Check for safety block / non-STOP finish
+                candidates = getattr(response, "candidates", None)
+                if candidates:
+                    finish_reason = getattr(candidates[0], "finish_reason", None)
+                    if finish_reason is not None:
+                        raise ValueError(f"Gemini response blocked: {finish_reason}")
                 raise ValueError("Empty text in Gemini response")
 
             # Parse JSON response
-            result = self._parse_response(response.text)
+            result = self._parse_response(response_text)
 
             # Extract usage stats
-            if not hasattr(response, "usage_metadata"):
+            if getattr(response, "usage_metadata", None) is None:
                 logger.warning("Missing usage_metadata in Gemini response")
-                usage = {
-                    "provider": "gemini",
-                    "model": self.model,
-                    "input_tokens": 0,
-                    "output_tokens": 0,
-                    "total_tokens": 0,
-                    "audio_duration_seconds": duration or 0,
-                }
-            else:
-                usage = {
-                    "provider": "gemini",
-                    "model": self.model,
-                    "input_tokens": response.usage_metadata.prompt_token_count,
-                    "output_tokens": response.usage_metadata.candidates_token_count,
-                    "total_tokens": response.usage_metadata.total_token_count,
-                    "audio_duration_seconds": duration or 0,
-                }
+            usage = {
+                "provider": "gemini",
+                "model": self.model,
+                **extract_usage(response),
+                "audio_duration_seconds": duration or 0,
+            }
 
             # Convert to AdSpan objects
             ad_spans = []
@@ -320,9 +320,10 @@ def calculate_gemini_cost(
     output_tokens: int,
     audio_duration_seconds: float,
 ) -> float:
-    """Calculate Gemini API cost in USD.
+    """Calculate legacy Gemini API cost estimate in USD.
 
-    Pricing (as of Dec 2024):
+    Legacy helper (not used by the worker, which prices per model in
+    ``WorkerDaemon._calculate_llm_cost``). Pricing (as of Dec 2024):
     - Text input: $0.075 per 1M tokens
     - Text output: $0.30 per 1M tokens
     - Audio: $0.000025 per second
