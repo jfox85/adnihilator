@@ -24,7 +24,7 @@ def is_usable_audio_url(value: str | None) -> bool:
 
 
 def select_audio_enclosure(enclosures: Iterable[Mapping[str, Any]]) -> str | None:
-    """Prefer explicit audio MIME types, then typeless known audio extensions."""
+    """Prefer audio MIME, then absent/generic-binary MIME with an audio extension."""
     fallback = None
     for enclosure in enclosures:
         url = enclosure.get("href")
@@ -34,7 +34,7 @@ def select_audio_enclosure(enclosures: Iterable[Mapping[str, Any]]) -> str | Non
         mime = mime.split(";", 1)[0].strip().lower() if isinstance(mime, str) else ""
         if mime.startswith("audio/") and len(mime) > len("audio/"):
             return url
-        if not mime and fallback is None:
+        if mime in {"", "application/octet-stream", "binary/octet-stream"} and fallback is None:
             path = urlsplit(url).path.lower()
             if any(path.endswith(extension) for extension in _AUDIO_EXTENSIONS):
                 fallback = url

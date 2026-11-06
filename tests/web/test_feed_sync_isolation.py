@@ -101,7 +101,8 @@ class TestFeedSyncIsolation:
             with patch("web.services.feed_sync.feedparser.parse", return_value=parsed_feed()) as parse:
                 with pytest.raises(FeedSyncError, match="CHECK constraint failed: ck_episode_status"):
                     sync_podcast(db, podcast)
-                parse.assert_called_once_with("https://example.invalid/feed")
+                parse.assert_called_once()
+                assert parse.call_args.args == ("https://example.invalid/feed",)
         finally:
             event.remove(db, "before_flush", invalidate_status)
 

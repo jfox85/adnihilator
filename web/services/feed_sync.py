@@ -1,7 +1,12 @@
 """Feed synchronization service."""
 
+from collections.abc import Mapping
 from datetime import datetime
+from email.message import Message
+from hashlib import sha256
 from time import mktime
+from urllib.parse import urlsplit, urlunsplit
+from urllib.request import HTTPRedirectHandler, Request
 
 import feedparser
 from sqlalchemy.exc import IntegrityError
@@ -10,11 +15,67 @@ from sqlalchemy.orm import Session
 from adnihilator.redaction import redact_secrets
 
 from ..models import Episode, EpisodeStatus, Podcast
-from .audio import select_audio_enclosure
+from .audio import is_usable_audio_url, select_audio_enclosure
 
 
 class FeedSyncError(RuntimeError):
     """A failed feed update with safe diagnostics and a rolled-back session."""
+
+
+class _HTTPOnlyRedirect(HTTPRedirectHandler):
+    """Allow private HTTP(S) redirects while refusing every other scheme."""
+
+    # feedparser adds its own redirect/auth handler at order 490. Our guard
+    # must run first; the default urllib redirect order (500) is too late.
+    handler_order = 400
+
+    def redirect_request(
+        self, req: Request, fp: object, code: int, msg: str,
+        headers: Message, newurl: str,
+    ) -> Request | None:
+        """Validate the resolved redirect destination before opening it."""
+        if not is_usable_audio_url(newurl):
+            raise FeedSyncError("Feed redirect must use an HTTP(S) URL with a host")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def episode_identity(entry: dict, audio_url: str | None) -> str | None:
+    """Prefer GUID, then entry link, then a query-independent enclosure identity.
+
+    The enclosure fallback hashes scheme/host/port/path, excluding userinfo,
+    query and fragment. Query-token rotation stays one episode; different
+    paths remain distinct. Existing rows are never backfilled or rewritten.
+    """
+    for field in ("id", "link"):
+        value = entry.get(field) if isinstance(entry, Mapping) else getattr(entry, field, None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    if audio_url is None:
+        return None
+    parsed = urlsplit(audio_url)
+    host = parsed.hostname.lower()
+    host = f"[{host}]" if ":" in host else host
+    port = parsed.port
+    if port is not None and (parsed.scheme.lower(), port) not in {("http", 80), ("https", 443)}:
+        host += f":{port}"
+    canonical = urlunsplit((parsed.scheme.lower(), host, parsed.path or "/", "", ""))
+    return "enclosure-sha256:" + sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _sync_failure(db: Session, podcast_id: str, error: Exception) -> FeedSyncError:
+    """Persist a safe feed failure after rolling back its incomplete import."""
+    db.rollback()
+    message = f"Feed sync failed ({type(error).__name__}): {redact_secrets(str(error))}"
+    try:
+        podcast = db.get(Podcast, podcast_id)
+        if podcast is not None:
+            podcast.last_sync_error = message
+            db.commit()
+    except Exception:
+        # A database outage may also prevent saving diagnostics. Preserve the
+        # original failure and leave the caller's session usable regardless.
+        db.rollback()
+    return FeedSyncError(message)
 
 
 def parse_duration(duration_str: str | None) -> int | None:
@@ -60,6 +121,7 @@ def sync_podcast(db: Session, podcast: Podcast) -> int:
     Returns:
         Number of new episodes added
     """
+    podcast_id = podcast.id
     try:
         return _sync_podcast_entries(db, podcast)
     except Exception as error:
@@ -69,24 +131,26 @@ def sync_podcast(db: Session, podcast: Podcast) -> int:
             and "UNIQUE constraint failed: episodes.podcast_id, episodes.guid" in str(error.orig)
         )
         if not guid_conflict:
-            raise FeedSyncError(
-                f"Feed sync failed ({type(error).__name__}): {redact_secrets(str(error))}"
-            ) from None
+            raise _sync_failure(db, podcast_id, error) from None
 
     # Another process may have committed the same GUID after our snapshot.
     # Reload once after rollback; unrelated constraints must never be retried.
     try:
         return _sync_podcast_entries(db, podcast)
     except Exception as error:
-        db.rollback()
-        raise FeedSyncError(
-            f"Feed sync failed ({type(error).__name__}): {redact_secrets(str(error))}"
-        ) from None
+        raise _sync_failure(db, podcast_id, error) from None
 
 
 def _sync_podcast_entries(db: Session, podcast: Podcast) -> int:
     """Apply one feed, leaving rollback on failure to the public sync boundary."""
-    feed = feedparser.parse(podcast.source_rss_url)
+    if not is_usable_audio_url(podcast.source_rss_url):
+        raise FeedSyncError("Feed URL must use HTTP(S) with a host")
+    feed = feedparser.parse(podcast.source_rss_url, handlers=[_HTTPOnlyRedirect()])
+    response_status = feed.get("status")
+    if isinstance(response_status, int) and response_status >= 400:
+        raise FeedSyncError(f"Feed server returned HTTP {response_status}")
+    if not feed.get("version") and not feed.entries:
+        raise FeedSyncError("Response is not a recognized RSS or Atom feed")
 
     # Update podcast metadata
     if hasattr(feed.feed, "title"):
@@ -116,12 +180,10 @@ def _sync_podcast_entries(db: Session, podcast: Podcast) -> int:
 
     added = 0
     for entry in feed.entries:
-        guid = getattr(entry, "id", None) or getattr(entry, "link", None)
+        audio_url = select_audio_enclosure(getattr(entry, "enclosures", []))
+        guid = episode_identity(entry, audio_url)
         if not guid or guid in existing_guids:
             continue
-
-        # Extract audio URL from enclosures
-        audio_url = select_audio_enclosure(getattr(entry, "enclosures", []))
 
         # Parse published date
         published_at = None
@@ -155,6 +217,7 @@ def _sync_podcast_entries(db: Session, podcast: Podcast) -> int:
         existing_guids.add(guid)
         added += 1
 
+    podcast.last_sync_error = None
     podcast.last_synced_at = datetime.utcnow()
     db.commit()
     return added

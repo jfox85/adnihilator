@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
@@ -66,6 +66,7 @@ async def list_podcasts(
             "source_rss_url": p.source_rss_url,
             "feed_token": p.feed_token,
             "auto_process": p.auto_process,
+            "last_sync_error": p.last_sync_error,
             "created_at": p.created_at.isoformat(),
         }
         for p in podcasts
@@ -81,6 +82,8 @@ async def add_podcast(
     """Add a new podcast subscription and sync its feed."""
     from ..services.feed_sync import sync_podcast
 
+    if not is_usable_audio_url(source_rss_url):
+        raise HTTPException(status_code=422, detail="Feed URL must use HTTP(S) with a host")
     podcast = Podcast(source_rss_url=source_rss_url)
     db.add(podcast)
     db.commit()
@@ -89,7 +92,7 @@ async def add_podcast(
     try:
         sync_podcast(db, podcast)
     except Exception:
-        # If sync fails, the podcast is still added but without episodes
+        # sync_podcast durably records the safe error for the retained subscription.
         pass
 
     return RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)
@@ -108,7 +111,11 @@ async def sync_podcast_feed(
     if not podcast:
         raise HTTPException(status_code=404, detail="Podcast not found")
 
-    episodes_added = sync_podcast(db, podcast)
+    from ..services.feed_sync import FeedSyncError
+    try:
+        episodes_added = sync_podcast(db, podcast)
+    except FeedSyncError as error:
+        return JSONResponse(status_code=502, content={"status": "failed", "error": str(error)})
     return {
         "status": "synced",
         "episodes_added": episodes_added,
@@ -194,6 +201,8 @@ async def queue_episode(
     if not episode:
         raise HTTPException(status_code=404, detail="Episode not found")
 
+    if episode.status == EpisodeStatus.COMPLETE.value:
+        raise HTTPException(status_code=409, detail="Completed episodes cannot be queued again")
     if episode.status == EpisodeStatus.PROCESSING.value:
         raise HTTPException(status_code=409, detail="Episode is processing")
     if not is_usable_audio_url(episode.original_audio_url):
@@ -204,7 +213,7 @@ async def queue_episode(
     updated = db.query(Episode).filter(
         Episode.id == episode_id,
         Episode.podcast_id == podcast_id,
-        Episode.status.notin_([EpisodeStatus.PROCESSING.value, EpisodeStatus.PENDING.value]),
+        Episode.status.notin_([EpisodeStatus.PROCESSING.value, EpisodeStatus.PENDING.value, EpisodeStatus.COMPLETE.value]),
         Episode.original_audio_url == episode.original_audio_url,
     ).update({Episode.status: EpisodeStatus.PENDING.value, Episode.retry_count: 0,
               Episode.error_message: None}, synchronize_session=False)
