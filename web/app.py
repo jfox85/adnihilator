@@ -201,6 +201,7 @@ async def queue_page(
 ):
     """Queue page showing all pending and processing episodes."""
     from .models import Episode, EpisodeStatus, Podcast
+    from .services.audio import is_usable_audio_url
 
     # Get all pending and processing episodes with their podcasts
     episodes = (
@@ -244,5 +245,6 @@ async def queue_page(
             "episodes": episodes,
             "recent_completed": recent_completed,
             "recent_failed": recent_failed,
+            "audio_eligible": {episode.id: is_usable_audio_url(episode.original_audio_url) for episode, _ in recent_failed},
         },
     )
