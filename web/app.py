@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
 from .auth import (
@@ -21,7 +21,7 @@ from .auth import (
 )
 from .database import get_engine, init_db, get_session_factory
 from .dependencies import get_db
-from .routes import podcasts, api, feeds, opml
+from .routes import podcasts, api, feeds, opml, transcripts, transcript_ui, transcript_mcp
 from .services.scheduler import create_scheduler
 from . import dependencies
 
@@ -97,6 +97,26 @@ app.include_router(podcasts.router)
 app.include_router(api.router)
 app.include_router(feeds.router)
 app.include_router(opml.router)
+app.include_router(transcripts.router)
+app.include_router(transcript_ui.router)
+app.include_router(transcript_mcp.router)
+
+
+@app.middleware("http")
+async def bound_transcript_body(request: Request, call_next):
+    """Bound streamed bodies before JSON parsing, including missing Content-Length."""
+    limit = 12 * 1024 * 1024 + 4096 if request.url.path.startswith("/api/worker/transcripts/") else 65536
+    if request.url.path.startswith("/api/worker/transcripts/") or request.url.path == "/mcp":
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > limit:
+                return JSONResponse({"detail": "Payload too large"}, status_code=413)
+            body.extend(chunk)
+        request._body = bytes(body)
+    response = await call_next(request)
+    if request.url.path.startswith(("/api/transcripts", "/api/worker/transcripts", "/transcripts")) or request.url.path == "/mcp":
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.exception_handler(LoginRequiredError)

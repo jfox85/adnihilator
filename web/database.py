@@ -59,5 +59,10 @@ def init_db(engine=None):
     """Initialize the database, creating all tables."""
     if engine is None:
         engine = get_engine()
-    Base.metadata.create_all(engine)
+    from .transcript_migration import TABLES, upgrade
+    owned = {table.name for table in TABLES}
+    Base.metadata.create_all(engine, tables=[table for table in Base.metadata.sorted_tables if table.name not in owned])
+    # Existing reviewed schema stays usable. Normal startup never migrates it.
+    if os.getenv("TRANSCRIPT_SCHEMA_OPT_IN", "false").lower() == "true":
+        upgrade(engine)
     return engine

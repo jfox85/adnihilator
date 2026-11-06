@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import time
 import warnings
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -23,9 +24,12 @@ from adnihilator.splice import splice_audio
 from adnihilator.sponsors import extract_sponsors
 from adnihilator.transcribe import transcribe_audio, transcribe_audio_parakeet
 from adnihilator.two_pass import two_pass_detect
+from adnihilator.transcript_document import TranscriptDocument
 
 from .client import WorkerClient, EpisodeJob
 from .r2 import R2Client
+from .transcripts import stage, flush
+from .recovery import download_audio as download_recovery_audio, fetch_external as fetch_recovery_external, renew_lease
 
 # Ad spans longer than this (seconds) are treated as "long": they get
 # evidence-cluster verification and are a signal for the final LLM review.
@@ -94,6 +98,8 @@ class WorkerDaemon:
         self.config = load_config(str(config_path)) if config_path.exists() else load_config()
 
         self.artifacts_dir = Path(artifacts_dir) if artifacts_dir else None
+        self.transcripts_dir = (self.artifacts_dir or Path("data")) / "transcripts"
+        self._audio_since_recovery = 0
         self._validate_runtime_dependencies()
 
     def _validate_runtime_dependencies(self) -> None:
@@ -128,7 +134,7 @@ class WorkerDaemon:
             try:
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", FutureWarning)
-                    import google.generativeai  # noqa: F401
+                    from google import genai  # noqa: F401
             except Exception as e:
                 raise DetectionSafetyError(
                     f"Gemini runtime is unavailable; refusing to start worker: {e}"
@@ -180,17 +186,22 @@ class WorkerDaemon:
             print("  Warning: Gemini enabled but GEMINI_API_KEY not set")
             return None
 
+        gemini = self.config.gemini
         try:
             # Use chunked client for long episodes
-            if duration > self.config.gemini.chunked_threshold:
+            if duration > gemini.chunked_threshold:
                 from adnihilator.gemini_chunked import GeminiChunkedClient
-                print(f"    Using chunked detection (episode > {self.config.gemini.chunked_threshold}s)")
-                return GeminiChunkedClient(api_key=api_key, model=self.config.gemini.model)
+                print(f"    Using chunked detection (episode > {gemini.chunked_threshold}s)")
+                return GeminiChunkedClient(
+                    api_key=api_key, model=gemini.model, thinking_level=gemini.thinking_level
+                )
             else:
                 from adnihilator.gemini_audio import GeminiAudioClient
-                return GeminiAudioClient(api_key=api_key, model=self.config.gemini.model)
+                return GeminiAudioClient(
+                    api_key=api_key, model=gemini.model, thinking_level=gemini.thinking_level
+                )
         except ImportError:
-            print("  Warning: google-generativeai not installed, Gemini disabled")
+            print("  Warning: google-genai not installed, Gemini disabled")
             return None
 
     def _calculate_llm_cost(
@@ -213,7 +224,14 @@ class WorkerDaemon:
         Returns:
             Total cost in USD
         """
-        # Pricing table (as of Dec 2024)
+        # Gemini 3.5 Flash-Lite bills audio as input tokens (no per-second rate);
+        # output price includes thinking tokens.
+        gemini_35_flash_lite = {
+            "input": 0.30 / 1_000_000,
+            "output": 2.50 / 1_000_000,
+        }
+
+        # Pricing table (OpenAI/Gemini 2.5 as of Dec 2024; Gemini 3.5 Flash-Lite Nov 2026)
         PRICING = {
             "openai": {
                 "gpt-4o-mini": {"input": 0.15 / 1_000_000, "output": 0.60 / 1_000_000},
@@ -221,6 +239,7 @@ class WorkerDaemon:
                 "gpt-4o": {"input": 2.50 / 1_000_000, "output": 10.00 / 1_000_000},
             },
             "gemini": {
+                "gemini-3.5-flash-lite": gemini_35_flash_lite,
                 "gemini-2.5-flash": {
                     "input": 0.15 / 1_000_000,
                     "output": 0.60 / 1_000_000,
@@ -229,6 +248,7 @@ class WorkerDaemon:
             },
             # Chunked Gemini uses same model pricing
             "gemini_chunked": {
+                "gemini-3.5-flash-lite": gemini_35_flash_lite,
                 "gemini-2.5-flash": {
                     "input": 0.15 / 1_000_000,
                     "output": 0.60 / 1_000_000,
@@ -237,7 +257,7 @@ class WorkerDaemon:
             },
         }
 
-        pricing = PRICING.get(provider, {}).get(model)
+        pricing = PRICING.get(provider, {}).get(model.removeprefix("models/"))
         if not pricing:
             return 0.0
 
@@ -2401,15 +2421,16 @@ range. If you cannot find any clear ad copy, return an empty list."""
                                 progress_callback=on_transcribe_progress,
                             )
 
-                # Save transcript if we have one (before any further processing)
+                # Preserve transcript immediately, even if subsequent detection fails.
+                self._persist_transcript(job, segments, transcript_source, duration, [], publish=False)
                 if segments and self.artifacts_dir:
-                    artifact_dir = self.artifacts_dir / job.podcast_id
-                    artifact_dir.mkdir(parents=True, exist_ok=True)
-                    transcript_path = artifact_dir / f"{job.id}_transcript.txt"
-                    with open(transcript_path, "w") as f:
-                        for seg in segments:
-                            f.write(f"[{seg.start:.1f}s - {seg.end:.1f}s] {seg.text}\n")
-                    print(f"  Saved transcript to {transcript_path}")
+                    try:
+                        artifact_dir = self.artifacts_dir / job.podcast_id
+                        artifact_dir.mkdir(parents=True, exist_ok=True)
+                        transcript_path = artifact_dir / f"{job.id}_transcript.txt"
+                        transcript_path.write_text("".join(f"[{seg.start:.1f}s - {seg.end:.1f}s] {seg.text}\n" for seg in segments))
+                    except OSError:
+                        print("  Legacy transcript artifact could not be saved; audio processing continues")
 
                 # If we don't have ad_spans yet (external transcript or single-pass mode),
                 # run heuristic detection + LLM refinement
@@ -2443,6 +2464,9 @@ range. If you cannot find any clear ad copy, return an empty list."""
                     f"{before_count}->{len(ad_spans)} spans, "
                     f"{before_total:.0f}s->{after_total:.0f}s"
                 )
+
+            # Transcript upload/index failures cannot invalidate successful ad-free audio.
+            self._persist_transcript(job, segments, transcript_source, duration, ad_spans)
 
             # Save detection result artifact if artifacts_dir is set
             detection_result_path = None
@@ -2604,22 +2628,95 @@ range. If you cannot find any clear ad copy, return an empty list."""
 
         raise RuntimeError(f"curl download failed: {result.stderr}")
 
+    def _persist_transcript(self, job: EpisodeJob, segments: list | None, source: str | None,
+                            duration: float, ad_spans: list, publish: bool = True) -> None:
+        """Durable outbox independent of optional legacy detection artifacts."""
+        if not segments:
+            return  # Timestamp/Gemini fast paths must not manufacture availability.
+        try:
+            document = TranscriptDocument(
+                episode_id=job.id, podcast_id=job.podcast_id, guid=job.guid,
+                original_audio_url=job.original_audio_url, source=source or self.engine,
+                model=(self.whisper_model if self.engine != "parakeet" else "parakeet-tdt-0.6b-v3") if source in ("whisper", "parakeet") else None,
+                duration=duration, timestamp_basis="external_source" if source in ("external", "substack", "lexfridman") else "original_audio",
+                segments=[seg.model_dump() for seg in segments],
+                ad_spans=[span.model_dump() for span in ad_spans])
+            stage(self.transcripts_dir, document, downloaded_at=datetime.utcnow().isoformat())
+            if publish:
+                flush(self.transcripts_dir, self.api_client)
+        except Exception:
+            print("  Transcript persistence pending/failed; audio processing continues")
+
+    def process_transcript_job(self, data: dict) -> None:
+        """Explicit local transcription only: no ad detector, paid LLM, or audio upload."""
+        last_heartbeat = 0.0
+        def progress(percent: float) -> None:
+            nonlocal last_heartbeat
+            if time.monotonic() - last_heartbeat >= 30:
+                last_heartbeat = time.monotonic()
+                try:
+                    self.api_client.heartbeat_transcript(data["id"], data["claim_id"])
+                except Exception:
+                    pass  # Processing/outbox survives a temporary network failure.
+        progress(0)
+        heartbeat = lambda: self.api_client.heartbeat_transcript(data["id"], data["claim_id"])
+        with renew_lease(heartbeat), tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "episode.mp3"
+            download_recovery_audio(data["original_audio_url"], path, lambda: progress(0))
+            duration = get_duration(str(path))
+            segments = fetch_recovery_external(data["source_url"], lambda: progress(0)) if data.get("source_url") else None
+            source = "external" if segments else self.engine
+            if not segments:
+                segments = (transcribe_audio_parakeet(str(path), duration=duration, progress_callback=progress) if self.engine == "parakeet"
+                            else transcribe_audio(str(path), model_name=self.whisper_model, device=self.device, duration=duration, progress_callback=progress))
+            document = TranscriptDocument(episode_id=data["id"], podcast_id=data["podcast_id"], guid=data["guid"],
+                                          original_audio_url=data["original_audio_url"], source=source,
+                                          model=("parakeet-tdt-0.6b-v3" if self.engine == "parakeet" else self.whisper_model) if source != "external" else None,
+                                          duration=duration, timestamp_basis="external_source" if source == "external" else "original_audio",
+                                          segments=[segment.model_dump() for segment in segments])
+            stage(self.transcripts_dir, document, data["claim_id"], datetime.utcnow().isoformat())
+            flush(self.transcripts_dir, self.api_client)
+
     def run_once(self) -> bool:
         """Process one job from the queue.
 
         Returns:
             True if a job was processed, False if queue was empty.
         """
-        job = self.api_client.claim()
+        try:
+            flush(self.transcripts_dir, self.api_client)
+        except Exception:
+            print("  Transcript outbox retry pending")
+        # At most three audio jobs between recovery opportunities; never preclaim audio.
+        data = self.api_client.claim_transcript() if getattr(self, "_audio_since_recovery", 0) >= 3 else None
+        job = None if data is not None else self.api_client.claim()
         if job is None:
-            return False
+            data = data if data is not None else self.api_client.claim_transcript()
+            if data is None:
+                return False
+            self._audio_since_recovery = 0
+            try:
+                self.process_transcript_job(data)
+            except Exception:
+                try:
+                    self.api_client.fail_transcript(data["id"], data["claim_id"])
+                except Exception:
+                    print("  Transcript failure report pending")
+            return True
 
+        self._audio_since_recovery = getattr(self, "_audio_since_recovery", 0) + 1
         try:
             self.process_job(job)
             return True
         except Exception as e:
-            print(f"  Error: {e}")
-            self.api_client.fail(job.id, str(e)[:500])
+            error = str(e)
+            for name in ("WORKER_API_KEY", "R2_ACCESS_KEY", "R2_SECRET_KEY",
+                         "OPENAI_API_KEY", "GEMINI_API_KEY"):
+                value = os.environ.get(name)
+                if value:
+                    error = error.replace(value, "[REDACTED]")
+            print(f"  Error: {error}")
+            self.api_client.fail(job.id, error[:500])
             return True
 
     def run_daemon(self, interval: int = 300, watchdog_hours: int = 12) -> None:

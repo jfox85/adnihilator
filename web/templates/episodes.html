@@ -102,6 +102,7 @@
                             {{ episode.status }}
                         {%- endif -%}
                     </span>
+                    <a href="/transcripts/episodes/{{ episode.id }}" onclick="event.stopPropagation()">Transcript: {{ transcript_states.get(episode.id, 'missing') }}</a>
                     <span class="expand-icon" id="icon-{{ episode.id }}">&#9660;</span>
                 </div>
             </div>

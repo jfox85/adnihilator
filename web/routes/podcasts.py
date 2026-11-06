@@ -153,7 +153,8 @@ async def list_episodes_html(
     _: None = Depends(verify_admin),
 ):
     """List episodes for a podcast (HTML page)."""
-    from ..models import Episode
+    from ..models import Episode, EpisodeTranscript
+    from ..transcript_migration import ready
 
     podcast = db.query(Podcast).filter_by(id=podcast_id).first()
     if not podcast:
@@ -173,6 +174,7 @@ async def list_episodes_html(
             "title": podcast.title or "Episodes",
             "podcast": podcast,
             "episodes": episodes,
+            "transcript_states": {row.episode_id: row.state for row in db.query(EpisodeTranscript).join(Episode).filter(Episode.podcast_id == podcast_id)} if ready(db.get_bind()) else {},
         },
     )
 
