@@ -12,11 +12,13 @@ from sqlalchemy.orm import Session
 from ..dependencies import get_db
 from ..auth import verify_admin
 from ..models import Podcast
+from ..presentation import episode_error, register_error_filters
 
 router = APIRouter(prefix="/podcasts", tags=["podcasts"])
 
 TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+register_error_filters(templates)
 
 
 def regex_replace(value: str, pattern: str, replacement: str) -> str:
@@ -305,12 +307,15 @@ async def get_episode_statuses(
         .all()
     )
 
-    return {
-        "auto_process": podcast.auto_process,
-        "episodes": {
-            ep.id: {
+    statuses = {}
+    errors = {}
+    for ep in episodes:
+        if ep.error_message not in errors:
+            errors[ep.error_message] = episode_error(ep.error_message)
+        error = errors[ep.error_message]
+        statuses[ep.id] = {
                 "status": ep.status,
-                "error_message": ep.error_message,
+                "error_message": error["details"] if ep.error_message is not None else None,
                 "ads_removed_seconds": ep.ads_removed_seconds,
                 "processed_duration": ep.processed_duration,
                 "progress_step": ep.progress_step,
@@ -318,7 +323,7 @@ async def get_episode_statuses(
                 "llm_cost_usd": float(ep.llm_cost_usd) if ep.llm_cost_usd is not None else None,
                 "llm_model": ep.llm_model,
                 "detection_source": ep.detection_source,
-            }
-            for ep in episodes
-        },
-    }
+        }
+        if ep.status == 'failed':
+            statuses[ep.id].update(error_summary=error['summary'], error_action=error['action'])
+    return {"auto_process": podcast.auto_process, "episodes": statuses}

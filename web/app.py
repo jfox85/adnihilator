@@ -6,10 +6,15 @@ import re
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.exception_handlers import http_exception_handler
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+from adnihilator.redaction import redact_secrets
 
 from .auth import (
     LoginRequiredError,
@@ -24,6 +29,7 @@ from .dependencies import get_db
 from .routes import podcasts, api, feeds, opml
 from .services.scheduler import create_scheduler
 from . import dependencies
+from .presentation import register_error_filters
 
 # Configure logging
 logging.basicConfig(
@@ -34,6 +40,7 @@ logging.basicConfig(
 # Templates directory
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+register_error_filters(templates)
 
 
 def regex_replace(value: str, pattern: str, replacement: str) -> str:
@@ -97,6 +104,40 @@ app.include_router(podcasts.router)
 app.include_router(api.router)
 app.include_router(feeds.router)
 app.include_router(opml.router)
+
+
+def _browser_error_page(request: Request) -> bool:
+    """Use app pages for browser navigation while preserving API responses."""
+    return 'text/html' in request.headers.get('accept', '').lower() and not request.url.path.startswith(('/api/', '/feed/'))
+
+
+@app.exception_handler(StarletteHTTPException)
+async def browser_http_error(request: Request, exc: StarletteHTTPException) -> Response:
+    """Give browser navigation a safe message and a way back."""
+    if not _browser_error_page(request):
+        return await http_exception_handler(request, exc)
+    messages = {
+        401: ('Sign in required', 'Sign in again to continue.'),
+        403: ('Access unavailable', 'You do not have access to this page.'),
+        404: ('Page not found', 'This page may have moved or is no longer available.'),
+    }
+    heading, message = messages.get(exc.status_code, ('Request could not be completed', 'Try again, or return to the dashboard.'))
+    return templates.TemplateResponse(request, 'error.html', {
+        'title': heading, 'heading': heading, 'message': message,
+        'sign_in': '/login?next=' + quote(request.url.path, safe='') if exc.status_code == 401 else None,
+    }, status_code=exc.status_code, headers=exc.headers)
+
+
+@app.exception_handler(Exception)
+async def browser_server_error(request: Request, exc: Exception) -> Response:
+    """Keep exception details private even when a browser page fails."""
+    logging.getLogger(__name__).error('Web request failed: %s', redact_secrets(str(exc)))
+    if not _browser_error_page(request):
+        return PlainTextResponse('Internal Server Error', status_code=500)
+    return templates.TemplateResponse(request, 'error.html', {
+        'title': 'Something went wrong', 'heading': 'Something went wrong',
+        'message': 'The page could not be loaded. Try again shortly, or return to the dashboard.',
+    }, status_code=500)
 
 
 @app.exception_handler(LoginRequiredError)

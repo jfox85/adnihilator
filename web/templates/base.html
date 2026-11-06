@@ -176,6 +176,16 @@
         .tools-dropdown input[type="file"] {
             display: none;
         }
+        .diagnostic-details pre {
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            max-height: 18rem;
+            overflow: auto;
+        }
+        .diagnostic-details summary { cursor: pointer; }
+        #requestNotice { position: sticky; top: 0; z-index: 50; }
+        #requestNotice[hidden] { display: none; }
+        #requestNotice a[hidden], #requestNotice button[hidden] { display: none; }
     </style>
 </head>
 <body>
@@ -195,8 +205,14 @@
             </div>
         </div>
     </div>
+    <div id="requestNotice" class="card" role="status" hidden>
+        <p id="requestNoticeText"></p>
+        <a id="requestSignIn" href="/login" hidden>Sign in</a>
+        <button id="requestRetry" type="button" hidden>Retry</button>
+    </div>
 
     <script>
+    {% include "ui_requests.js" %}
     function toggleToolsMenu() {
         document.getElementById('toolsDropdown').classList.toggle('open');
     }
@@ -215,34 +231,32 @@
         const file = input.files[0];
         const formData = new FormData();
         formData.append('file', file);
+        input.disabled = true;
 
         try {
-            const response = await fetch('/opml/import', {
+            const data = await requestJSON('/opml/import', {
                 method: 'POST',
                 body: formData
             });
+            if (!Number.isInteger(data.imported) || !Number.isInteger(data.skipped)) {
+                throw new UIRequestError('The import response could not be read.');
+            }
 
-            const data = await response.json();
-
-            if (response.ok) {
-                let msg = `Imported ${data.imported} podcast(s)`;
-                if (data.skipped > 0) {
-                    msg += `, ${data.skipped} skipped (already exist)`;
-                }
-                alert(msg);
-                if (data.imported > 0) {
-                    window.location.reload();
-                }
-            } else {
-                alert('Import failed: ' + (data.detail || 'Unknown error'));
+            let msg = `Imported ${data.imported} podcast(s)`;
+            if (data.skipped > 0) {
+                msg += `, ${data.skipped} skipped (already exist)`;
+            }
+            alert(msg);
+            if (data.imported > 0) {
+                window.location.reload();
             }
         } catch (e) {
-            alert('Import failed: ' + e.message);
+            reportRequestError(e, 'The file could not be imported. Check that it is a valid OPML file and try again.', () => input.click());
+        } finally {
+            input.disabled = false;
+            input.value = '';
+            document.getElementById('toolsDropdown').classList.remove('open');
         }
-
-        // Reset file input
-        input.value = '';
-        document.getElementById('toolsDropdown').classList.remove('open');
     }
     </script>
     {% block content %}{% endblock %}

@@ -59,10 +59,15 @@
                     {% if episode.updated_at %}
                     <span class="failed-time">{{ episode.updated_at|relative_time }}</span>
                     {% endif %}
-                    {% if episode.error_message %}
-                    <span class="failed-error" title="{{ episode.error_message }}">{{ episode.error_message[:80] }}{% if episode.error_message|length > 80 %}…{% endif %}</span>
-                    {% endif %}
                 </div>
+                {% set error = episode.error_message|episode_error %}
+                <p><strong>{{ error.summary }}</strong><br>{{ error.action }}</p>
+                {% if error.details %}
+                <details class="diagnostic-details">
+                    <summary>Diagnostic details</summary>
+                    <pre>{{ error.details }}</pre>
+                </details>
+                {% endif %}
             </div>
             <div class="failed-item-actions">
                 <button onclick="retryEpisode('{{ podcast.id }}', '{{ episode.id }}')" class="btn-retry">Retry</button>
@@ -115,126 +120,89 @@
 </div>
 
 <script>
+const queueItems = new Map(Array.from(document.querySelectorAll('.queue-item')).map(item => [item.dataset.episodeId, item]));
+const failedItems = new Map(Array.from(document.querySelectorAll('.failed-item')).map(item => [item.dataset.episodeId, item]));
+const queueGroups = new Map();
+const queueSignatures = new Map();
+let queuePollInFlight = false;
+let queuePollInterval = null;
+for (const [id, item] of queueItems) {
+    const podcast = item.dataset.podcastId;
+    if (!queueGroups.has(podcast)) queueGroups.set(podcast, []);
+    queueGroups.get(podcast).push(id);
+}
+function showEmptyQueue() {
+    if (queueItems.size) return;
+    const list = document.querySelector('.queue-list');
+    if (list) list.innerHTML = '<p class="empty-queue">No episodes in queue. Episodes will appear here when queued for processing.</p>';
+}
 async function skipEpisode(podcastId, episodeId) {
     if (!confirm('Skip this episode?')) return;
-
-    const response = await fetch(`/podcasts/${podcastId}/episodes/${episodeId}/skip`, { method: 'POST' });
-    if (response.ok) {
-        // Remove the item from the list
-        const item = document.querySelector(`[data-episode-id="${episodeId}"]`);
-        if (item) {
-            item.remove();
-        }
-        // Check if list is now empty
-        const remaining = document.querySelectorAll('.queue-item');
-        if (remaining.length === 0) {
-            document.querySelector('.queue-list').innerHTML = '<p class="empty-queue">No episodes in queue. Episodes will appear here when queued for processing.</p>';
-        }
-    } else {
-        alert('Failed to skip episode');
-    }
-}
-
-async function retryEpisode(podcastId, episodeId) {
-    const response = await fetch(`/podcasts/${podcastId}/episodes/${episodeId}/queue`, { method: 'POST' });
-    if (response.ok) {
-        const item = document.querySelector(`.failed-item[data-episode-id="${episodeId}"]`);
+    const item = queueItems.get(episodeId);
+    await runUIAction(Array.from(item?.querySelectorAll('button') || []), async () => {
+        await requestJSON(`/podcasts/${podcastId}/episodes/${episodeId}/skip`, {method: 'POST'});
         if (item) item.remove();
-        const remaining = document.querySelectorAll('.failed-item');
-        if (remaining.length === 0) {
-            const card = document.querySelector('.failed-list')?.closest('.card');
-            if (card) card.remove();
-        }
-        location.reload();
-    } else {
-        alert('Failed to re-queue episode');
-    }
+        queueItems.delete(episodeId);
+        showEmptyQueue();
+    }, 'The episode could not be skipped. Refresh its status and try again.');
 }
-
-// Poll for status updates
+async function retryEpisode(podcastId, episodeId) {
+    const item = failedItems.get(episodeId);
+    await runUIAction(Array.from(item?.querySelectorAll('button') || []), async () => {
+        await requestJSON(`/podcasts/${podcastId}/episodes/${episodeId}/queue`, {method: 'POST'});
+        window.location.reload();
+    }, 'The episode could not be queued. Try again shortly.');
+}
 async function updateStatuses() {
-    const items = document.querySelectorAll('.queue-item');
-    if (items.length === 0) return;
-
-    // Group by podcast
-    const byPodcast = {};
-    items.forEach(item => {
-        const podcastId = item.dataset.podcastId;
-        if (!byPodcast[podcastId]) byPodcast[podcastId] = [];
-        byPodcast[podcastId].push(item.dataset.episodeId);
-    });
-
-    // Fetch status for each podcast
-    for (const [podcastId, episodeIds] of Object.entries(byPodcast)) {
-        try {
-            const response = await fetch(`/podcasts/${podcastId}/episodes/status`);
-            if (!response.ok) continue;
-
-            const data = await response.json();
+    if (queuePollInFlight || document.hidden || !queueItems.size) return;
+    queuePollInFlight = true;
+    try {
+        for (const [podcastId, episodeIds] of queueGroups) {
+            if (!episodeIds.some(id => queueItems.has(id))) continue;
+            const data = await requestJSON(`/podcasts/${podcastId}/episodes/status`);
             for (const episodeId of episodeIds) {
+                const item = queueItems.get(episodeId);
                 const status = data.episodes[episodeId];
-                if (!status) continue;
-
-                const item = document.querySelector(`[data-episode-id="${episodeId}"]`);
-                if (!item) continue;
-
-                // Update status badge
+                if (!item || !status) continue;
+                const signature = JSON.stringify(status);
+                if (queueSignatures.get(episodeId) === signature) continue;
+                queueSignatures.set(episodeId, signature);
                 const badge = item.querySelector('.status-badge');
                 if (badge) {
                     badge.className = `status-badge status-${status.status}`;
                     badge.textContent = status.status;
                 }
-
-                // Update progress
-                const stepElem = item.querySelector('.progress-step');
-                const percentElem = item.querySelector('.progress-percent');
-
-                if (status.progress_step) {
-                    if (stepElem) {
-                        stepElem.textContent = status.progress_step;
-                    } else {
-                        const statusDiv = item.querySelector('.queue-item-status');
-                        const span = document.createElement('span');
-                        span.className = 'progress-step';
-                        span.textContent = status.progress_step;
-                        statusDiv.appendChild(span);
-                    }
+                const statusDiv = item.querySelector('.queue-item-status');
+                for (const [selector, value] of [['progress-step', status.progress_step], ['progress-percent', status.progress_percent == null ? null : status.progress_percent + '%']]) {
+                    let span = item.querySelector('.' + selector);
+                    if (value == null || value === '') { if (span) span.remove(); continue; }
+                    if (!span) { span = document.createElement('span'); span.className = selector; statusDiv.appendChild(span); }
+                    span.textContent = value;
                 }
-
-                if (status.progress_percent !== null) {
-                    if (percentElem) {
-                        percentElem.textContent = status.progress_percent + '%';
-                    } else {
-                        const statusDiv = item.querySelector('.queue-item-status');
-                        const span = document.createElement('span');
-                        span.className = 'progress-percent';
-                        span.textContent = status.progress_percent + '%';
-                        statusDiv.appendChild(span);
-                    }
-                }
-
-                // Remove if no longer pending/processing
                 if (!['pending', 'processing'].includes(status.status)) {
                     item.remove();
+                    queueItems.delete(episodeId);
                 }
             }
-        } catch (e) {
-            console.error('Failed to fetch status:', e);
         }
-    }
-
-    // Check if list is now empty
-    const remaining = document.querySelectorAll('.queue-item');
-    if (remaining.length === 0) {
-        const list = document.querySelector('.queue-list');
-        if (list) {
-            list.innerHTML = '<p class="empty-queue">No episodes in queue. Episodes will appear here when queued for processing.</p>';
-        }
-    }
+        showEmptyQueue();
+        clearRequestNotice('queue-poll');
+    } catch (error) {
+        reportRequestError(error, 'Live updates are unavailable. The displayed status may be out of date.', updateStatuses, 'queue-poll');
+        if (error instanceof UIRequestError && error.auth) stopQueuePolling();
+    } finally { queuePollInFlight = false; }
 }
-
-// Poll every 3 seconds
-setInterval(updateStatuses, 3000);
+function startQueuePolling() {
+    if (!queuePollInterval) queuePollInterval = setInterval(updateStatuses, 3000);
+}
+function stopQueuePolling() {
+    if (queuePollInterval) { clearInterval(queuePollInterval); queuePollInterval = null; }
+}
+document.addEventListener('visibilitychange', () => {
+    if (document.hidden) stopQueuePolling();
+    else { updateStatuses(); startQueuePolling(); }
+});
+startQueuePolling();
 </script>
 
 <style>
