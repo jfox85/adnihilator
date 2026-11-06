@@ -10,10 +10,12 @@ from sqlalchemy.orm import Session
 from ..dependencies import get_db
 from ..models import Episode, EpisodeStatus, Podcast
 from ..services.r2 import get_audio_url
+from ..values import finite_nonnegative_number
 
 
 def format_duration(seconds: int | float | None) -> str | None:
     """Format duration in seconds to HH:MM:SS format for iTunes."""
+    seconds = finite_nonnegative_number(seconds)
     if seconds is None:
         return None
     seconds = int(seconds)
@@ -96,8 +98,10 @@ async def get_feed(
             fe.pubDate(pub_date)
 
         # Episode duration - use processed duration if available, otherwise original
-        duration = episode.processed_duration or episode.duration
-        if duration:
+        duration = finite_nonnegative_number(episode.processed_duration)
+        if duration is None:
+            duration = finite_nonnegative_number(episode.duration)
+        if duration is not None:
             fe.podcast.itunes_duration(format_duration(duration))
 
         # Audio enclosure pointing to R2

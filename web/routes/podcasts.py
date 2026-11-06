@@ -12,6 +12,8 @@ from sqlalchemy.orm import Session
 from ..dependencies import get_db
 from ..auth import verify_admin
 from ..models import Podcast
+from ..services.audio import is_usable_audio_url
+from ..values import finite_nonnegative_number
 
 router = APIRouter(prefix="/podcasts", tags=["podcasts"])
 
@@ -173,6 +175,7 @@ async def list_episodes_html(
             "title": podcast.title or "Episodes",
             "podcast": podcast,
             "episodes": episodes,
+            "audio_eligible": {episode.id: is_usable_audio_url(episode.original_audio_url) for episode in episodes},
         },
     )
 
@@ -191,11 +194,26 @@ async def queue_episode(
     if not episode:
         raise HTTPException(status_code=404, detail="Episode not found")
 
-    episode.status = EpisodeStatus.PENDING.value
-    episode.retry_count = 0
-    episode.error_message = None
-    db.commit()
+    if episode.status == EpisodeStatus.PROCESSING.value:
+        raise HTTPException(status_code=409, detail="Episode is processing")
+    if not is_usable_audio_url(episode.original_audio_url):
+        raise HTTPException(status_code=409, detail="Episode has no usable audio")
+    if episode.status == EpisodeStatus.PENDING.value:
+        return {"status": "already_queued"}
 
+    updated = db.query(Episode).filter(
+        Episode.id == episode_id,
+        Episode.podcast_id == podcast_id,
+        Episode.status.notin_([EpisodeStatus.PROCESSING.value, EpisodeStatus.PENDING.value]),
+        Episode.original_audio_url == episode.original_audio_url,
+    ).update({Episode.status: EpisodeStatus.PENDING.value, Episode.retry_count: 0,
+              Episode.error_message: None}, synchronize_session=False)
+    db.commit()
+    if not updated:
+        db.refresh(episode)
+        if episode.status == EpisodeStatus.PENDING.value:
+            return {"status": "already_queued"}
+        raise HTTPException(status_code=409, detail="Episode changed while queueing; refresh and try again")
     return {"status": "queued"}
 
 
@@ -213,9 +231,14 @@ async def skip_episode(
     if not episode:
         raise HTTPException(status_code=404, detail="Episode not found")
 
-    episode.status = EpisodeStatus.SKIPPED.value
+    updated = db.query(Episode).filter(
+        Episode.id == episode_id,
+        Episode.podcast_id == podcast_id,
+        Episode.status != EpisodeStatus.PROCESSING.value,
+    ).update({Episode.status: EpisodeStatus.SKIPPED.value}, synchronize_session=False)
     db.commit()
-
+    if not updated:
+        raise HTTPException(status_code=409, detail="Episode is processing")
     return {"status": "skipped"}
 
 
@@ -258,15 +281,28 @@ async def queue_all_episodes(
         raise HTTPException(status_code=404, detail="Podcast not found")
 
     # Queue all skipped/failed episodes
-    updated = (
-        db.query(Episode)
+    candidates = (
+        db.query(Episode.id, Episode.original_audio_url)
         .filter_by(podcast_id=podcast_id)
         .filter(Episode.status.in_([EpisodeStatus.SKIPPED.value, EpisodeStatus.FAILED.value]))
-        .update({Episode.status: EpisodeStatus.PENDING.value, Episode.retry_count: 0, Episode.error_message: None}, synchronize_session=False)
+        .all()
     )
+    queued_ids = []
+    for episode_id, audio_url in candidates:
+        if not is_usable_audio_url(audio_url):
+            continue
+        changed = db.query(Episode).filter(
+            Episode.id == episode_id,
+            Episode.podcast_id == podcast_id,
+            Episode.status.in_([EpisodeStatus.SKIPPED.value, EpisodeStatus.FAILED.value]),
+            Episode.original_audio_url == audio_url,
+        ).update({Episode.status: EpisodeStatus.PENDING.value, Episode.retry_count: 0,
+                  Episode.error_message: None}, synchronize_session=False)
+        if changed:
+            queued_ids.append(episode_id)
     db.commit()
 
-    return {"status": "queued", "count": updated}
+    return {"status": "queued", "count": len(queued_ids), "episode_ids": queued_ids}
 
 
 @router.post("/{podcast_id}/auto-process")
@@ -293,7 +329,7 @@ async def get_episode_statuses(
     _: None = Depends(verify_admin),
 ):
     """Get status of all episodes for polling updates."""
-    from ..models import Episode
+    from ..models import Episode, EpisodeProviderHold
 
     podcast = db.query(Podcast).filter_by(id=podcast_id).first()
     if not podcast:
@@ -305,17 +341,26 @@ async def get_episode_statuses(
         .all()
     )
 
+    held_ids = {
+        episode_id for (episode_id,) in db.query(EpisodeProviderHold.episode_id)
+        .join(Episode, Episode.id == EpisodeProviderHold.episode_id)
+        .filter(Episode.podcast_id == podcast_id)
+        .all()
+    }
+
     return {
         "auto_process": podcast.auto_process,
         "episodes": {
             ep.id: {
                 "status": ep.status,
+                "provider_held": ep.id in held_ids and ep.status in ("pending", "processing"),
+                "audio_eligible": is_usable_audio_url(ep.original_audio_url),
                 "error_message": ep.error_message,
-                "ads_removed_seconds": ep.ads_removed_seconds,
-                "processed_duration": ep.processed_duration,
+                "ads_removed_seconds": finite_nonnegative_number(ep.ads_removed_seconds),
+                "processed_duration": finite_nonnegative_number(ep.processed_duration),
                 "progress_step": ep.progress_step,
-                "progress_percent": ep.progress_percent,
-                "llm_cost_usd": float(ep.llm_cost_usd) if ep.llm_cost_usd is not None else None,
+                "progress_percent": finite_nonnegative_number(ep.progress_percent, maximum=100),
+                "llm_cost_usd": finite_nonnegative_number(ep.llm_cost_usd),
                 "llm_model": ep.llm_model,
                 "detection_source": ep.detection_source,
             }

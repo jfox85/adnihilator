@@ -1,14 +1,19 @@
 """FastAPI application for AdNihilator web service."""
 
 import logging
+import math
 import os
 import re
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from .auth import (
@@ -23,6 +28,7 @@ from .database import get_engine, init_db, get_session_factory
 from .dependencies import get_db
 from .routes import podcasts, api, feeds, opml
 from .services.scheduler import create_scheduler
+from .services import provider_outages as outages
 from . import dependencies
 
 # Configure logging
@@ -99,6 +105,24 @@ app.include_router(feeds.router)
 app.include_router(opml.router)
 
 
+def _json_safe_validation_value(value: Any) -> Any:
+    """Keep nonfinite rejected input from breaking the JSON error response."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _json_safe_validation_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe_validation_value(item) for item in value]
+    return value
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    """Return the standard 422 detail shape even for invalid numeric input."""
+    detail = _json_safe_validation_value(jsonable_encoder(exc.errors()))
+    return JSONResponse(status_code=422, content={"detail": detail})
+
+
 @app.exception_handler(LoginRequiredError)
 async def login_redirect_handler(request: Request, exc: LoginRequiredError):
     return RedirectResponse(url=f"/login?next={exc.next_url}", status_code=303)
@@ -166,6 +190,7 @@ async def index(
         "index.html",
         {
             "title": "Dashboard",
+            **outages.banner_context(db),
             "podcasts": podcasts,
         },
     )
@@ -179,6 +204,7 @@ async def queue_page(
 ):
     """Queue page showing all pending and processing episodes."""
     from .models import Episode, EpisodeStatus, Podcast
+    from .services.audio import is_usable_audio_url
 
     # Get all pending and processing episodes with their podcasts
     episodes = (
@@ -221,6 +247,40 @@ async def queue_page(
             "title": "Queue",
             "episodes": episodes,
             "recent_completed": recent_completed,
+            **outages.banner_context(db),
             "recent_failed": recent_failed,
+            "audio_eligible": {episode.id: is_usable_audio_url(episode.original_audio_url) for episode, _ in recent_failed},
         },
     )
+
+
+@app.post("/provider-outages/{provider}/retry")
+async def retry_provider(
+    provider: Literal["gemini", "openai"], request: Request, db=Depends(get_db),
+    _: None = Depends(verify_admin),
+):
+    """Let the owner advance recovery after checking provider readiness."""
+    # This action can authorize billable recovery. Browser forms always send
+    # Origin; require the same origin rather than ambient Basic/cookie auth alone.
+    def origin_key(value: str) -> tuple:
+        parsed = urlsplit(value)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in ("", "/"):
+            raise ValueError("Invalid origin")
+        return parsed.scheme, parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        same_origin = origin_key(request.headers.get("origin", "")) == origin_key(str(request.base_url))
+    except ValueError:
+        same_origin = False
+    if not same_origin or request.headers.get("sec-fetch-site") == "cross-site":
+        from fastapi import HTTPException
+        raise HTTPException(403, "A same-origin recovery form is required")
+    outages.begin_write(db)
+    outages.retry_now(db, provider, api._stuck_timeout_seconds())
+    db.commit()
+    return RedirectResponse("/queue", status_code=303)
+
+
+@app.get("/provider-outages/banner", response_class=HTMLResponse)
+async def provider_outage_banner(request: Request, db=Depends(get_db), _: None = Depends(verify_admin)):
+    """Refresh safe pause status without provider or worker health calls."""
+    return templates.TemplateResponse(request, "provider_outage_banner.html", outages.banner_context(db))

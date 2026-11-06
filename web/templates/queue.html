@@ -18,7 +18,8 @@
                 <span class="queue-item-podcast">{{ podcast.title or "Untitled Podcast" }}</span>
                 <span class="queue-item-title">{{ episode.title or "Untitled Episode" }}</span>
                 <div class="queue-item-status">
-                    <span class="status-badge status-{{ episode.status }}">{{ episode.status }}</span>
+                    {% set provider_held = episode.id in (provider_held_ids|default([])) %}
+                    <span class="status-badge status-{% if provider_held and episode.status == 'pending' %}held{% else %}{{ episode.status }}{% endif %}">{% if provider_held %}{% if episode.status == 'processing' %}recovering{% else %}held{% endif %}{% else %}{{ episode.status }}{% endif %}</span>
                     {% if episode.progress_step %}
                     <span class="progress-step">{{ episode.progress_step }}</span>
                     {% endif %}
@@ -28,7 +29,9 @@
                 </div>
             </div>
             <div class="queue-item-actions">
+                {% if episode.status != 'processing' %}
                 <button onclick="skipEpisode('{{ podcast.id }}', '{{ episode.id }}')" class="btn-skip">Skip</button>
+                {% endif %}
             </div>
         </div>
         {% endfor %}
@@ -65,7 +68,11 @@
                 </div>
             </div>
             <div class="failed-item-actions">
+                {% if audio_eligible[episode.id] %}
                 <button onclick="retryEpisode('{{ podcast.id }}', '{{ episode.id }}')" class="btn-retry">Retry</button>
+                {% else %}
+                <span>No usable audio enclosure</span>
+                {% endif %}
             </div>
         </div>
         {% endfor %}
@@ -181,8 +188,15 @@ async function updateStatuses() {
                 // Update status badge
                 const badge = item.querySelector('.status-badge');
                 if (badge) {
-                    badge.className = `status-badge status-${status.status}`;
-                    badge.textContent = status.status;
+                    const providerHeld = status.provider_held === true && ['pending', 'processing'].includes(status.status);
+                    const label = providerHeld ? (status.status === 'processing' ? 'recovering' : 'held') : status.status;
+                    badge.className = `status-badge status-${providerHeld && status.status === 'pending' ? 'held' : status.status}`;
+                    badge.textContent = label;
+                }
+                const actions = item.querySelector('.queue-item-actions');
+                if (actions) {
+                    actions.innerHTML = status.status === 'pending'
+                        ? `<button onclick="skipEpisode('${podcastId}', '${episodeId}')" class="btn-skip">Skip</button>` : '';
                 }
 
                 // Update progress

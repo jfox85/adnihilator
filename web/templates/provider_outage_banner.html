@@ -1,0 +1,25 @@
+{% if provider_outages|default([]) %}
+    <section class="provider-outage" role="status" aria-labelledby="provider-outage-title">
+        <h2 id="provider-outage-title">Provider processing paused</h2>
+        <p>Held episodes keep their retry attempts. One episode tests recovery before normal claiming resumes.</p>
+        <ul>
+        {% for outage in provider_outages %}
+            <li><strong>{{ outage.label }}</strong> — {{ outage.held_count }} held episode{% if outage.held_count != 1 %}s{% endif %}.
+                {% if outage.manual_pause %}Paused for the owner’s rollout. Confirm credits and provider settings before resuming.
+                {% elif outage.category == 'billing' %}Processing paused after a provider credit failure. Check the billing balance.
+                {% elif outage.category == 'authentication' %}Processing paused after an authentication failure. Check the key.
+                {% elif outage.category == 'model' %}Processing paused after a model availability failure. Check the model setting.
+                {% endif %}
+                {% if outage.probing %}<p>A recovery episode is running; other claims remain paused.</p>
+                {% elif outage.ready %}<p>Recovery is ready. Waiting for a worker to test one episode.</p>
+                {% elif outage.retry_after %}<p>Automatic recovery is eligible after <time datetime="{{ outage.retry_after.isoformat() }}Z">{{ outage.retry_after.strftime('%b %d, %H:%M UTC') }}</time>.</p>{% endif %}
+                {% if outage.recovery_incomplete %}<p>The last recovery attempt did not verify this provider. Another episode will be tried after the cooldown.</p>{% endif %}
+                <form method="post" action="/provider-outages/{{ outage.provider }}/retry" onsubmit="return confirm('Retry one episode now? Provider usage may be charged.');">
+                    <button id="retry-provider-{{ outage.provider }}" type="submit" {% if outage.probing %}disabled{% endif %}>{% if outage.manual_pause %}Resume {{ outage.label }} processing{% else %}Retry {{ outage.label }} now{% endif %}</button>
+                </form>
+            </li>
+        {% endfor %}
+        </ul>
+        <p>Retrying allows one worker to test recovery. Provider requests may incur charges.</p>
+    </section>
+    {% endif %}

@@ -3,15 +3,17 @@
 import logging
 import os
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import case
 from sqlalchemy.orm import Session
 
 from ..app import get_db
 from ..auth import verify_worker_api_key
-from ..models import Episode, EpisodeStatus
+from ..models import Episode, EpisodeStatus, EpisodeProviderHold
+from ..services import provider_outages as outages
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +58,7 @@ def _stuck_timeout_seconds() -> int:
     return value
 
 
-def requeue_stuck_episodes(db: Session) -> int:
+def requeue_stuck_episodes(db: Session, *, commit: bool = True) -> int:
     """Recover episodes stuck in 'processing' so the queue is not blocked.
 
     An episode is considered stuck when it has been in 'processing' with a
@@ -79,25 +81,34 @@ def requeue_stuck_episodes(db: Session) -> int:
             Episode.status == EpisodeStatus.PROCESSING.value,
             Episode.claimed_at.isnot(None),
             Episode.claimed_at < cutoff,
+            ~Episode.id.in_(db.query(EpisodeProviderHold.episode_id)),
         )
         .all()
     )
 
+    recovered = 0
     for episode in stuck:
-        episode.claimed_at = None
-        episode.progress_step = None
-        episode.progress_percent = None
-        episode.error_message = "Reclaimed: worker stopped responding while processing"
-        if episode.retry_count < MAX_RETRIES:
-            episode.retry_count += 1
-            episode.status = EpisodeStatus.PENDING.value
-        else:
-            episode.status = EpisodeStatus.FAILED.value
+        # Another request can renew or recover this lease after our SELECT.
+        # Only the unchanged expired lease may spend a recovery attempt.
+        retry_available = Episode.retry_count < MAX_RETRIES
+        recovered += db.query(Episode).filter(
+            Episode.id == episode.id,
+            Episode.status == EpisodeStatus.PROCESSING.value,
+            Episode.claimed_at == episode.claimed_at,
+            Episode.claimed_at < cutoff,
+        ).update({
+            Episode.claimed_at: None,
+            Episode.progress_step: None,
+            Episode.progress_percent: None,
+            Episode.error_message: "Reclaimed: worker stopped responding while processing",
+            Episode.retry_count: case((retry_available, Episode.retry_count + 1), else_=Episode.retry_count),
+            Episode.status: case((retry_available, EpisodeStatus.PENDING.value), else_=EpisodeStatus.FAILED.value),
+        }, synchronize_session=False)
 
-    if stuck:
+    if stuck and commit:
         db.commit()
 
-    return len(stuck)
+    return recovered
 
 
 def get_worker_auth(x_worker_api_key: str = Header(...)):
@@ -105,76 +116,131 @@ def get_worker_auth(x_worker_api_key: str = Header(...)):
     verify_worker_api_key(x_worker_api_key)
 
 
+class RecoveryProof(BaseModel):
+    """Only the worker holding this outage-probe lease can finish it."""
+    provider: Literal["gemini", "openai"]
+    token: str = Field(min_length=32, max_length=32, pattern=r"^[a-f0-9]{32}$")
+
+
+class ProviderHoldRequest(BaseModel):
+    """An authenticated global failure holds rather than spends retries."""
+    provider: Literal["gemini", "openai"]
+    category: Literal["billing", "authentication", "model"]
+    error: str = Field(min_length=1, max_length=500)
+    recovery_tokens: list[RecoveryProof] = Field(default_factory=list, max_length=2)
+
+
 class CompleteRequest(BaseModel):
     """Request body for completing an episode."""
 
+    recovery_tokens: list[RecoveryProof] = Field(default_factory=list, max_length=2)
+    provider_successes: list[Literal["gemini", "openai"]] = Field(default_factory=list, max_length=2)
     processed_audio_key: str
-    processed_duration: float
-    ads_removed_seconds: float
+    processed_duration: float = Field(ge=0, allow_inf_nan=False)
+    ads_removed_seconds: float = Field(ge=0, allow_inf_nan=False)
     detection_result_path: Optional[str] = None
 
     # LLM tracking fields
     llm_provider: Optional[str] = None
     llm_model: Optional[str] = None
-    llm_input_tokens: Optional[int] = None
-    llm_output_tokens: Optional[int] = None
-    llm_total_tokens: Optional[int] = None
-    llm_cost_usd: Optional[float] = None
+    llm_input_tokens: Optional[int] = Field(default=None, ge=0, le=2**63 - 1)
+    llm_output_tokens: Optional[int] = Field(default=None, ge=0, le=2**63 - 1)
+    llm_total_tokens: Optional[int] = Field(default=None, ge=0, le=2**63 - 1)
+    llm_cost_usd: Optional[float] = Field(default=None, ge=0, le=9999.999999, allow_inf_nan=False)
     detection_source: Optional[str] = None
+
+    @field_validator("processed_audio_key")
+    @classmethod
+    def require_audio_key(cls, value: str) -> str:
+        """Reject empty keys without normalizing valid object names."""
+        if not value.strip():
+            raise ValueError("processed_audio_key must not be blank")
+        return value
 
 
 class FailRequest(BaseModel):
     """Request body for failing an episode."""
 
     error: str
+    recovery_tokens: list[RecoveryProof] = Field(default_factory=list, max_length=2)
 
 
 class ProgressRequest(BaseModel):
     """Request body for updating progress."""
 
-    step: str
-    percent: Optional[int] = None
+    recovery_tokens: list[RecoveryProof] = Field(default_factory=list, max_length=2)
+
+    step: str = Field(max_length=50)
+    percent: Optional[int] = Field(default=None, ge=0, le=100)
+
+
+@router.get("/provider-state")
+async def provider_state(db: Session = Depends(get_db), _: None = Depends(get_worker_auth)) -> dict:
+    """Negotiate the durable hold protocol before a new worker claims work."""
+    return {"protocol": outages.PROTOCOL, "paused": bool(outages.active_outages(db))}
+
+
+@router.post("/queue/{episode_id}/provider-hold")
+async def provider_hold(episode_id: str, request: ProviderHoldRequest,
+                        db: Session = Depends(get_db), _: None = Depends(get_worker_auth)) -> dict:
+    """Hold a global outage without consuming the episode's retry budget."""
+    outages.begin_write(db)
+    episode = db.get(Episode, episode_id)
+    if episode is None:
+        raise HTTPException(404, "Episode not found")
+    if episode.status == EpisodeStatus.PENDING.value and db.query(EpisodeProviderHold).filter_by(episode_id=episode_id).first():
+        db.commit()
+        return {"status": "already_held"}
+    outages.report_outage(db, episode, request.provider, request.category, request.error,
+                          [proof.model_dump() for proof in request.recovery_tokens])
+    db.commit()
+    return {"status": "held"}
+
+
+@router.post("/queue/claim-with-provider-recovery")
+async def claim_with_provider_recovery(
+    db: Session = Depends(get_db), _: None = Depends(get_worker_auth),
+    x_worker_protocol: Optional[str] = Header(default=None),
+) -> Optional[dict]:
+    """A versioned path cannot accidentally claim work on an older server."""
+    if x_worker_protocol != outages.PROTOCOL:
+        raise HTTPException(409, "The provider recovery worker protocol is required")
+    return await claim_episode(db=db, _=None, x_worker_protocol=x_worker_protocol)
 
 
 @router.post("/queue/claim")
 async def claim_episode(
-    db: Session = Depends(get_db),
-    _: None = Depends(get_worker_auth),
+    db: Session = Depends(get_db), _: None = Depends(get_worker_auth),
+    x_worker_protocol: Optional[str] = Header(default=None),
 ) -> Optional[dict]:
-    """Atomically claim the next pending episode.
-
-    Returns the episode data if one was claimed, or None if queue is empty.
-    """
-    # Recover jobs orphaned by a worker that died mid-processing so they
-    # become claimable again instead of blocking the queue indefinitely.
+    """Serialize claiming with durable pauses and one leased recovery job."""
+    # Existing expired-snapshot recovery remains optimistic/CAS so a fresh
+    # heartbeat can win. Held/probe episodes are excluded from that budget path.
     requeue_stuck_episodes(db)
-
-    # Atomic update: find and claim in one query
-    episode = (
-        db.query(Episode)
-        .filter(Episode.status == EpisodeStatus.PENDING.value)
-        .order_by(Episode.created_at.asc())
-        .with_for_update(skip_locked=True)
-        .first()
-    )
-
-    if not episode:
+    outages.begin_write(db)
+    allowed, recovery = outages.prepare_claim(db, x_worker_protocol, _stuck_timeout_seconds())
+    if not allowed:
+        db.commit()
         return None
-
+    candidates = db.query(Episode).filter(Episode.status == EpisodeStatus.PENDING.value)
+    if recovery:
+        episode = outages.select_recovery_episode(db)
+    else:
+        episode = candidates.filter(~Episode.id.in_(db.query(EpisodeProviderHold.episode_id))).order_by(Episode.created_at, Episode.id).first()
+    if episode is None:
+        db.commit()
+        return None
     episode.status = EpisodeStatus.PROCESSING.value
     episode.claimed_at = datetime.utcnow()
+    proofs = outages.reserve_probe(db, episode, recovery)
     db.commit()
-
     return {
-        "id": episode.id,
-        "podcast_id": episode.podcast_id,
+        "id": episode.id, "podcast_id": episode.podcast_id,
         "podcast_title": episode.podcast.title if episode.podcast else None,
-        "guid": episode.guid,
-        "title": episode.title,
+        "guid": episode.guid, "title": episode.title,
         "original_audio_url": episode.original_audio_url,
-        "description": episode.description,
-        "source_url": episode.source_url,
-        "status": episode.status,
+        "description": episode.description, "source_url": episode.source_url,
+        "status": episode.status, "provider_recovery": proofs,
     }
 
 
@@ -186,6 +252,7 @@ async def complete_episode(
     _: None = Depends(get_worker_auth),
 ):
     """Mark an episode as successfully processed."""
+    outages.begin_write(db)
     episode = db.query(Episode).filter_by(id=episode_id).first()
     if not episode:
         raise HTTPException(status_code=404, detail="Episode not found")
@@ -193,6 +260,10 @@ async def complete_episode(
     # Idempotent: ignore if already complete
     if episode.status == EpisodeStatus.COMPLETE.value:
         return {"status": "already_complete"}
+
+    outages.complete_probe(db, episode,
+                           [proof.model_dump() for proof in request.recovery_tokens],
+                           request.provider_successes)
 
     episode.status = EpisodeStatus.COMPLETE.value
     episode.processed_audio_key = request.processed_audio_key
@@ -234,22 +305,49 @@ async def fail_episode(
     if episode.status == EpisodeStatus.FAILED.value:
         return {"status": "already_failed"}
 
-    episode.error_message = request.error
-    episode.claimed_at = None
-    episode.progress_step = None
-    episode.progress_percent = None
+    # Normal failures retain the existing conditional status update. Only
+    # recovery results need a serialized lease snapshot; do not block ordinary
+    # concurrent completion/heartbeat delivery while loading a normal episode.
+    has_hold = db.query(EpisodeProviderHold).filter_by(episode_id=episode_id).first() is not None
+    if has_hold or request.recovery_tokens:
+        db.rollback()
+        outages.begin_write(db)
+        episode = db.get(Episode, episode_id)
+        if episode is None:
+            raise HTTPException(404, "Episode not found")
+    if episode.status == EpisodeStatus.PENDING.value and db.query(EpisodeProviderHold).filter_by(episode_id=episode_id).first():
+        db.commit()
+        return {"status": "already_held"}
+    proofs = [proof.model_dump() for proof in request.recovery_tokens]
+    leases = outages.validate_proofs(db, episode, proofs)
+    if leases:
+        outages.report_probe_failure(db, episode, request.error, proofs)
+        db.commit()
+        return {"status": "held"}
 
-    if episode.retry_count < MAX_RETRIES:
-        # Retry: back to pending
-        episode.retry_count += 1
-        episode.status = EpisodeStatus.PENDING.value
-        db.commit()
+    # The status predicate also protects concurrent duplicate deliveries and a
+    # completion committed after the read above. Attempt fencing is separate.
+    retry_available = Episode.retry_count < MAX_RETRIES
+    changed = db.query(Episode).filter(
+        Episode.id == episode_id,
+        Episode.status == EpisodeStatus.PROCESSING.value,
+    ).update({
+        Episode.error_message: request.error,
+        Episode.claimed_at: None,
+        Episode.progress_step: None,
+        Episode.progress_percent: None,
+        Episode.retry_count: case((retry_available, Episode.retry_count + 1), else_=Episode.retry_count),
+        Episode.status: case((retry_available, EpisodeStatus.PENDING.value), else_=EpisodeStatus.FAILED.value),
+    }, synchronize_session=False)
+    db.commit()
+    db.refresh(episode)
+    if not changed:
+        if episode.status == EpisodeStatus.FAILED.value:
+            return {"status": "already_failed"}
+        return {"status": "ignored", "reason": "not_processing"}
+    if episode.status == EpisodeStatus.PENDING.value:
         return {"status": "retrying", "retry_count": episode.retry_count}
-    else:
-        # Max retries reached: permanent failure
-        episode.status = EpisodeStatus.FAILED.value
-        db.commit()
-        return {"status": "failed"}
+    return {"status": "failed"}
 
 
 @router.post("/queue/{episode_id}/progress")
@@ -260,6 +358,7 @@ async def update_progress(
     _: None = Depends(get_worker_auth),
 ):
     """Update the progress of a processing episode."""
+    outages.begin_write(db)
     episode = db.query(Episode).filter_by(id=episode_id).first()
     if not episode:
         raise HTTPException(status_code=404, detail="Episode not found")
@@ -268,6 +367,7 @@ async def update_progress(
     if episode.status != EpisodeStatus.PROCESSING.value:
         return {"status": "ignored", "reason": "not_processing"}
 
+    outages.validate_proofs(db, episode, [proof.model_dump() for proof in request.recovery_tokens])
     episode.progress_step = request.step
     episode.progress_percent = request.percent
     # Renew the claim lease: a job that is still reporting progress is alive,
