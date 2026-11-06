@@ -10,6 +10,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request
 from xml.sax import SAXParseException
+from calendar import timegm
 
 import feedparser
 from sqlalchemy.exc import IntegrityError
@@ -295,7 +296,7 @@ def _sync_podcast_entries(db: Session, podcast: Podcast) -> int:
         published_at = None
         if hasattr(entry, "published_parsed") and entry.published_parsed:
             try:
-                published_at = datetime.fromtimestamp(mktime(entry.published_parsed))
+                published_at = datetime.utcfromtimestamp(timegm(entry.published_parsed))
             except (ValueError, OverflowError):
                 pass
 

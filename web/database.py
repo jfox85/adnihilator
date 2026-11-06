@@ -60,7 +60,9 @@ def init_db(engine: Engine | None = None) -> Engine:
     """Initialize the database, creating all tables."""
     if engine is None:
         engine = get_engine()
-    Base.metadata.create_all(engine)
+    from .transcript_migration import TABLES, upgrade
+    owned = {table.name for table in TABLES}
+    Base.metadata.create_all(engine, tables=[table for table in Base.metadata.sorted_tables if table.name not in owned])
     # SQLite has no ALTER TABLE IF NOT EXISTS. Serialize startup upgrades so
     # concurrent web processes cannot race while adding this nullable column.
     with engine.connect() as connection:
@@ -70,4 +72,7 @@ def init_db(engine: Engine | None = None) -> Engine:
         if "last_sync_error" not in columns:
             connection.exec_driver_sql("ALTER TABLE podcasts ADD COLUMN last_sync_error TEXT")
         connection.commit()
+    # Existing reviewed schema stays usable. Normal startup never migrates it.
+    if os.getenv("TRANSCRIPT_SCHEMA_OPT_IN", "false").lower() == "true":
+        upgrade(engine)
     return engine
