@@ -1,6 +1,7 @@
 """Worker daemon for processing podcast episodes."""
 
 import json
+import math
 import os
 import re
 import subprocess
@@ -19,7 +20,9 @@ from adnihilator.ad_timestamps import extract_ad_timestamps
 from adnihilator.audio import get_duration
 from adnihilator.config import load_config
 from adnihilator.external_transcript import fetch_external_transcript
-from adnihilator.models import AdSpan, DetectionResult
+from adnihilator.models import AdSpan, DetectionResult, FinalAdReview, TranscriptAdDetection, TranscriptSegment
+from adnihilator.provider_errors import redact_secrets
+from adnihilator.provider_responses import completed_openai_text
 from adnihilator.splice import splice_audio
 from adnihilator.sponsors import extract_sponsors
 from adnihilator.transcribe import transcribe_audio, transcribe_audio_parakeet
@@ -122,8 +125,8 @@ class WorkerDaemon:
                 OpenAI(api_key=self.config.llm.api_key)
             except Exception as e:
                 raise DetectionSafetyError(
-                    f"OpenAI runtime is unavailable; refusing to start worker: {e}"
-                ) from e
+                    f"OpenAI runtime is unavailable; refusing to start worker: {redact_secrets(str(e), extra_secrets=[self.config.llm.api_key])}"
+                ) from None
 
         if self.config.gemini.enabled:
             if not self.config.gemini.api_key:
@@ -137,8 +140,16 @@ class WorkerDaemon:
                     from google import genai  # noqa: F401
             except Exception as e:
                 raise DetectionSafetyError(
-                    f"Gemini runtime is unavailable; refusing to start worker: {e}"
-                ) from e
+                    f"Gemini runtime is unavailable; refusing to start worker: {redact_secrets(str(e), extra_secrets=[self.config.gemini.api_key])}"
+                ) from None
+
+    @staticmethod
+    def _ensure_required_transcript(segments: list[TranscriptSegment] | None) -> None:
+        """A required text lane must supply actual transcript evidence."""
+        if not segments or not any(segment.text.strip() for segment in segments):
+            raise DetectionSafetyError(
+                "Required transcript detection has no transcript; refusing to splice episode"
+            )
 
     @staticmethod
     def _ensure_parallel_detection_succeeded(
@@ -1301,7 +1312,7 @@ Return JSON:
             )
 
             import json
-            result = json.loads(response.choices[0].message.content or "{}")
+            result = json.loads(completed_openai_text(response))
 
             usage = {
                 "provider": "openai",
@@ -1310,16 +1321,17 @@ Return JSON:
                 "output_tokens": response.usage.completion_tokens if response.usage else 0,
             }
 
-            if result.get("found") and result.get("ad_start") is not None and result.get("ad_end") is not None:
-                start = max(window_start, min(float(result["ad_start"]), window_end))
-                end = max(window_start, min(float(result["ad_end"]), window_end))
+            if result.get("found") is True:
+                decision = TranscriptAdDetection.model_validate(result)
+                start = max(window_start, decision.ad_start)
+                end = min(window_end, decision.ad_end)
 
                 if start < end:
                     return [AdSpan(
                         start=start,
                         end=end,
-                        confidence=result.get("confidence", 0.7),
-                        reason=f"hunt_mode: {result.get('reason', 'found ' + sponsor_name)}",
+                        confidence=decision.confidence,
+                        reason=f"hunt_mode: {decision.reason if 'reason' in decision.model_fields_set else 'found ' + sponsor_name}",
                         sources=["hunt"],
                         candidate_indices=[],
                     )], usage
@@ -1327,7 +1339,7 @@ Return JSON:
             return [], usage
 
         except Exception as e:
-            print(f"    Hunt LLM failed: {e}")
+            print(f"    Hunt LLM failed: {redact_secrets(str(e), extra_secrets=[llm_client.api_key])}")
             return [], None
 
     def _final_llm_review(
@@ -1435,8 +1447,6 @@ content cannot be recovered from the processed file."""
                 response_format={"type": "json_object"},
             )
 
-            result = json.loads(response.choices[0].message.content or "{}")
-
             usage = {
                 "provider": "openai",
                 "model": self.config.llm.model,
@@ -1444,18 +1454,29 @@ content cannot be recovered from the processed file."""
                 "output_tokens": response.usage.completion_tokens if response.usage else 0,
             }
 
-            approved_indices = set(result.get("approved_ads", list(range(len(ad_spans)))))
-            rejected = result.get("rejected_ads", [])
-            merge_suggestions = result.get("merge_suggestions", [])
-            concerns = result.get("concerns", [])
+            content = completed_openai_text(response)
+            result = FinalAdReview.model_validate_json(content)
+            original_count = len(ad_spans)
+            referenced_indices = (
+                result.approved_ads
+                + [rejection.index for rejection in result.rejected_ads]
+                + [index for merge in result.merge_suggestions for index in merge.indices]
+            )
+            if any(index >= original_count for index in referenced_indices):
+                raise ValueError("Final review index is outside the supplied ads")
+
+            approved_indices = set(result.approved_ads)
+            rejected = result.rejected_ads
+            merge_suggestions = result.merge_suggestions
+            concerns = result.concerns
 
             if concerns:
                 for concern in concerns:
                     print(f"    Review concern: {concern}")
 
             for rej in rejected:
-                idx = rej.get("index")
-                reason = rej.get("reason", "unknown")
+                idx = rej.index
+                reason = rej.reason
                 if idx is not None and 0 <= idx < len(ad_spans):
                     ad = ad_spans[idx]
                     if "transcript_explicit" in ad.sources:
@@ -1468,11 +1489,11 @@ content cannot be recovered from the processed file."""
                     approved_indices.discard(idx)
 
             for merge in merge_suggestions:
-                indices = merge.get("indices", [])
+                indices = merge.indices
                 valid_indices = [i for i in indices if 0 <= i < len(ad_spans) and i in approved_indices]
                 if len(valid_indices) >= 2:
                     to_merge = [ad_spans[i] for i in valid_indices]
-                    print(f"    Merging ads {valid_indices}: {merge.get('reason', '')}")
+                    print(f"    Merging ads {valid_indices}: {merge.reason}")
                     merged = AdSpan(
                         start=min(s.start for s in to_merge),
                         end=max(s.end for s in to_merge),
@@ -1489,15 +1510,18 @@ content cannot be recovered from the processed file."""
             final_spans = [ad_spans[i] for i in sorted(approved_indices) if i < len(ad_spans)]
             final_spans.sort(key=lambda x: x.start)
 
-            overall_confidence = result.get("overall_confidence", 0.8)
-            print(f"    Final review confidence: {overall_confidence:.0%}")
+            overall_confidence = result.overall_confidence
+            if overall_confidence is None:
+                print("    Final review confidence: not provided")
+            else:
+                print(f"    Final review confidence: {overall_confidence:.0%}")
 
             return final_spans, usage
 
         except Exception as e:
             raise DetectionSafetyError(
-                f"Required final LLM review failed; refusing to splice episode: {e}"
-            ) from e
+                f"Required final LLM review failed; refusing to splice episode: {redact_secrets(str(e), extra_secrets=[llm_client.api_key])}"
+            ) from None
 
     def _llm_merge_candidates(
         self,
@@ -1541,8 +1565,8 @@ content cannot be recovered from the processed file."""
                 return spans, usage
             except Exception as e:
                 raise DetectionSafetyError(
-                    f"Required LLM merge failed; refusing to splice episode: {e}"
-                ) from e
+                    f"Required LLM merge failed; refusing to splice episode: {redact_secrets(str(e), extra_secrets=[llm_client.api_key])}"
+                ) from None
 
         # No LLM client available - use simple merge
         return self._simple_merge_candidates(gemini_candidates, keyword_candidates), None
@@ -1860,9 +1884,9 @@ range. If you cannot find any clear ad copy, return an empty list."""
                 if response.usage:
                     usage_total["input_tokens"] += response.usage.prompt_tokens
                     usage_total["output_tokens"] += response.usage.completion_tokens
-                result = json.loads(response.choices[0].message.content or "{}")
+                result = json.loads(completed_openai_text(response))
             except Exception as e:
-                print(f"    Mega-span refine failed ({e}), keeping original span")
+                print(f"    Mega-span refine failed ({redact_secrets(str(e), extra_secrets=[llm_client.api_key])}), keeping original span")
                 refined.append(span)
                 continue
 
@@ -1880,8 +1904,15 @@ range. If you cannot find any clear ad copy, return an empty list."""
             malformed = False
             for r in ranges:
                 try:
-                    rs = max(span.start, float(r["start"]))
-                    re_ = min(span.end, float(r["end"]))
+                    raw_start = float(r["start"])
+                    raw_end = float(r["end"])
+                    if (isinstance(r["start"], bool) or isinstance(r["end"], bool)
+                            or not math.isfinite(raw_start) or not math.isfinite(raw_end)
+                            or raw_end <= raw_start):
+                        malformed = True
+                        break
+                    rs = max(span.start, raw_start)
+                    re_ = min(span.end, raw_end)
                 except (KeyError, TypeError, ValueError):
                     # A malformed entry could be half of a real multi-part ad.
                     # Bail to the conservative original-span fallback rather
@@ -1889,7 +1920,8 @@ range. If you cannot find any clear ad copy, return an empty list."""
                     malformed = True
                     break
                 if re_ <= rs:
-                    continue
+                    malformed = True
+                    break
                 sub_spans.append(AdSpan(
                     start=rs,
                     end=re_,
@@ -1937,6 +1969,7 @@ range. If you cannot find any clear ad copy, return an empty list."""
             # Track LLM usage for this job
             llm_usage = None  # Will be populated if LLM is used
             detection_source = None  # Track which method detected ads
+            transcript_detection_pending = False
             raw_gemini_candidates = []  # Store raw Gemini candidates for debugging
 
             # Extract sponsors from description
@@ -2005,7 +2038,10 @@ range. If you cannot find any clear ad copy, return an empty list."""
                 # TIER 2a: Try external transcript first (FREE - if source_url available)
                 if job.source_url:
                     print("  Checking for external transcript...")
-                    segments = fetch_external_transcript(job.source_url)
+                    external_segments = fetch_external_transcript(job.source_url)
+                    segments = external_segments if external_segments and any(
+                        segment.text.strip() for segment in external_segments
+                    ) else None
                     if segments:
                         # Determine source based on URL
                         if 'lexfridman.com' in job.source_url:
@@ -2015,10 +2051,12 @@ range. If you cannot find any clear ad copy, return an empty list."""
                         else:
                             transcript_source = "external"
                         detection_source = "external"
+                        transcript_detection_pending = True
                         print(f"    Found external transcript ({transcript_source}): {len(segments)} segments")
 
                 # Check if parallel mode enabled
                 if self.config.detection.parallel_enabled:
+                    transcript_detection_pending = False
                     # PARALLEL DETECTION MODE
                     import concurrent.futures
 
@@ -2054,7 +2092,7 @@ range. If you cannot find any clear ad copy, return an empty list."""
                                 ]
                                 gemini_usage = usage
                         except Exception as e:
-                            gemini_error = str(e)
+                            gemini_error = redact_secrets(str(e))
 
                     def run_transcript_keywords():
                         nonlocal keyword_candidates, segments, whisper_error, transcript_source, candidates
@@ -2082,6 +2120,7 @@ range. If you cannot find any clear ad copy, return an empty list."""
                                     )
                                 transcript_source = self.engine
 
+                            self._ensure_required_transcript(segments)
                             # Find keyword candidates
                             cands = find_ad_candidates(
                                 segments, duration, sponsors=sponsor_info, podcast_name=job.podcast_title
@@ -2100,7 +2139,7 @@ range. If you cannot find any clear ad copy, return an empty list."""
                             # Store original candidates for artifact
                             candidates = cands
                         except Exception as e:
-                            whisper_error = str(e)
+                            whisper_error = redact_secrets(str(e))
 
                     print("  Running parallel detection (Gemini + Transcript/Keywords)...")
                     # Start with "transcribing" since that's the slow part - progress updates will follow
@@ -2121,6 +2160,11 @@ range. If you cannot find any clear ad copy, return an empty list."""
                     # Update status after parallel work completes
                     self.api_client.update_progress(job.id, "detecting")
 
+                    # Canonical transcript evidence is independent of failed
+                    # ad detection. Retain an already completed text lane before
+                    # the required-provider gate refuses audio publication.
+                    if (gemini_error or whisper_error) and segments and any(segment.text.strip() for segment in segments):
+                        self._persist_transcript(job, segments, transcript_source, duration, [], publish=False)
                     self._ensure_parallel_detection_succeeded(
                         gemini_error,
                         whisper_error,
@@ -2357,16 +2401,20 @@ range. If you cannot find any clear ad copy, return an empty list."""
                                 print(f"    Gemini cost: ${llm_usage['cost']:.4f}")
 
                         except Exception as e:
-                            print(f"  Warning: Gemini detection failed: {e}")
-                            print("  Falling back to Whisper...")
-                            gemini_client = None  # Fall through to Whisper
+                            raise DetectionSafetyError(
+                                f"Required Gemini detection failed; refusing to splice episode: {redact_secrets(str(e))}"
+                            ) from None
+                    elif self.config.gemini.enabled:
+                        raise DetectionSafetyError(
+                            "Required Gemini detection is unavailable; refusing to splice episode"
+                        )
 
                 # TIER 3: Fall back to Whisper if no external transcript and Gemini failed/disabled
                 if segments is None and not ad_spans:
                     detection_source = "whisper"
 
-                    # Create LLM client to determine transcription strategy
-                    llm_client = create_llm_client(self.config)
+                    # Required worker decisions cannot use optional CLI fallback.
+                    llm_client = create_llm_client(self.config, require_success=True)
 
                     # Use two-pass mode if LLM is OpenAI (fast segment-level + targeted word-level)
                     if isinstance(llm_client, OpenAIClient):
@@ -2397,8 +2445,10 @@ range. If you cannot find any clear ad copy, return an empty list."""
                             podcast_name=job.podcast_title,
                             engine=self.engine,
                         )
+                        self._ensure_required_transcript(segments)
                         print(f"    Two-pass complete: {len(segments)} segments, {len(ad_spans)} ads detected")
                     else:
+                        transcript_detection_pending = True
                         self.api_client.update_progress(job.id, "transcribing", 0)
 
                         def on_transcribe_progress(percent: int) -> None:
@@ -2432,10 +2482,10 @@ range. If you cannot find any clear ad copy, return an empty list."""
                     except OSError:
                         print("  Legacy transcript artifact could not be saved; audio processing continues")
 
-                # If we don't have ad_spans yet (external transcript or single-pass mode),
-                # run heuristic detection + LLM refinement
-                # Skip if parallel detection already ran (detection_source will be set)
-                if not ad_spans and segments and detection_source is None:
+                # A source label records provenance, not whether detection ran.
+                # External and single-pass transcripts still require this stage.
+                if transcript_detection_pending:
+                    self._ensure_required_transcript(segments)
                     # Detect ads
                     print("  Detecting ads...")
                     self.api_client.update_progress(job.id, "detecting")
@@ -2446,7 +2496,7 @@ range. If you cannot find any clear ad copy, return an empty list."""
                     # Refine with LLM
                     print("  Refining with LLM...")
                     self.api_client.update_progress(job.id, "refining")
-                    llm_client = create_llm_client(self.config)
+                    llm_client = create_llm_client(self.config, require_success=True)
                     ad_spans = llm_client.refine_candidates(
                         segments, candidates, self.config,
                         sponsors=sponsor_info, podcast_title=job.podcast_title
@@ -2709,12 +2759,15 @@ range. If you cannot find any clear ad copy, return an empty list."""
             self.process_job(job)
             return True
         except Exception as e:
-            error = str(e)
-            for name in ("WORKER_API_KEY", "R2_ACCESS_KEY", "R2_SECRET_KEY",
-                         "OPENAI_API_KEY", "GEMINI_API_KEY"):
-                value = os.environ.get(name)
-                if value:
-                    error = error.replace(value, "[REDACTED]")
+            config = getattr(self, "config", None)
+            error = redact_secrets(
+                str(e),
+                (
+                    getattr(getattr(config, "llm", None), "api_key", None),
+                    getattr(getattr(config, "gemini", None), "api_key", None),
+                    getattr(self.api_client, "api_key", None),
+                ),
+            )
             print(f"  Error: {error}")
             self.api_client.fail(job.id, error[:500])
             return True
@@ -2760,5 +2813,5 @@ range. If you cannot find any clear ad copy, return an empty list."""
                 self.api_client.close()
                 break
             except Exception as e:
-                print(f"Unexpected error: {e}")
+                print(f"Unexpected error: {redact_secrets(str(e))}")
                 time.sleep(60)  # Back off on errors

@@ -7,7 +7,7 @@
     <div class="queue-list">
         {% for episode, podcast in episodes %}
         <div class="queue-item" data-episode-id="{{ episode.id }}" data-podcast-id="{{ podcast.id }}">
-            <a href="/podcasts/{{ podcast.id }}/episodes" class="queue-artwork-link">
+            <a href="/podcasts/{{ podcast.id }}/episodes" class="queue-artwork-link" aria-label="Episodes for {{ podcast.title or 'Untitled Podcast' }}">
                 {% if podcast.artwork_url %}
                 <img src="{{ podcast.artwork_url }}" alt="{{ podcast.title }}" class="queue-item-artwork">
                 {% else %}
@@ -44,7 +44,7 @@
     <div class="failed-list">
         {% for episode, podcast in recent_failed %}
         <div class="failed-item" data-episode-id="{{ episode.id }}" data-podcast-id="{{ podcast.id }}">
-            <a href="/podcasts/{{ podcast.id }}/episodes" class="failed-artwork-link">
+            <a href="/podcasts/{{ podcast.id }}/episodes" class="failed-artwork-link" aria-label="Episodes for {{ podcast.title or 'Untitled Podcast' }}">
                 {% if podcast.artwork_url %}
                 <img src="{{ podcast.artwork_url }}" alt="{{ podcast.title }}" class="failed-item-artwork">
                 {% else %}
@@ -79,7 +79,7 @@
     <div class="recent-list">
         {% for episode, podcast in recent_completed %}
         <div class="recent-item">
-            <a href="/podcasts/{{ podcast.id }}/episodes" class="recent-artwork-link">
+            <a href="/podcasts/{{ podcast.id }}/episodes" class="recent-artwork-link" aria-label="Episodes for {{ podcast.title or 'Untitled Podcast' }}">
                 {% if podcast.artwork_url %}
                 <img src="{{ podcast.artwork_url }}" alt="{{ podcast.title }}" class="recent-item-artwork">
                 {% else %}
@@ -93,8 +93,11 @@
                     {% if episode.updated_at %}
                     <span class="completed-time">{{ episode.updated_at|relative_time }}</span>
                     {% endif %}
-                    {% if episode.ads_removed_seconds and episode.ads_removed_seconds > 0 %}
-                        {% set ads_removed = episode.ads_removed_seconds|int %}
+                    {% set removed_seconds = episode.ads_removed_seconds|finite_number %}
+                    {% if removed_seconds is none %}
+                    <span class="no-ads">—</span>
+                    {% elif removed_seconds > 0 %}
+                        {% set ads_removed = removed_seconds|int %}
                     <span class="time-saved">Removed {{ (ads_removed // 60) }}min {{ (ads_removed % 60) }}s</span>
                     {% elif episode.status == 'complete' %}
                     <span class="no-ads">No ads detected</span>
@@ -291,30 +294,17 @@ setInterval(updateStatuses, 3000);
 }
 .queue-item-status {
     display: flex;
+    flex-wrap: wrap;
+    overflow-wrap: anywhere;
     align-items: center;
     gap: 0.5rem;
     font-size: 0.85rem;
-}
-.status-badge {
-    padding: 0.2rem 0.5rem;
-    border-radius: 3px;
-    font-size: 0.75rem;
-    font-weight: 500;
-    text-transform: uppercase;
-}
-.status-pending {
-    background: #fff3cd;
-    color: #856404;
-}
-.status-processing {
-    background: #cce5ff;
-    color: #004085;
 }
 .progress-step {
     color: var(--text-secondary);
 }
 .progress-percent {
-    color: #17a2b8;
+    color: var(--text-progress);
     font-weight: 500;
 }
 .queue-item-actions {
@@ -396,7 +386,7 @@ setInterval(updateStatuses, 3000);
     color: var(--text-muted);
 }
 .time-saved {
-    color: #28a745;
+    color: var(--text-success);
     font-weight: 500;
 }
 .no-ads {
@@ -470,15 +460,11 @@ setInterval(updateStatuses, 3000);
     gap: 0.75rem;
     font-size: 0.75rem;
 }
-.status-failed {
-    background: #f8d7da;
-    color: #721c24;
-}
 .failed-time {
     color: var(--text-muted);
 }
 .failed-error {
-    color: #dc3545;
+    color: var(--text-danger);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -489,7 +475,7 @@ setInterval(updateStatuses, 3000);
     flex-shrink: 0;
 }
 .btn-retry {
-    background: #dc3545;
+    background: var(--action-danger);
     font-size: 0.85rem;
     padding: 0.4rem 0.8rem;
 }

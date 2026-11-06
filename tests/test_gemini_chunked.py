@@ -18,9 +18,9 @@ def test_empty_chunk_response_fails_closed(tmp_path: Path) -> None:
         name="uploaded-chunk",
         state=SimpleNamespace(name="ACTIVE"),
     )
-    client.models.generate_content.return_value = SimpleNamespace(text="")
+    client.models.generate_content.return_value = SimpleNamespace(text="", candidates=[SimpleNamespace(finish_reason="STOP")])
 
-    with pytest.raises(ValueError, match="Empty Gemini response"):
+    with pytest.raises(ValueError, match="Empty.*Gemini"):
         detect_ads_in_chunk(
             client,
             chunk_path,
@@ -40,7 +40,7 @@ def test_malformed_chunk_response_fails_closed(tmp_path: Path) -> None:
         name="uploaded-chunk",
         state=SimpleNamespace(name="ACTIVE"),
     )
-    client.models.generate_content.return_value = SimpleNamespace(text="not JSON")
+    client.models.generate_content.return_value = SimpleNamespace(text="not JSON", candidates=[SimpleNamespace(finish_reason="STOP")])
 
     with pytest.raises(ValueError, match="Failed to parse Gemini"):
         detect_ads_in_chunk(

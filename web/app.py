@@ -17,6 +17,7 @@ from .auth import (
     SESSION_MAX_AGE,
     check_credentials,
     create_session_token,
+    safe_login_destination,
     verify_admin,
 )
 from .database import get_engine, init_db, get_session_factory
@@ -24,6 +25,7 @@ from .dependencies import get_db
 from .routes import podcasts, api, feeds, opml, transcripts, transcript_ui, transcript_mcp
 from .services.scheduler import create_scheduler
 from . import dependencies
+from .values import finite_nonnegative_number
 
 # Configure logging
 logging.basicConfig(
@@ -65,6 +67,7 @@ def relative_time(dt: datetime | None) -> str:
 # Register custom filters
 templates.env.filters["regex_replace"] = regex_replace
 templates.env.filters["relative_time"] = relative_time
+templates.env.filters["finite_number"] = finite_nonnegative_number
 
 
 @asynccontextmanager
@@ -135,7 +138,7 @@ async def login_page(request: Request, next: str = "/"):
     return templates.TemplateResponse(
         request,
         "login.html",
-        {"title": "Login", "next": next},
+        {"title": "Login", "next": safe_login_destination(next)},
     )
 
 
@@ -146,6 +149,7 @@ async def login_submit(
     password: str = Form(...),
     next: str = Form("/"),
 ):
+    next = safe_login_destination(next)
     if not check_credentials(username, password):
         return templates.TemplateResponse(
             request,

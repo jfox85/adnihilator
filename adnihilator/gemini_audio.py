@@ -18,8 +18,11 @@ from .gemini_common import (
     create_genai_client,
     extract_usage,
     file_state_name,
+    validate_detections,
 )
 from .models import AdSpan, SponsorInfo
+from .provider_errors import classify_provider_error, describe_provider_failure, redact_secrets
+from .provider_responses import completed_gemini_text
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +84,7 @@ class GeminiAudioClient:
             # Upload audio to Gemini Files API
             audio_file = client.files.upload(file=str(audio_path))
             upload_time = time.time() - upload_start
-            logger.info(f"Upload complete in {upload_time:.2f}s, URI: {audio_file.uri}")
+            logger.info(f"Upload complete in {upload_time:.2f}s")
 
             # Wait for file to be processed
             max_wait = 120  # seconds
@@ -123,15 +126,7 @@ class GeminiAudioClient:
             if not response:
                 raise ValueError("Empty response from Gemini API")
 
-            response_text = getattr(response, "text", None)
-            if not response_text:
-                # Check for safety block / non-STOP finish
-                candidates = getattr(response, "candidates", None)
-                if candidates:
-                    finish_reason = getattr(candidates[0], "finish_reason", None)
-                    if finish_reason is not None:
-                        raise ValueError(f"Gemini response blocked: {finish_reason}")
-                raise ValueError("Empty text in Gemini response")
+            response_text = completed_gemini_text(response)
 
             # Parse JSON response
             result = self._parse_response(response_text)
@@ -148,28 +143,20 @@ class GeminiAudioClient:
 
             # Convert to AdSpan objects
             ad_spans = []
-            for ad in result.get("ads", []):
-                start_time = ad.get("start_time")
-                end_time = ad.get("end_time")
-
-                # Validate timestamps
-                if start_time is None or end_time is None:
-                    logger.warning(f"Skipping ad with missing timestamps: {ad}")
-                    continue
-
+            for ad in validate_detections(result):
+                start_time = max(0, ad.start_time)
+                end_time = min(ad.end_time, duration) if duration is not None else ad.end_time
                 if start_time >= end_time:
-                    logger.warning(f"Skipping ad with invalid time range: {ad}")
-                    continue
-
-                sponsor = ad.get("sponsor", "Unknown")
-                ad_type = ad.get("ad_type")
-                reason = ad.get("reason", "")
+                    raise ValueError("Gemini detection does not overlap the episode")
+                sponsor = ad.sponsor
+                ad_type = ad.ad_type
+                reason = ad.reason
 
                 ad_spans.append(
                     AdSpan(
                         start=start_time,
                         end=end_time,
-                        confidence=ad.get("confidence", 0.95),
+                        confidence=ad.confidence if "confidence" in ad.model_fields_set else 0.95,
                         reason=f"Gemini: {sponsor} ({ad_type or 'unknown'}) - {reason}",
                         candidate_indices=[],  # Not applicable for Gemini
                         ad_type=ad_type,
@@ -181,7 +168,8 @@ class GeminiAudioClient:
 
         except Exception as e:
             # Re-raise with context
-            raise ValueError(f"Gemini detection failed: {e}") from e
+            failure = classify_provider_error(e, (self.api_key,))
+            raise ValueError(f"Gemini detection failed: {describe_provider_failure(failure)}") from None
 
     def _build_detection_prompt(
         self,
@@ -311,7 +299,7 @@ If no ads found: {{"ads": [], "reason": "<explanation>"}}"""
             return json.loads(content)
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse Gemini response as JSON: {e}")
-            logger.error(f"Response text: {text[:500]}...")
+            logger.error(f"Response text: {redact_secrets(text, (self.api_key,))[:500]}...")
             raise ValueError(f"Failed to parse Gemini response as JSON: {e}")
 
 

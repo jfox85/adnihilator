@@ -20,7 +20,12 @@ def daemon(tmp_path, monkeypatch):
     worker.artifacts_dir = None
     worker.transcripts_dir = tmp_path / 'outbox'
     worker.engine, worker.whisper_model, worker.device = 'parakeet', 'small', 'cpu'
-    worker.config = SimpleNamespace(llm=SimpleNamespace(provider='fixture'), detection=SimpleNamespace(parallel_enabled=False))
+    worker.config = SimpleNamespace(llm=SimpleNamespace(provider='openai', api_key='synthetic-local-only'), detection=SimpleNamespace(parallel_enabled=False))
+    # This fixture exercises successful required detection followed by an
+    # independent transcript-storage failure, never a provider outage.
+    refiner = Mock()
+    refiner.refine_candidates.return_value = []  # Valid no-ad result.
+    monkeypatch.setattr(module, 'create_llm_client', Mock(return_value=refiner))
     worker._download_audio = lambda url, path: path.write_bytes(b'raw')
     monkeypatch.setattr(module, 'download_recovery_audio', lambda url, path, heartbeat: path.write_bytes(b'raw'))
     monkeypatch.setattr(module, 'fetch_recovery_external', lambda url, heartbeat: None)
@@ -47,6 +52,8 @@ def test_transcript_upload_failure_keeps_audio_completion_and_outbox(daemon, mon
     monkeypatch.setattr(module, 'fetch_external_transcript', lambda url: [TranscriptSegment(index=0, start=1.123, end=5.678, text='Independent remembered conversation')])
     daemon.api_client.publish_transcript.side_effect = RuntimeError()
     daemon.process_job(EpisodeJob('e1', 'p1', 'guid', 'Fixture', 'https://example.com/audio', source_url='https://example.com/page'))
+    module.create_llm_client.assert_called_once_with(daemon.config, require_success=True)
+    module.create_llm_client.return_value.refine_candidates.assert_called_once()
     daemon.api_client.complete.assert_called_once()
     assert list(daemon.transcripts_dir.glob('*/*.pending'))
     assert list(daemon.transcripts_dir.glob('*/*.json'))
@@ -57,6 +64,8 @@ def test_transcript_disk_failure_does_not_fail_audio(daemon, monkeypatch):
     monkeypatch.setattr(module, 'fetch_external_transcript', lambda url: [TranscriptSegment(index=0, start=1, end=5, text='memoir')])
     monkeypatch.setattr(module, 'stage', Mock(side_effect=OSError()))
     daemon.process_job(EpisodeJob('e1', 'p1', 'guid', 'Fixture', 'https://example.com/audio', source_url='https://example.com/page'))
+    module.create_llm_client.assert_called_once_with(daemon.config, require_success=True)
+    module.create_llm_client.return_value.refine_candidates.assert_called_once()
     daemon.api_client.complete.assert_called_once()
 
 
