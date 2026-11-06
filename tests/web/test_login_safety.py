@@ -1,6 +1,9 @@
 """Regressions for untrusted login destinations and Unicode auth inputs."""
 
 from collections.abc import Iterator
+import hashlib
+import hmac
+import time
 from pathlib import Path
 
 import pytest
@@ -100,3 +103,40 @@ class TestUnicodeAuthentication:
         with pytest.raises(HTTPException) as error:
             verify_worker_api_key("é-invalid")
         assert error.value.status_code == 401
+
+
+class TestSessionSubjectEncoding:
+    @pytest.mark.parametrize("username", ["admin", "ü", "🎧", "用户", "admin:ops", "a:b:c"])
+    def test_configured_username_creates_a_usable_cookie(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch, username: str
+    ) -> None:
+        """Configured Unicode and delimiter-containing names survive cookie transport."""
+        monkeypatch.setenv("ADMIN_USERNAME", username)
+        response = client.post(
+            "/login", data={"username": username, "password": "test-password"}, follow_redirects=False
+        )
+        assert response.status_code == 303
+        response.headers["set-cookie"].encode("ascii")
+        assert client.get("/").status_code == 200
+
+    def test_existing_legacy_cookie_still_authenticates(self, client: TestClient) -> None:
+        """The rollout does not sign out existing valid ASCII sessions."""
+        payload = f"test-admin:{int(time.time()) + 3600}"
+        signature = hmac.new(b"test-password", payload.encode(), hashlib.sha256).hexdigest()
+        client.cookies.set(SESSION_COOKIE, f"{payload}:{signature}")
+        assert client.get("/").status_code == 200
+
+    @pytest.mark.parametrize("token", [
+        "v2:bad!:9999999999:invalid", "v2:é:9999999999:invalid", "v3:abc:9999999999:invalid",
+        "v2::9999999999:invalid", "v2:abc:invalid:invalid",
+    ])
+    def test_invalid_versioned_subjects_are_denied(self, client: TestClient, token: str) -> None:
+        """Malformed new-format cookies remain untrusted instead of raising."""
+        assert not verify_session_token(token)
+
+    @pytest.mark.parametrize("subject", ["bad!", "_w", "é", ""])
+    def test_signed_invalid_subject_is_still_denied(self, client: TestClient, subject: str) -> None:
+        """Malformed base64/UTF-8 must be rejected even past signature validation."""
+        payload = f"v2:{subject}:{int(time.time()) + 3600}"
+        signature = hmac.new(b"test-password", payload.encode(), hashlib.sha256).hexdigest()
+        assert not verify_session_token(f"{payload}:{signature}")
