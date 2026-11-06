@@ -5,7 +5,8 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 from .config import Config
-from .models import AdCandidate, AdSpan, SponsorInfo, TranscriptSegment
+from .models import AdCandidate, AdSpan, MergedDetectionResponse, SponsorInfo, TranscriptSegment
+from .redaction import redact_secrets
 
 # Context window: how many seconds before/after candidate to include
 CONTEXT_BEFORE = 30.0  # 30 seconds before
@@ -692,7 +693,9 @@ Analyze the candidates and transcript to produce refined ad boundaries."""
                 response_format={"type": "json_object"},
             )
 
-            result = json.loads(response.choices[0].message.content or "{}")
+            result = MergedDetectionResponse.model_validate_json(
+                response.choices[0].message.content or "{}"
+            )
 
             # Extract usage for cost tracking
             usage = {
@@ -705,32 +708,25 @@ Analyze the candidates and transcript to produce refined ad boundaries."""
 
             # Validate and filter output
             validated_ads = []
-            for ad in result.get("ads", []):
-                # Type coercion - LLM may return strings or None
-                try:
-                    start = float(ad.get("start", 0) or 0)
-                    end = float(ad.get("end", 0) or 0)
-                except (TypeError, ValueError):
-                    continue  # Skip malformed entries
-
+            for ad in result.ads:
                 # Clamp to valid range
-                start = max(0, min(start, duration))
-                end = max(0, min(end, duration))
+                start = max(0, min(ad.start, duration))
+                end = max(0, min(ad.end, duration))
 
                 # Skip invalid spans
                 if start >= end:
                     continue
 
                 # Default sources to ["llm_new"] if LLM omitted them
-                sources = ad.get("sources", [])
+                sources = ad.sources
                 if not sources:
                     sources = ["llm_new"]
 
                 validated_ads.append(AdSpan(
                     start=start,
                     end=end,
-                    confidence=ad.get("confidence", 0.9),
-                    reason=ad.get("reason", "LLM merged"),
+                    confidence=ad.confidence,
+                    reason=ad.reason,
                     sources=sources,
                     candidate_indices=[],
                 ))
@@ -745,9 +741,11 @@ Analyze the candidates and transcript to produce refined ad boundaries."""
             return validated_ads, usage
 
         except Exception as e:
-            print(f"LLM merge failed: {e}")
-            # Re-raise so caller can trigger fallback to simple merge
-            raise
+            message = redact_secrets(str(e), extra_secrets=[self.api_key])
+            print(f"LLM merge failed: {message}")
+            # The required worker stage fails closed; suppress raw SDK/schema
+            # exception context, which can contain credentials or input excerpts.
+            raise ValueError(f"LLM merge failed: {message}") from None
 
     def _enforce_non_overlapping(self, ads: list[AdSpan]) -> list[AdSpan]:
         """Post-process to resolve any overlapping spans (safety net for LLM output).

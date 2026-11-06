@@ -43,6 +43,32 @@ class GeminiDetectionResponse(BaseModel):
     ads: list[GeminiAdDetection]
 
 
+class MergedAdDetection(BaseModel):
+    """A valid required merge decision before clamping to episode bounds."""
+
+    model_config = ConfigDict(strict=True, allow_inf_nan=False)
+
+    start: float
+    end: float
+    confidence: float = Field(default=0.9, ge=0, le=1)
+    reason: str = "LLM merged"
+    sources: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_time_order(self) -> "MergedAdDetection":
+        """Reject malformed ranges instead of treating them as rejected ads."""
+        if self.end <= self.start:
+            raise ValueError("Merged detection end must be after start")
+        return self
+
+
+class MergedDetectionResponse(BaseModel):
+    """A required merger must explicitly return its complete ad decision."""
+
+    model_config = ConfigDict(strict=True)
+    ads: list[MergedAdDetection]
+
+
 class FinalReviewRejection(BaseModel):
     """An explicit rejection of one supplied advertisement index."""
 
