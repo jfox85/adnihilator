@@ -53,3 +53,56 @@ class TestImportArtifactShapes:
         report = import_local(tmp_path / "fixture.sqlite", feed, artifacts, "p", "https://example.invalid/feed")
         assert report["available"] == 1
         assert report["invalid_artifacts"] == 1
+
+
+class TestNestedArtifactIsolation:
+    @pytest.mark.parametrize("changes", [
+        {"segments": 1, "duration": 3},
+        {"segments": [None], "duration": 3},
+        {"model_info": ["not metadata"]},
+    ])
+    def test_malformed_latest_artifact_cannot_abort_healthy_older_episode(self, tmp_path: Path, changes: dict) -> None:
+        """Use actual importer iteration, not just standalone parser rejection."""
+        artifacts = tmp_path / "artifacts" / "p"
+        artifacts.mkdir(parents=True)
+        feed = tmp_path / "feed.xml"
+        feed.write_text('<rss><channel><title>Synthetic</title>' + ''.join(
+            f'<item><guid>{name}</guid><title>{name}</title><pubDate>{date}</pubDate><enclosure url="https://example.invalid/{name}.mp3"/></item>'
+            for name, date in [("bad", "Wed, 30 Sep 2026 10:00:00 GMT"), ("good", "Tue, 29 Sep 2026 10:00:00 GMT")]
+        ) + '</channel></rss>')
+        for name in ("bad", "good"):
+            data = dict(audio_path=f"https://example.invalid/{name}.mp3", segments=[dict(index=0, start=0, end=2, text="healthy independent content")])
+            if name == "bad":
+                data.update(changes)
+            (artifacts / f"{name}.json").write_text(json.dumps(data))
+        report = import_local(tmp_path / "fixture.sqlite", feed, artifacts.parent, "p", "https://example.invalid/feed")
+        assert report["failed"] == 1
+        assert report["available"] == 1
+        import sqlite3
+        with sqlite3.connect(tmp_path / "fixture.sqlite") as db:
+            assert db.execute("SELECT count(*) FROM transcript_versions").fetchone()[0] == 1
+            assert "healthy independent content" in db.execute("SELECT canonical_json FROM transcript_versions").fetchone()[0]
+
+
+@pytest.mark.parametrize("artifact_url,available", [
+    ("https://publisher-two.invalid/XYZ123.mp3", False),
+    ("https://publisher-one.invalid/XYZ123.mp3", True),
+    ("https://publisher-one.invalid/ABC999.mp3", False),
+])
+def test_prototype_inventory_and_fts_do_not_attach_another_publishers_audio(tmp_path: Path, artifact_url: str, available: bool) -> None:
+    """Exercise inventory through SQLite retrieval with exact and absent controls."""
+    from tests.test_transcript_search_poc import search as prototype
+    artifacts = tmp_path / "artifacts" / "p"
+    artifacts.mkdir(parents=True)
+    feed = tmp_path / "feed.xml"
+    feed.write_text('<rss><channel><title>Synthetic</title><item><guid>g</guid><title>One</title><pubDate>Wed, 30 Sep 2026 10:00:00 GMT</pubDate><enclosure url="https://publisher-one.invalid/XYZ123.mp3"/></item></channel></rss>')
+    (artifacts / "worker.json").write_text(json.dumps(dict(audio_path=artifact_url, segments=[dict(index=0, start=0, end=2, text="uniquely remembered quokkaword")])) )
+    report = prototype.inventory(feed, artifacts.parent, "p", 20)
+    assert report["episodes"][0]["coverage"] == ("available" if available else "missing")
+    connection = prototype.connect(tmp_path / "prototype.sqlite")
+    try:
+        prototype.ingest(connection, report)
+        hits = prototype.search(connection, "quokkaword", "p")["hits"]
+        assert bool(hits) is available
+    finally:
+        connection.close()

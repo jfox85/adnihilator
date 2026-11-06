@@ -14,6 +14,7 @@ import sqlite3
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 
 STOP_WORDS = set("what were they talking about in my latest episode of the one guy really it a an and is was he she i me to for with that this podcast".split())
@@ -31,8 +32,19 @@ def utc_date(value: str) -> str:
 
 
 def audio_identity(url: str) -> str:
-    """Ignore tracking wrappers/query changes for Megaphone media IDs only."""
-    match = re.search(r"(?:^|/)([A-Z]+\d+\.mp3)(?:[?&#]|$)", url)
+    """Match the core's conservative provenance rule without runtime imports."""
+    try:
+        parsed = urlsplit(url)
+        if parsed.scheme not in ("http", "https") or parsed.username is not None or parsed.password is not None or parsed.port not in (None, 80, 443):
+            return url
+        if parsed.hostname == "traffic.megaphone.fm":
+            match = re.fullmatch(r"/([A-Z]+\d+\.mp3)", parsed.path)
+        elif parsed.hostname in {"chrt.fm", "chtbl.com", "dts.podtrac.com", "pdst.fm"}:
+            match = re.search(r"(?:^|/)traffic\.megaphone\.fm/([A-Z]+\d+\.mp3)$", parsed.path)
+        else:
+            return url
+    except ValueError:
+        return url
     return match.group(1) if match else url
 
 

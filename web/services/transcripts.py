@@ -50,7 +50,8 @@ def safe_url(url: str | None) -> str | None:
         return None
     try:
         parsed = urlsplit(url)
-        return url[:4000] if parsed.scheme in ("http", "https") and parsed.hostname and not parsed.username else None
+        return url[:4000] if (parsed.scheme in ("http", "https") and parsed.hostname
+                             and parsed.username is None and parsed.password is None) else None
     except ValueError:
         return None
 
@@ -253,6 +254,11 @@ class TranscriptReader:
             raise TranscriptError("Episode not found")
         version = get_version(self.db, episode_id, checksum)
         doc = json.loads(version.canonical_json)
+        # Immutable provenance may predate URL filtering. Filter at the read
+        # boundary as well, without altering canonical bytes or old snapshots.
+        version_episode = json.loads(version.episode_metadata_json)
+        for field in ("source_url", "original_audio_url"):
+            version_episode[field] = safe_url(version_episode.get(field))
         selected = doc["segments"][ordinal:ordinal + count]
         segments, remaining = [], MAX_TEXT_CHARS
         for n, s in enumerate(selected, ordinal):
@@ -271,7 +277,7 @@ class TranscriptReader:
                     next_ordinal=ordinal + len(segments) if ordinal + len(segments) < len(doc["segments"]) else None,
                     timestamp_basis=doc["timestamp_basis"], processed_seek_url=None,
                     source=doc["source"], model=doc["model"], schema_version=doc["schema_version"],
-                    version_episode=json.loads(version.episode_metadata_json), producer_version=doc["producer_version"],
+                    version_episode=version_episode, producer_version=doc["producer_version"],
                     artifact_id=doc.get("source_artifact_id"), artifact_checksum=doc.get("source_artifact_checksum"),
                     content_is_untrusted_data=True)
 

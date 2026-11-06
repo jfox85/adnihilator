@@ -16,6 +16,8 @@ def read_artifact(path: Path, episode_id: str, podcast_id: str, guid: str,
         raise ValueError("Artifact too large")
     raw = path.read_bytes()
     data = json.loads(raw)
+    if not isinstance(data, dict):
+        raise ValueError("Artifact must be an object")
     after = path.stat()
     if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
         raise ValueError("Artifact changed during import")
@@ -39,11 +41,13 @@ def read_artifact(path: Path, episode_id: str, podcast_id: str, guid: str,
                 segments.append(dict(index=len(segments), start=float(match[1]), end=float(match[2]), text=match[3]))
     if not segments:
         return None
-    duration = data.get("duration")
-    if duration and max(segment["end"] for segment in segments) < duration - max(120, duration * .1):
-        raise ValueError("Artifact appears to be an incomplete prefix")
     metadata = data.get("model_info") or {}
-    return TranscriptDocument(episode_id=episode_id, podcast_id=podcast_id, guid=guid,
+    if not isinstance(metadata, dict) or any(
+        value is not None and not isinstance(value, str)
+        for value in (metadata.get(key) for key in ("transcript_source", "engine", "parakeet_model", "whisper_model"))
+    ):
+        raise ValueError("Invalid artifact model metadata")
+    document = TranscriptDocument(episode_id=episode_id, podcast_id=podcast_id, guid=guid,
                               original_audio_url=data.get("audio_path") or original_audio_url,
                               source="artifact:" + (metadata.get("transcript_source") or metadata.get("engine") or "unknown"),
                               model=metadata.get("parakeet_model") or metadata.get("whisper_model"),
@@ -51,3 +55,9 @@ def read_artifact(path: Path, episode_id: str, podcast_id: str, guid: str,
                               source_artifact_checksum=hashlib.sha256(raw).hexdigest(), duration=data.get("duration"),
                               timestamp_basis="external_source" if metadata.get("transcript_source") in ("external", "substack", "lexfridman") else "original_audio",
                               segments=segments, ad_spans=data.get("ad_spans", []))
+    # Validate nested values before arithmetic so malformed artifacts stay
+    # within the importer's per-episode ValueError boundary.
+    duration = document.duration
+    if duration and max(segment.end for segment in document.segments) < duration - max(120, duration * .1):
+        raise ValueError("Artifact appears to be an incomplete prefix")
+    return document

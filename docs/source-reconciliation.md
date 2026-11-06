@@ -37,3 +37,11 @@ This is a local producer guarantee, not global precedence across independent imp
 The UI5 classification received two independent checks: a deleted-podcast citation becomes a raw 404 just like main's stale episode bookmark; five invalid date/checksum/ordinal cases are manual-only. The global inherited error-page gap is PR11's dependency, not a duplicated transcript-specific handler. Ordinary blank-date form failures are fixed locally.
 
 The owner states historical credentials are inactive (A4); this statement was not independently verified. Current read-only evidence found worker PID85605 ARM64 and successful public certificate handshakes; it does not prove the cause or absence of historical TLS/architecture failures.
+
+## First independent code-review follow-up
+
+Transcript provenance rejects any present URL userinfo, including an empty username with a password. The same filtering is applied when returning older immutable version metadata; canonical content, checksums and saved metadata are not rewritten. Actual bearer REST/MCP and admin HTML regressions cover current and retained URLs, with plain URL/content controls. This closes a builder-discovered credential-boundary gap independently confirmed twice by Opus and also independently reported by the Sol code reviewer.
+
+Malformed nested artifact shapes are validated before duration arithmetic or metadata access, so one invalid offline artifact cannot abort the import of a healthy neighboring episode. The standalone, standard-library prototype now follows the core's conservative provider identity rule instead of joining unrelated providers by basename. Both residual cases were confirmed twice by the other model before these changes. The prototype intentionally retains its no-runtime-import contract; real inventory-to-SQLite retrieval regressions cover the wrong-provider and exact-URL paths.
+
+The first Opus code review also observed a Low edge for manually/external-written transcript lease timestamps whose SQLite text formatting differs from the ORM's normal representation: exact observed-timestamp fencing can leave those rows unrecovered. All application writers use the ORM format. That operator-repair edge remains open and is not claimed fixed here; no production rows were inspected or rewritten for it.
