@@ -78,6 +78,7 @@
              data-id="{{ episode.id }}"
              data-title="{{ (episode.title or episode.guid)|lower }}"
              data-status="{{ episode.status }}"
+             data-audio-eligible="{{ 'true' if audio_eligible[episode.id] else 'false' }}"
              data-date="{{ episode.published_at.isoformat() if episode.published_at else '' }}">
             <div class="episode-main" onclick="toggleDetails('{{ episode.id }}')">
                 <div class="episode-title-section">
@@ -86,15 +87,18 @@
                         {% if episode.published_at %}
                         {{ episode.published_at.strftime('%b %d, %Y') }}
                         {% endif %}
-                        {% if episode.duration %}
-                        &middot; {{ (episode.duration // 60) }}min
+                        {% if episode.duration is not none %}
+                        &middot; {{ episode.duration|duration }}
                         {% endif %}
+                        <span id="audio-{{ episode.id }}" {% if audio_eligible[episode.id] %}hidden{% endif %}>No usable audio enclosure</span>
                     </span>
                 </div>
                 <div class="episode-status-section">
-                    {% if episode.status in ['skipped', 'failed'] %}
+                    <span id="mobile-actions-{{ episode.id }}">
+                    {% if episode.status in ['skipped', 'failed'] and audio_eligible[episode.id] %}
                     <button onclick="event.stopPropagation(); queueEpisode('{{ podcast.id }}', '{{ episode.id }}')" class="btn-primary mobile-queue-btn">Queue</button>
                     {% endif %}
+                    </span>
                     <span class="status-badge status-{{ episode.status }}" id="badge-{{ episode.id }}">
                         {%- if episode.status == 'processing' and episode.progress_step -%}
                             {{ episode.progress_step }}{% if episode.progress_percent is not none %} {{ episode.progress_percent }}%{% endif %}
@@ -114,25 +118,28 @@
                 <div class="episode-error" id="error-{{ episode.id }}" {% if not (episode.error_message and episode.status == 'failed') %}style="display:none"{% endif %}>
                     <strong>Error:</strong> <span class="error-text">{{ episode.error_message or '' }}</span>
                 </div>
-                <div class="episode-stats" id="stats-{{ episode.id }}" {% if not episode.ads_removed_seconds %}style="display:none"{% endif %}>
-                    <strong>Ads Removed:</strong> <span class="stats-ads">{{ "%.1f"|format(episode.ads_removed_seconds or 0) }}</span>s
+                {% set removed_seconds = episode.ads_removed_seconds|finite_number %}
+                {% set processed_duration = episode.processed_duration|finite_number %}
+                {% set llm_cost = episode.llm_cost_usd|finite_number %}
+                <div class="episode-stats" id="stats-{{ episode.id }}" {% if episode.status != 'complete' and not removed_seconds %}style="display:none"{% endif %}>
+                    <strong>Ads Removed:</strong> <span class="stats-ads">{% if removed_seconds == 0 %}No ads detected{% else %}{{ removed_seconds|duration }}{% endif %}</span>
                     <span class="stats-duration">
-                    {% if episode.processed_duration %}
-                    &middot; <strong>Final Duration:</strong> {{ (episode.processed_duration // 60)|int }}:{{ "%02d"|format((episode.processed_duration % 60)|int) }}
+                    {% if processed_duration is not none %}
+                    &middot; <strong>Final Duration:</strong> {{ processed_duration|duration }}
                     {% endif %}
                     </span>
-                    <span class="stats-cost" id="cost-{{ episode.id }}" {% if episode.llm_cost_usd is none %}style="display:none"{% endif %}>
-                    {% if episode.llm_cost_usd is not none %}
-                    &middot; <strong>Cost:</strong> ${{ "%.4f"|format(episode.llm_cost_usd) }}
+                    <span class="stats-cost" id="cost-{{ episode.id }}" {% if llm_cost is none %}style="display:none"{% endif %}>
+                    {% if llm_cost is not none %}
+                    &middot; <strong>Cost:</strong> {{ llm_cost|cost }}
                     {% if episode.detection_source %}<span class="detection-source">({{ episode.detection_source }})</span>{% endif %}
                     {% endif %}
                     </span>
                 </div>
                 <div class="episode-actions" id="actions-{{ episode.id }}">
-                    {% if episode.status in ['skipped', 'failed'] %}
+                    {% if episode.status in ['skipped', 'failed'] and audio_eligible[episode.id] %}
                     <button onclick="event.stopPropagation(); queueEpisode('{{ podcast.id }}', '{{ episode.id }}')" class="btn-primary btn-small">Queue</button>
                     {% endif %}
-                    {% if episode.status not in ['skipped', 'complete'] %}
+                    {% if episode.status not in ['skipped', 'complete', 'processing'] %}
                     <button onclick="event.stopPropagation(); skipEpisode('{{ podcast.id }}', '{{ episode.id }}')" class="btn-secondary btn-small">Skip</button>
                     {% endif %}
                     {% if episode.status == 'complete' %}
@@ -181,13 +188,25 @@ function updateEpisodeUI(episodeId, data) {
 
     const oldStatus = row.dataset.status;
     const newStatus = data.status;
+    const audioEligible = data.audio_eligible === undefined ? row.dataset.audioEligible === 'true' : data.audio_eligible;
+    const hasAudioChange = row.dataset.audioEligible !== String(audioEligible);
 
     // Skip update if nothing meaningful changed
     const hasProgressChange = data.progress_step !== undefined || data.progress_percent !== undefined;
-    if (oldStatus === newStatus && !data.ads_removed_seconds && !hasProgressChange) return;
+    const hasStatsChange = ['ads_removed_seconds', 'processed_duration', 'llm_cost_usd']
+        .some(field => Object.prototype.hasOwnProperty.call(data, field));
+    if (oldStatus === newStatus && !hasStatsChange && !hasProgressChange && !hasAudioChange) return;
 
     // Update data attribute
     row.dataset.status = newStatus;
+    row.dataset.audioEligible = String(audioEligible);
+    const audioMessage = document.getElementById('audio-' + episodeId);
+    if (audioMessage) audioMessage.hidden = audioEligible;
+    const mobileActions = document.getElementById('mobile-actions-' + episodeId);
+    if (mobileActions) {
+        mobileActions.innerHTML = audioEligible && ['skipped', 'failed'].includes(newStatus)
+            ? `<button onclick="event.stopPropagation(); queueEpisode('${podcastId}', '${episodeId}')" class="btn-primary mobile-queue-btn">Queue</button>` : '';
+    }
 
     // Update badge
     const badge = document.getElementById('badge-' + episodeId);
@@ -218,14 +237,15 @@ function updateEpisodeUI(episodeId, data) {
     // Update stats
     const statsDiv = document.getElementById('stats-' + episodeId);
     if (statsDiv) {
-        if (data.ads_removed_seconds) {
+        if (data.ads_removed_seconds || newStatus === 'complete') {
             statsDiv.style.display = '';
-            statsDiv.querySelector('.stats-ads').textContent = data.ads_removed_seconds.toFixed(1);
-            if (data.processed_duration) {
-                const mins = Math.floor(data.processed_duration / 60);
-                const secs = Math.floor(data.processed_duration % 60);
+            statsDiv.querySelector('.stats-ads').textContent = data.ads_removed_seconds === 0
+                ? 'No ads detected' : formatDuration(data.ads_removed_seconds);
+            if (data.processed_duration !== null && data.processed_duration !== undefined) {
                 statsDiv.querySelector('.stats-duration').innerHTML =
-                    ` &middot; <strong>Final Duration:</strong> ${mins}:${secs.toString().padStart(2, '0')}`;
+                    ` &middot; <strong>Final Duration:</strong> ${formatDuration(data.processed_duration)}`;
+            } else {
+                statsDiv.querySelector('.stats-duration').textContent = '';
             }
 
             // Update LLM cost
@@ -233,7 +253,7 @@ function updateEpisodeUI(episodeId, data) {
             if (costSpan) {
                 if (data.llm_cost_usd !== null && data.llm_cost_usd !== undefined) {
                     costSpan.style.display = '';
-                    let costHtml = ` &middot; <strong>Cost:</strong> $${data.llm_cost_usd.toFixed(4)}`;
+                    let costHtml = ` &middot; <strong>Cost:</strong> ${formatCost(data.llm_cost_usd)}`;
                     if (data.detection_source) {
                         costHtml += ` <span class="detection-source">(${data.detection_source})</span>`;
                     }
@@ -251,10 +271,10 @@ function updateEpisodeUI(episodeId, data) {
     const actionsDiv = document.getElementById('actions-' + episodeId);
     if (actionsDiv) {
         let html = '';
-        if (['skipped', 'failed'].includes(newStatus)) {
+        if (audioEligible && ['skipped', 'failed'].includes(newStatus)) {
             html += `<button onclick="event.stopPropagation(); queueEpisode('${podcastId}', '${episodeId}')" class="btn-primary btn-small">Queue</button>`;
         }
-        if (!['skipped', 'complete'].includes(newStatus)) {
+        if (!['skipped', 'complete', 'processing'].includes(newStatus)) {
             html += `<button onclick="event.stopPropagation(); skipEpisode('${podcastId}', '${episodeId}')" class="btn-secondary btn-small">Skip</button>`;
         }
         if (newStatus === 'complete') {
@@ -343,39 +363,55 @@ async function skipEpisode(podcastId, episodeId) {
     }
 }
 
-async function queueAll() {
-    if (!confirm('Queue all unprocessed episodes for ad removal?')) return;
-    const response = await fetch(`/podcasts/${podcastId}/episodes/queue-all`, {
-        method: 'POST',
-        credentials: 'include'
-    });
-    if (response.ok) {
-        const data = await response.json();
-        // Update all skipped/failed to pending
-        document.querySelectorAll('[data-status="skipped"], [data-status="failed"]').forEach(row => {
-            updateEpisodeUI(row.dataset.id, { status: 'pending', error_message: null });
+async function bulkAction(action) {
+    const queueing = action === 'queue';
+    const button = document.querySelector(queueing ? '[onclick="queueAll()"]' : '[onclick="skipAll()"]');
+    if (button?.disabled) return;
+    if (button) button.disabled = true;
+    try {
+        const preview = await fetch(`/podcasts/${podcastId}/episodes/bulk-summary`, {
+            credentials: 'include', headers: {'Accept': 'application/json'}
         });
-    } else {
-        alert('Failed to queue episodes');
+        if (preview.status === 401) {
+            window.location.assign('/login?next=' + encodeURIComponent(window.location.pathname + window.location.search));
+            return;
+        }
+        if (!preview.ok) throw new Error('preview');
+        const summary = (await preview.json())[action];
+        if (!summary.count) {
+            alert('No eligible episodes to ' + action + '.');
+            return;
+        }
+        const message = queueing
+            ? `Queue ${summary.count} skipped or failed episodes in this podcast? This includes episodes hidden by filters. Processing uses paid API credits; the final cost depends on episode length and providers. Processing and completed episodes will stay unchanged.`
+            : `Skip ${summary.count} pending or failed episodes in this podcast? This includes episodes hidden by filters. Processing and completed episodes will stay unchanged.`;
+        if (!confirm(message)) return;
+        const response = await fetch(`/podcasts/${podcastId}/episodes/${queueing ? 'queue-all' : 'skip-all'}`, {
+            method: 'POST', credentials: 'include',
+            headers: {'Accept': 'application/json', 'Content-Type': 'application/json'},
+            body: JSON.stringify({episode_ids: summary.episode_ids})
+        });
+        if (!response.ok) throw new Error('action');
+        const data = await response.json();
+        for (const id of data.episode_ids) {
+            updateEpisodeUI(id, {status: queueing ? 'pending' : 'skipped', error_message: null});
+        }
+        filterEpisodes();
+        await pollStatuses();
+        const changed = Math.max(0, summary.count - data.count);
+        const verb = queueing ? 'queued' : 'skipped';
+        alert(changed
+            ? `${data.count} of ${summary.count} episode(s) ${verb}; ${changed} changed state since preview.`
+            : `${data.count} episode(s) ${verb}.`);
+    } catch (error) {
+        alert('Could not ' + action + ' episodes. Please retry; refresh the page to check their current status.');
+    } finally {
+        if (button) button.disabled = false;
     }
 }
 
-async function skipAll() {
-    if (!confirm('Skip all pending episodes?')) return;
-    const response = await fetch(`/podcasts/${podcastId}/episodes/skip-all`, {
-        method: 'POST',
-        credentials: 'include'
-    });
-    if (response.ok) {
-        const data = await response.json();
-        // Update all pending/failed to skipped
-        document.querySelectorAll('[data-status="pending"], [data-status="failed"]').forEach(row => {
-            updateEpisodeUI(row.dataset.id, { status: 'skipped', error_message: null });
-        });
-    } else {
-        alert('Failed to skip episodes');
-    }
-}
+async function queueAll() { await bulkAction('queue'); }
+async function skipAll() { await bulkAction('skip'); }
 
 async function toggleAutoProcess() {
     const response = await fetch(`/podcasts/${podcastId}/auto-process`, {

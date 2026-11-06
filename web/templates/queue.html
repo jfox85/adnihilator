@@ -28,7 +28,9 @@
                 </div>
             </div>
             <div class="queue-item-actions">
+                {% if episode.status != 'processing' %}
                 <button onclick="skipEpisode('{{ podcast.id }}', '{{ episode.id }}')" class="btn-skip">Skip</button>
+                {% endif %}
             </div>
         </div>
         {% endfor %}
@@ -65,7 +67,11 @@
                 </div>
             </div>
             <div class="failed-item-actions">
+                {% if audio_eligible[episode.id] %}
                 <button onclick="retryEpisode('{{ podcast.id }}', '{{ episode.id }}')" class="btn-retry">Retry</button>
+                {% else %}
+                <span>No usable audio enclosure</span>
+                {% endif %}
             </div>
         </div>
         {% endfor %}
@@ -95,13 +101,15 @@
                     {% endif %}
                     {% if episode.ads_removed_seconds and episode.ads_removed_seconds > 0 %}
                         {% set ads_removed = episode.ads_removed_seconds|int %}
-                    <span class="time-saved">Removed {{ (ads_removed // 60) }}min {{ (ads_removed % 60) }}s</span>
-                    {% elif episode.status == 'complete' %}
+                    <span class="time-saved">Removed {{ episode.ads_removed_seconds|duration }}</span>
+                    {% elif episode.ads_removed_seconds == 0 %}
                     <span class="no-ads">No ads detected</span>
+                    {% else %}
+                    <span class="no-ads">Removed —</span>
                     {% endif %}
                     {% if episode.llm_cost_usd is not none %}
                     <span class="llm-cost-badge" title="{{ episode.llm_model or 'Unknown model' }}{% if episode.detection_source %} via {{ episode.detection_source }}{% endif %}">
-                        ${{ "%.3f"|format(episode.llm_cost_usd) }}
+                        {{ episode.llm_cost_usd|cost }}
                     </span>
                     {% endif %}
                 </div>
@@ -183,6 +191,11 @@ async function updateStatuses() {
                 if (badge) {
                     badge.className = `status-badge status-${status.status}`;
                     badge.textContent = status.status;
+                }
+                const actions = item.querySelector('.queue-item-actions');
+                if (actions) {
+                    actions.innerHTML = status.status === 'pending'
+                        ? `<button onclick="skipEpisode('${podcastId}', '${episodeId}')" class="btn-skip">Skip</button>` : '';
                 }
 
                 // Update progress
