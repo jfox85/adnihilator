@@ -36,8 +36,18 @@ def classify_provider_error(error: BaseException | str, extra_secrets: Iterable[
         if match:
             status = int(match.group(1))
     text = raw.lower()
+    # SDK account-quota metadata differs from ordinary HTTP 429 throttling.
+    quota_codes = {getattr(error, field, None) for field in ("code", "type")
+                   if isinstance(getattr(error, field, None), str)}
+    body = getattr(error, "body", None)
+    if isinstance(body, dict):
+        details = body.get("error", body)
+        if isinstance(details, dict):
+            quota_codes.update(details.get(field) for field in ("code", "type")
+                               if isinstance(details.get(field), str))
+    insufficient_quota = "insufficient_quota" in quota_codes
     category = "unknown"
-    if status == 402 or ("depleted" in text and ("credit" in text or "prepay" in text)):
+    if insufficient_quota or status == 402 or ("depleted" in text and ("credit" in text or "prepay" in text)):
         category = "billing"
     elif status in (401, 403) or "api_key_invalid" in text or "api key not valid" in text or "invalid api key" in text:
         category = "authentication"

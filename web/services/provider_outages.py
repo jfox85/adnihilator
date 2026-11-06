@@ -176,8 +176,8 @@ def report_probe_failure(db: Session, episode: Episode, message: str, proofs: li
 def complete_probe(db: Session, episode: Episode, proofs: list[dict], successes: list[str]) -> None:
     """Release only providers actually validated by the successful episode."""
     leases = validate_proofs(db, episode, proofs)
-    if set(successes) - {row.provider for row in leases}:
-        raise HTTPException(409, "Provider success is not part of this recovery lease")
+    # A recovery episode may also use healthy providers. Only leased rows below
+    # can be released; successful use elsewhere does not invalidate this lease.
     now = datetime.utcnow()
     for row in leases:
         row.probe_token = None

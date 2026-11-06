@@ -190,3 +190,21 @@ class TestDurableOutageContract:
         assert client.post('/api/queue/job0/progress',headers=HEADERS,json={'step':'transcribing','percent':50,'recovery_tokens':current['provider_recovery']}).status_code==200
         assert client.post('/api/queue/claim',headers=HEADERS).json() is None
         with sqlite3.connect(path) as db:assert db.execute("SELECT retry_count FROM episodes WHERE id='job0'").fetchone()[0]==1
+
+
+@pytest.mark.parametrize('rep',[1,2])
+def test_mixed_success_receipts_clear_only_the_actually_leased_provider(outage_client,rep):
+    """A healthy second provider's successful use cannot reject recovery."""
+    client,path=outage_client
+    client.post('/api/queue/claim',headers=HEADERS);hold(client);expire_cooldown(path)
+    probe=client.post('/api/queue/claim',headers=HEADERS).json()
+    response=client.post('/api/queue/job0/complete',headers=HEADERS,json={
+        'processed_audio_key':'synthetic/clean.mp3','processed_duration':120,
+        'ads_removed_seconds':0,'recovery_tokens':probe['provider_recovery'],
+        'provider_successes':['gemini','openai'],
+    })
+    assert response.status_code==200
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT status,retry_count FROM episodes WHERE id='job0'").fetchone()==('complete',1)
+        assert db.execute('SELECT provider,active FROM provider_outages').fetchall()==[('gemini',0)]
+    assert client.post('/api/queue/claim',headers=HEADERS).json()['id']=='job1'

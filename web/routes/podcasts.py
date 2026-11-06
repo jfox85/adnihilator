@@ -329,7 +329,7 @@ async def get_episode_statuses(
     _: None = Depends(verify_admin),
 ):
     """Get status of all episodes for polling updates."""
-    from ..models import Episode
+    from ..models import Episode, EpisodeProviderHold
 
     podcast = db.query(Podcast).filter_by(id=podcast_id).first()
     if not podcast:
@@ -341,11 +341,19 @@ async def get_episode_statuses(
         .all()
     )
 
+    held_ids = {
+        episode_id for (episode_id,) in db.query(EpisodeProviderHold.episode_id)
+        .join(Episode, Episode.id == EpisodeProviderHold.episode_id)
+        .filter(Episode.podcast_id == podcast_id)
+        .all()
+    }
+
     return {
         "auto_process": podcast.auto_process,
         "episodes": {
             ep.id: {
                 "status": ep.status,
+                "provider_held": ep.id in held_ids and ep.status in ("pending", "processing"),
                 "audio_eligible": is_usable_audio_url(ep.original_audio_url),
                 "error_message": ep.error_message,
                 "ads_removed_seconds": finite_nonnegative_number(ep.ads_removed_seconds),

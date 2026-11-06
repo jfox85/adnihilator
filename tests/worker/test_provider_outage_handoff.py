@@ -136,3 +136,52 @@ class TestProviderOutageHandoff:
             api.hold('job','gemini','billing','credits depleted')
             assert 'job' not in api._recovery_tokens
         finally:api.close()
+
+
+@pytest.mark.parametrize('rep',[1,2])
+@pytest.mark.parametrize('code',['insufficient_quota','rate_limit_exceeded'])
+def test_structured_openai_quota_holds_but_ordinary_throttling_spends_normal_budget(outage_client,monkeypatch,rep,code):
+    """Actual SDK account-quota metadata is distinct from ordinary throttling."""
+    client,path=outage_client;worker=configured_worker(monkeypatch,client)
+    worker.config.gemini.enabled=False;worker.config.llm.provider='openai';wires=[]
+    def reject(request):
+        wires.append(request.url.path)
+        return httpx.Response(429,json={'error':{'message':'You exceeded your current quota, please check your plan and billing details.' if code=='insufficient_quota' else 'Rate limit reached for requests','type':code,'code':code,'param':None}})
+    sdk=SDKOpenAI(api_key='synthetic',base_url='https://provider.invalid/v1',max_retries=0,http_client=httpx.Client(transport=httpx.MockTransport(reject)))
+    try:
+        with patch('openai.OpenAI',return_value=sdk),pipeline(worker,'whisper',transcript()) as splice:
+            assert worker.run_once() is True
+            splice.assert_not_called();worker.r2_client.upload_file.assert_not_called()
+        assert len(wires)==1
+        with sqlite3.connect(path) as db:
+            if code=='insufficient_quota':
+                assert db.execute("SELECT status,retry_count FROM episodes WHERE id='job0'").fetchone()==('pending',1)
+                assert db.execute('SELECT provider,category,active FROM provider_outages').fetchone()==('openai','billing',1)
+            else:
+                assert db.execute("SELECT status,retry_count FROM episodes WHERE id='job0'").fetchone()==('pending',2)
+                assert db.execute('SELECT count(*) FROM provider_outages').fetchone()[0]==0
+        if code=='insufficient_quota':assert worker.run_once() is False
+    finally:sdk.close()
+
+
+@pytest.mark.parametrize('rep',[1,2])
+def test_actual_mixed_provider_worker_completes_a_gemini_only_lease(outage_client,monkeypatch,rep):
+    """Successful required decisions from healthy OpenAI do not poison Gemini recovery."""
+    from tests.test_provider_completion_safety import openai_response
+    from tests.web.test_provider_outage_contract import hold
+    client,path=outage_client;worker=configured_worker(monkeypatch,client)
+    worker.config.detection.parallel_enabled=True;worker.config.llm.provider='openai'
+    client.post('/api/queue/claim',headers=HEADERS);hold(client);expire_cooldown(path)
+    detector=GeminiAudioClient('synthetic',model='gemini-2.5-flash')
+    detector._client=google_sdk(google_response({'ads':[]}));worker._get_gemini_client.return_value=detector
+    sdk=openai_response('{"ads":[],"approved_ads":[],"overall_confidence":0.9}')
+    try:
+        with patch('openai.OpenAI',return_value=sdk),pipeline(worker,'whisper',transcript()) as splice:
+            assert worker.run_once() is True
+            splice.assert_called_once();worker.r2_client.upload_file.assert_called_once()
+        assert worker._provider_successes=={'gemini','openai'}
+        with sqlite3.connect(path) as db:
+            assert db.execute("SELECT status,retry_count FROM episodes WHERE id='job0'").fetchone()==('complete',1)
+            assert db.execute('SELECT provider,active FROM provider_outages').fetchall()==[('gemini',0)]
+        assert client.post('/api/queue/claim',headers=HEADERS).json()['id']=='job1'
+    finally:sdk.close()

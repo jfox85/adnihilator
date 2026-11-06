@@ -188,8 +188,10 @@ async function updateStatuses() {
                 // Update status badge
                 const badge = item.querySelector('.status-badge');
                 if (badge) {
-                    badge.className = `status-badge status-${status.status}`;
-                    badge.textContent = status.status;
+                    const providerHeld = status.provider_held === true && ['pending', 'processing'].includes(status.status);
+                    const label = providerHeld ? (status.status === 'processing' ? 'recovering' : 'held') : status.status;
+                    badge.className = `status-badge status-${providerHeld && status.status === 'pending' ? 'held' : status.status}`;
+                    badge.textContent = label;
                 }
                 const actions = item.querySelector('.queue-item-actions');
                 if (actions) {
