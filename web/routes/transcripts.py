@@ -1,6 +1,5 @@
 """Authenticated transcript API. Feed tokens never authorize transcript content."""
 
-from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -9,6 +8,7 @@ from sqlalchemy.orm import Session
 from adnihilator.transcript_document import TranscriptDocument
 from ..auth import SESSION_COOKIE, verify_admin
 from ..transcript_auth import verify_transcript_read
+from ..transcript_dates import BoundedDate
 from ..dependencies import get_db, require_transcripts
 from ..services.transcripts import (TranscriptError, TranscriptReader, claim_transcript,
                                     fail_transcript, request_transcript, store)
@@ -30,7 +30,7 @@ def check_origin(request: Request, require_cookie_origin: bool = False) -> None:
 class PublishRequest(BaseModel):
     document: TranscriptDocument
     claim_id: str | None = Field(default=None, max_length=36)
-    downloaded_at: datetime | None = None
+    downloaded_at: BoundedDate | None = None
 
 
 class FailRequest(BaseModel):
@@ -45,7 +45,7 @@ def list_episodes(podcast_id: str = Query(max_length=100), limit: int = Query(20
 
 @router.get("/api/transcripts/search", dependencies=[Depends(verify_transcript_read)])
 def search(query: str = Query(min_length=1, max_length=500), podcast_id: str = Query(max_length=100),
-           after: datetime | None = None, before: datetime | None = None, phrase: bool = False,
+           after: BoundedDate | None = None, before: BoundedDate | None = None, phrase: bool = False,
            latest: bool = False, limit: int = Query(8, ge=1, le=20), db: Session = Depends(get_db)) -> dict:
     return TranscriptReader(db).search(query, podcast_id, after, before, phrase, latest, limit)
 

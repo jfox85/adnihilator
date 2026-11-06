@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -81,7 +82,22 @@ class TranscriptDocument(BaseModel):
         return hashlib.sha256(self.canonical_bytes()).hexdigest()
 
 
+# Explicit tracking providers only; an unknown URL remains an opaque identity.
+_MEGAPHONE_TRACKERS = frozenset({"chrt.fm", "chtbl.com", "dts.podtrac.com", "pdst.fm"})
+
+
 def audio_identity(url: str) -> str:
-    """Stable Megaphone enclosure identity; other providers must match exactly."""
-    match = re.search(r"(?:^|/)([A-Z]+\d+\.mp3)(?:[?&#]|$)", url)
+    """Normalize recognized Megaphone provenance, keeping other URLs exact."""
+    try:
+        parsed = urlsplit(url)
+        if parsed.scheme not in ("http", "https") or parsed.username is not None or parsed.password is not None or parsed.port not in (None, 80, 443):
+            return url
+        if parsed.hostname == "traffic.megaphone.fm":
+            match = re.fullmatch(r"/([A-Z]+\d+\.mp3)", parsed.path)
+        elif parsed.hostname in _MEGAPHONE_TRACKERS:
+            match = re.search(r"(?:^|/)traffic\.megaphone\.fm/([A-Z]+\d+\.mp3)$", parsed.path)
+        else:
+            return url
+    except ValueError:
+        return url
     return match.group(1) if match else url

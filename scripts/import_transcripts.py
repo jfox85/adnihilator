@@ -58,7 +58,10 @@ def import_local(db_path: Path, feed: Path, artifacts: Path, podcast_id: str,
             continue
         try:
             data = json.loads(path.read_bytes())
-            artifact_map.setdefault(audio_identity(data.get("audio_path", "")), []).append(path)
+            if not isinstance(data, dict) or not isinstance(data.get("audio_path"), str) or not data["audio_path"]:
+                invalid += 1
+                continue
+            artifact_map.setdefault(audio_identity(data["audio_path"]), []).append(path)
         except (ValueError, OSError):
             invalid += 1
     counts = dict(available=0, missing=0, failed=0, ambiguous=0, invalid_artifacts=invalid)

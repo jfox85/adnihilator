@@ -102,9 +102,11 @@
                             {{ episode.status }}
                         {%- endif -%}
                     </span>
-                    <a href="/transcripts/episodes/{{ episode.id }}" onclick="event.stopPropagation()">Transcript: {{ transcript_states.get(episode.id, 'missing') }}</a>
                     <span class="expand-icon" id="icon-{{ episode.id }}">&#9660;</span>
                 </div>
+            </div>
+            <div class="episode-transcript">
+                <a href="/transcripts/episodes/{{ episode.id }}" onclick="event.stopPropagation()">{{ {'available': 'Read transcript', 'missing': 'Transcript not saved', 'queued': 'Transcript queued', 'processing': 'Transcript processing', 'failed': 'Transcript unavailable'}.get(transcript_states.get(episode.id, 'missing'), 'Transcript availability') }}</a>
             </div>
             <div class="episode-details" id="details-{{ episode.id }}">
                 {% if episode.description %}
@@ -666,6 +668,7 @@ function sortEpisodes() {
 .episode-main:hover {
     background: var(--bg-card-hover);
 }
+.episode-transcript { padding: 0 1rem 0.5rem; font-size: 0.8rem; }
 .episode-title-section {
     flex: 1;
     min-width: 0;

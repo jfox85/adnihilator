@@ -6,15 +6,13 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import func, select, text, update
+from sqlalchemy import case, func, select, text, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from adnihilator.transcript_document import TranscriptDocument, audio_identity
 from ..models import Episode, EpisodeTranscript, Podcast, TranscriptJob, TranscriptVersion
-
-def utc_naive(value: datetime) -> datetime:
-    """Normalize aware bounds to the service's UTC-naive storage convention."""
-    return value.astimezone(timezone.utc).replace(tzinfo=None) if value.tzinfo else value
+from ..transcript_dates import utc_naive
 
 
 MAX_RESULTS = 20
@@ -70,13 +68,23 @@ def store(db: Session, document: TranscriptDocument, claim_id: str | None = None
     # Only tracking/query wrappers may differ; opaque cross-provider URLs stay exact.
     if audio_identity(episode.original_audio_url or "") != audio_identity(document.original_audio_url):
         raise TranscriptError("Episode audio identity mismatch")
-    job = db.get(TranscriptJob, episode.id)
     checksum = document.checksum()
-    if claim_id and (not job or job.state != "processing" or job.claim_id != claim_id):
-        if job and job.state == "complete" and db.scalar(select(TranscriptVersion).where(TranscriptVersion.episode_id == episode.id, TranscriptVersion.checksum == checksum)):
-            return checksum
-        raise TranscriptError("Stale transcript claim")
-    row = db.get(EpisodeTranscript, episode.id)
+    if claim_id:
+        # A successful conditional write holds the lease through canonical/job
+        # commit. A read snapshot alone cannot fence an in-flight old request.
+        fenced = db.execute(update(TranscriptJob).where(
+            TranscriptJob.episode_id == episode.id, TranscriptJob.state == "processing",
+            TranscriptJob.claim_id == claim_id).values(claim_id=TranscriptJob.claim_id),
+            execution_options={"synchronize_session": False})
+        if not fenced.rowcount:
+            db.rollback()
+            job = db.get(TranscriptJob, episode.id, populate_existing=True)
+            if job and job.state == "complete" and db.scalar(select(TranscriptVersion).where(
+                    TranscriptVersion.episode_id == episode.id, TranscriptVersion.checksum == checksum)):
+                return checksum  # Lost successful response remains idempotent.
+            raise TranscriptError("Stale transcript claim")
+    job = db.get(TranscriptJob, episode.id, populate_existing=True)
+    row = db.get(EpisodeTranscript, episode.id, populate_existing=True)
     if not row:
         row = EpisodeTranscript(episode_id=episode.id)
         db.add(row)
@@ -120,7 +128,12 @@ def get_version(db: Session, episode_id: str, checksum: str | None = None) -> Tr
 
 def rebuild_episode(db: Session, episode_id: str) -> None:
     """Replace one episode's FTS rows in a single transaction; canonical is untouched."""
-    row = db.get(EpisodeTranscript, episode_id)
+    # Serialize selection and replacement, including against another publish.
+    # The no-op write takes SQLite's writer reservation (and a row lock on
+    # engines with row locking), before refreshing any cached active pointer.
+    db.execute(text("UPDATE episode_transcripts SET active_checksum=active_checksum WHERE episode_id=:id"),
+               dict(id=episode_id))
+    row = db.get(EpisodeTranscript, episode_id, populate_existing=True)
     version = get_version(db, episode_id)
     document = json.loads(version.canonical_json)
     segments = document["segments"]
@@ -140,16 +153,20 @@ def request_transcript(db: Session, episode_id: str) -> dict[str, Any]:
     row = db.get(EpisodeTranscript, episode_id)
     if row and row.active_checksum:
         return coverage(db, episode)
-    job = db.get(TranscriptJob, episode_id)
-    if not job:
-        job = TranscriptJob(episode_id=episode_id)
-        db.add(job)
+    # Concurrent first requests must converge on one row/job. The first insert
+    # also acquires the writer reservation before the state is refreshed.
+    db.execute(sqlite_insert(EpisodeTranscript).values(episode_id=episode_id, state="queued")
+               .on_conflict_do_nothing(index_elements=["episode_id"]))
+    row = db.get(EpisodeTranscript, episode_id, populate_existing=True)
+    if row.active_checksum:
+        db.commit()
+        return coverage(db, episode)
+    db.execute(sqlite_insert(TranscriptJob).values(episode_id=episode_id)
+               .on_conflict_do_nothing(index_elements=["episode_id"]))
+    job = db.get(TranscriptJob, episode_id, populate_existing=True)
     if job.state not in ("processing", "queued"):
         job.state, job.attempt, job.claim_id = "queued", 0, None
-    if not row:
-        row = EpisodeTranscript(episode_id=episode_id)
-        db.add(row)
-    row.state, row.last_error = "queued", None
+    row.state, row.last_error = job.state, None
     db.commit()
     return coverage(db, episode)
 
@@ -158,11 +175,17 @@ def claim_transcript(db: Session) -> dict[str, Any] | None:
     """Recover expired attempts and claim with a compare-and-swap update."""
     now = datetime.utcnow()
     for job in db.scalars(select(TranscriptJob).where(TranscriptJob.state == "processing", TranscriptJob.claimed_at < now - timedelta(hours=2))):
-        job.state = "queued" if job.attempt < 3 else "failed"
-        job.claim_id = None
-        row = db.get(EpisodeTranscript, job.episode_id)
-        if row and not row.active_checksum:
-            row.state, row.last_error = job.state, "worker_timeout"
+        next_state = "queued" if job.attempt < 3 else "failed"
+        changed = db.execute(update(TranscriptJob).where(
+            TranscriptJob.episode_id == job.episode_id, TranscriptJob.state == "processing",
+            TranscriptJob.claim_id == job.claim_id, TranscriptJob.claimed_at == job.claimed_at,
+            TranscriptJob.claimed_at < now - timedelta(hours=2)).values(state=next_state, claim_id=None),
+            execution_options={"synchronize_session": False})
+        if changed.rowcount:
+            db.execute(update(EpisodeTranscript).where(EpisodeTranscript.episode_id == job.episode_id,
+                       EpisodeTranscript.active_checksum.is_(None)).values(state=next_state, last_error="worker_timeout"),
+                       execution_options={"synchronize_session": False})
+            db.expire(job)
     db.commit()
     for job in db.scalars(select(TranscriptJob).where(TranscriptJob.state == "queued").order_by(TranscriptJob.updated_at).limit(10)):
         available = db.get(EpisodeTranscript, job.episode_id)
@@ -186,14 +209,18 @@ def claim_transcript(db: Session) -> dict[str, Any] | None:
 
 def fail_transcript(db: Session, episode_id: str, claim_id: str) -> None:
     """Bounded retries; expired attempts cannot alter a newer claim or audio status."""
-    job = db.get(TranscriptJob, episode_id)
-    if not job or job.claim_id != claim_id or job.state != "processing":
+    changed = db.execute(update(TranscriptJob).where(
+        TranscriptJob.episode_id == episode_id, TranscriptJob.state == "processing",
+        TranscriptJob.claim_id == claim_id).values(
+            state=case((TranscriptJob.attempt < 3, "queued"), else_="failed"), claim_id=None),
+        execution_options={"synchronize_session": False})
+    if not changed.rowcount:
+        db.rollback()
         raise TranscriptError("Stale transcript claim")
-    job.state = "queued" if job.attempt < 3 else "failed"
-    job.claim_id = None
-    row = db.get(EpisodeTranscript, episode_id)
-    if row and not row.active_checksum:
-        row.state, row.last_error = job.state, "transcription_failed"
+    job = db.get(TranscriptJob, episode_id, populate_existing=True)
+    db.execute(update(EpisodeTranscript).where(EpisodeTranscript.episode_id == episode_id,
+               EpisodeTranscript.active_checksum.is_(None)).values(state=job.state, last_error="transcription_failed"),
+               execution_options={"synchronize_session": False})
     db.commit()
 
 
@@ -292,13 +319,13 @@ class TranscriptReader:
             if date:
                 conditions += f" AND e.published_at {operator} :{label}"
                 values[label] = utc_naive(date)
-        rows = self.db.execute(text(f"""SELECT f.episode_id,f.checksum,f.ordinal,bm25(transcript_fts) score
+        rows = self.db.execute(text(f"""SELECT f.episode_id,f.checksum,f.ordinal,bm25(transcript_fts) score,f.rowid,f.text
             FROM transcript_fts f JOIN episodes e ON e.id=f.episode_id
             JOIN episode_transcripts c ON c.episode_id=e.id
             WHERE transcript_fts MATCH :expression AND {conditions}
             ORDER BY CASE WHEN f.text LIKE :anchor THEN 0 ELSE 1 END, score LIMIT :limit"""), values)
         seen = set()
-        for episode_id, checksum, ordinal, score in rows:
+        for episode_id, checksum, ordinal, score, row_id, indexed_text in rows:
             ordinal = int(ordinal)
             if (episode_id, checksum, ordinal) in seen:
                 continue
@@ -306,6 +333,30 @@ class TranscriptReader:
             begin = max(0, ordinal - 20)
             passage = self.passage(episode_id, checksum, begin, 40)
             document = json.loads(get_version(self.db, episode_id, checksum).canonical_json)
+            # Use the same FTS tokenizer for focus, including diacritics and
+            # phrases crossing segments. Choose a marker absent from this text.
+            prefix = "\x1e" + uuid4().hex + ":"
+            occupied = set(re.findall(re.escape(prefix) + r"([0-9]+)\x1f", indexed_text))
+            number = 0
+            while str(number) in occupied:
+                number += 1
+            marker = prefix + str(number) + "\x1f"
+            marked = self.db.scalar(text("""SELECT highlight(transcript_fts,0,:marker,'')
+                FROM transcript_fts WHERE rowid=:row_id AND episode_id=:episode_id
+                AND checksum=:checksum AND ordinal=:ordinal
+                AND transcript_fts MATCH :expression"""),
+                dict(marker=marker, row_id=row_id, episode_id=episode_id, checksum=checksum,
+                     ordinal=ordinal, expression=expression))
+            if marked is None or marker not in marked:
+                continue  # A concurrently replaced index is not a broken citation.
+            position = marked.index(marker)
+            focus = ordinal
+            for target in range(ordinal, min(ordinal + 3, len(document["segments"]))):
+                length = len(document["segments"][target]["text"])
+                if position < length:
+                    focus = target
+                    break
+                position -= length + 1  # FTS windows join source text with a space.
             preview = []
             for n, segment in enumerate(document["segments"][begin:begin + 40], begin):
                 value = segment["text"]
@@ -319,7 +370,8 @@ class TranscriptReader:
                                     ad=any(segment["start"] < a["end"] and segment["end"] > a["start"] for a in document["ad_spans"])))
             passage["segments"] = preview
             passage["next_ordinal"] = begin + len(preview) if begin + len(preview) < len(document["segments"]) else None
-            passage["match_ordinal"] = ordinal
+            passage["match_ordinal"] = ordinal  # Existing indexed window start.
+            passage["focus_ordinal"] = focus  # Segment where the first FTS match starts.
             result["hits"].append(passage)
             seen.update((episode_id, checksum, s["ordinal"]) for s in passage["segments"])
             if len(result["hits"]) >= limit:

@@ -3,22 +3,45 @@
 import re
 from datetime import datetime
 from pathlib import Path
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from markupsafe import Markup, escape
+from pydantic import BeforeValidator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..auth import verify_admin
 from ..dependencies import get_db, require_transcripts
 from ..models import Episode, Podcast
+from ..formatting import format_duration
+from ..transcript_dates import BoundedDate
 from ..services.transcripts import STOP, TranscriptError, TranscriptReader, coverage, identity, request_transcript
 from .transcripts import check_origin
 
 router = APIRouter(prefix="/transcripts", dependencies=[Depends(verify_admin), Depends(require_transcripts)])
 templates = Jinja2Templates(directory=str(Path(__file__).parent.parent / "templates"))
+
+
+def _blank_date(value: Any) -> Any:
+    """Native date controls submit an empty string when no bound is selected."""
+    return None if value == "" else value
+
+
+OptionalDate = Annotated[BoundedDate | None, BeforeValidator(_blank_date)]
+
+
+def publication_date(value: str | datetime | None) -> str:
+    """Use the episode list's readable UTC publication date convention."""
+    if value is None:
+        return "Unknown"
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00")) if isinstance(value, str) else value
+        return parsed.strftime("%b %d, %Y")
+    except ValueError:
+        return "Unknown"
 
 
 def highlight(value: str, query: str) -> Markup:
@@ -32,12 +55,14 @@ def highlight(value: str, query: str) -> Markup:
 
 
 templates.env.filters["highlight"] = highlight
+templates.env.filters["publication_date"] = publication_date
+templates.env.filters["duration"] = format_duration
 
 
 @router.get("")
 def search_page(request: Request, podcast_id: str | None = Query(None, max_length=100),
-                query: str = Query("", max_length=500), after: datetime | None = None,
-                before: datetime | None = None, phrase: bool = False, latest: bool = False,
+                query: str = Query("", max_length=500), after: OptionalDate = None,
+                before: OptionalDate = None, phrase: bool = False, latest: bool = False,
                 db: Session = Depends(get_db)) -> Response:
     podcasts = db.scalars(select(Podcast).order_by(Podcast.title).limit(100)).all()
     podcast_id = podcast_id or (podcasts[0].id if podcasts else "")
