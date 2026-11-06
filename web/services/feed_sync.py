@@ -4,9 +4,16 @@ from datetime import datetime
 from time import mktime
 
 import feedparser
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from adnihilator.redaction import redact_secrets
+
 from ..models import Episode, EpisodeStatus, Podcast
+
+
+class FeedSyncError(RuntimeError):
+    """A failed feed update with safe diagnostics and a rolled-back session."""
 
 
 def parse_duration(duration_str: str | None) -> int | None:
@@ -40,7 +47,10 @@ def parse_duration(duration_str: str | None) -> int | None:
 
 
 def sync_podcast(db: Session, podcast: Podcast) -> int:
-    """Sync episodes from the source RSS feed.
+    """Sync and commit one podcast, rolling back the session on failure.
+
+    Retry once only when another sync inserted the same episode GUID after
+    this sync's snapshot. Other database and feed errors are not retried.
 
     Args:
         db: Database session
@@ -51,9 +61,26 @@ def sync_podcast(db: Session, podcast: Podcast) -> int:
     """
     try:
         return _sync_podcast_entries(db, podcast)
-    except Exception:
+    except Exception as error:
         db.rollback()
-        raise
+        guid_conflict = (
+            isinstance(error, IntegrityError)
+            and "UNIQUE constraint failed: episodes.podcast_id, episodes.guid" in str(error.orig)
+        )
+        if not guid_conflict:
+            raise FeedSyncError(
+                f"Feed sync failed ({type(error).__name__}): {redact_secrets(str(error))}"
+            ) from None
+
+    # Another process may have committed the same GUID after our snapshot.
+    # Reload once after rollback; unrelated constraints must never be retried.
+    try:
+        return _sync_podcast_entries(db, podcast)
+    except Exception as error:
+        db.rollback()
+        raise FeedSyncError(
+            f"Feed sync failed ({type(error).__name__}): {redact_secrets(str(error))}"
+        ) from None
 
 
 def _sync_podcast_entries(db: Session, podcast: Podcast) -> int:
@@ -155,6 +182,6 @@ def sync_all_podcasts(db: Session) -> dict:
             results[podcast_id] = {"added": added, "error": None}
         except Exception as e:
             db.rollback()
-            results[podcast_id] = {"added": 0, "error": str(e)}
+            results[podcast_id] = {"added": 0, "error": redact_secrets(str(e))}
 
     return results
