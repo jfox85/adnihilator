@@ -185,6 +185,7 @@
         .diagnostic-details summary { cursor: pointer; }
         #requestNotice[hidden] { display: none; }
         #requestNotice a[hidden], #requestNotice button[hidden] { display: none; }
+        #requestNotice:focus { outline: 2px solid var(--text-link); outline-offset: 2px; }
         #requestNotice button, #requestNotice a { min-height: 44px; min-width: 44px; }
         #requestNotice a { display: inline-flex; align-items: center; }
     </style>
@@ -206,7 +207,7 @@
             </div>
         </div>
     </div>
-    <div id="requestNotice" class="card" role="status" hidden>
+    <div id="requestNotice" class="card" role="status" tabindex="-1" aria-labelledby="requestNoticeText" hidden>
         <p id="requestNoticeText"></p>
         <a id="requestSignIn" href="/login" hidden>Sign in</a>
         <button id="requestRetry" type="button" hidden>Retry</button>
@@ -229,11 +230,14 @@
 
     async function importOPML(input) {
         if (!input.files.length) return;
+        const previousFocus = document.activeElement;
+        clearRequestNotice('opml');
 
         const file = input.files[0];
         const formData = new FormData();
         formData.append('file', file);
         input.disabled = true;
+        let failed = false;
 
         try {
             const data = await requestJSON('/opml/import', {
@@ -254,12 +258,14 @@
                 window.location.reload();
             }
         } catch (e) {
+            failed = true;
             reportRequestError(e, 'The file could not be imported. Check that it is a valid OPML file and try again.', () => input.click(), 'opml');
         } finally {
             input.disabled = false;
             input.value = '';
             document.getElementById('toolsDropdown').classList.remove('open');
         }
+        if (failed) revealRequestNotice(previousFocus);
     }
     </script>
     {% block content %}{% endblock %}

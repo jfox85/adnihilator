@@ -36,6 +36,20 @@ function clearRequestNotice(owner = null) {
         requestNoticeKey = null;
     }
 }
+function revealRequestNotice(previousFocus = null) {
+    const notice = document.getElementById('requestNotice');
+    if (notice.hidden) return;
+    if (previousFocus?.isConnected && !notice.contains(previousFocus)) {
+        requestNoticePreviousFocus = previousFocus;
+    }
+    const rect = notice.getBoundingClientRect?.();
+    const viewportTop = window.visualViewport?.offsetTop || 0;
+    const viewportHeight = window.visualViewport?.height || window.innerHeight;
+    if (rect && (rect.top < viewportTop || rect.bottom > viewportTop + viewportHeight)) {
+        notice.scrollIntoView({block: 'nearest', behavior: 'auto'});
+    }
+    notice.focus?.({preventScroll: true});
+}
 function reportRequestError(error, message, retry = null, owner = null) {
     const auth = error instanceof UIRequestError && error.auth;
     showRequestNotice(auth ? 'Your session has ended. Sign in again to continue.' : message, {auth, retry, owner});
@@ -53,8 +67,13 @@ async function requestJSON(url, options = {}) {
 async function runUIAction(buttons, work, message) {
     const controls = (Array.isArray(buttons) ? buttons : [buttons]).filter(Boolean);
     if (controls.some(button => button.disabled)) return;
+    const previousFocus = controls.includes(document.activeElement) ? document.activeElement
+        : controls.find(button => button.getClientRects?.().length) || document.activeElement;
+    clearRequestNotice();
     controls.forEach(button => { button.disabled = true; });
+    let failed = false;
     try { await work(); clearRequestNotice(); }
-    catch (error) { reportRequestError(error, message); }
+    catch (error) { failed = true; reportRequestError(error, message); }
     finally { controls.forEach(button => { button.disabled = false; }); }
+    if (failed) revealRequestNotice(previousFocus);
 }
