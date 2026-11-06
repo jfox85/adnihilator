@@ -4,9 +4,16 @@ from datetime import datetime
 from time import mktime
 
 import feedparser
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from adnihilator.redaction import redact_secrets
+
 from ..models import Episode, EpisodeStatus, Podcast
+
+
+class FeedSyncError(RuntimeError):
+    """A failed feed update with safe diagnostics and a rolled-back session."""
 
 
 def parse_duration(duration_str: str | None) -> int | None:
@@ -40,7 +47,10 @@ def parse_duration(duration_str: str | None) -> int | None:
 
 
 def sync_podcast(db: Session, podcast: Podcast) -> int:
-    """Sync episodes from the source RSS feed.
+    """Sync and commit one podcast, rolling back the session on failure.
+
+    Retry once only when another sync inserted the same episode GUID after
+    this sync's snapshot. Other database and feed errors are not retried.
 
     Args:
         db: Database session
@@ -49,6 +59,32 @@ def sync_podcast(db: Session, podcast: Podcast) -> int:
     Returns:
         Number of new episodes added
     """
+    try:
+        return _sync_podcast_entries(db, podcast)
+    except Exception as error:
+        db.rollback()
+        guid_conflict = (
+            isinstance(error, IntegrityError)
+            and "UNIQUE constraint failed: episodes.podcast_id, episodes.guid" in str(error.orig)
+        )
+        if not guid_conflict:
+            raise FeedSyncError(
+                f"Feed sync failed ({type(error).__name__}): {redact_secrets(str(error))}"
+            ) from None
+
+    # Another process may have committed the same GUID after our snapshot.
+    # Reload once after rollback; unrelated constraints must never be retried.
+    try:
+        return _sync_podcast_entries(db, podcast)
+    except Exception as error:
+        db.rollback()
+        raise FeedSyncError(
+            f"Feed sync failed ({type(error).__name__}): {redact_secrets(str(error))}"
+        ) from None
+
+
+def _sync_podcast_entries(db: Session, podcast: Podcast) -> int:
+    """Apply one feed, leaving rollback on failure to the public sync boundary."""
     feed = feedparser.parse(podcast.source_rss_url)
 
     # Update podcast metadata
@@ -120,6 +156,7 @@ def sync_podcast(db: Session, podcast: Podcast) -> int:
             status=EpisodeStatus.PENDING.value if podcast.auto_process else EpisodeStatus.SKIPPED.value,
         )
         db.add(episode)
+        existing_guids.add(guid)
         added += 1
 
     podcast.last_synced_at = datetime.utcnow()
@@ -134,13 +171,17 @@ def sync_all_podcasts(db: Session) -> dict:
         Dict mapping podcast IDs to number of new episodes
     """
     results = {}
-    podcasts = db.query(Podcast).all()
+    podcast_ids = [podcast_id for (podcast_id,) in db.query(Podcast.id).all()]
 
-    for podcast in podcasts:
+    for podcast_id in podcast_ids:
         try:
+            podcast = db.get(Podcast, podcast_id)
+            if podcast is None:
+                continue
             added = sync_podcast(db, podcast)
-            results[podcast.id] = {"added": added, "error": None}
+            results[podcast_id] = {"added": added, "error": None}
         except Exception as e:
-            results[podcast.id] = {"added": 0, "error": str(e)}
+            db.rollback()
+            results[podcast_id] = {"added": 0, "error": redact_secrets(str(e))}
 
     return results
