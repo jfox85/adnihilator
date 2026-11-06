@@ -4,15 +4,16 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, Body, Depends, Form, HTTPException, Request, status
+from fastapi import APIRouter, Body, Depends, Form, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from ..dependencies import get_db
 from ..auth import verify_admin
-from ..models import Podcast
+from ..models import Episode, EpisodeStatus, Podcast
 from ..formatting import format_cost, format_duration
 from ..services.audio import is_usable_audio_url
 from ..values import finite_nonnegative_number
@@ -61,6 +62,44 @@ class BulkSelection(BaseModel):
     """Episode identities the owner actually confirmed for a bulk action."""
 
     episode_ids: list[str]
+
+
+EPISODES_PER_PAGE = 100
+
+
+def _episode_page(
+    db: Session, podcast_id: str, page: int, search: str, state: str, sort: str,
+) -> tuple[list[Episode], int, int]:
+    """Filter and sort the whole catalogue before selecting a bounded page."""
+    query = db.query(Episode).filter_by(podcast_id=podcast_id)
+    if search:
+        query = query.filter(
+            func.lower(func.coalesce(Episode.title, Episode.guid)).contains(
+                search.lower(), autoescape=True,
+            )
+        )
+    if state:
+        query = query.filter(Episode.status == state)
+    total = query.count()
+    last_page = max(1, (total + EPISODES_PER_PAGE - 1) // EPISODES_PER_PAGE)
+    page = min(page, last_page)
+    title = func.lower(func.coalesce(Episode.title, Episode.guid))
+    ordering = {
+        "date-desc": Episode.published_at.desc(),
+        "date-asc": Episode.published_at.asc(),
+        "title-asc": title.asc(),
+        "title-desc": title.desc(),
+        "status": case(
+            {state.value: index for index, state in enumerate([
+                EpisodeStatus.PROCESSING, EpisodeStatus.PENDING, EpisodeStatus.FAILED,
+                EpisodeStatus.COMPLETE, EpisodeStatus.SKIPPED,
+            ])}, value=Episode.status, else_=5,
+        ),
+    }
+    episodes = query.order_by(ordering[sort], Episode.id).offset(
+        (page - 1) * EPISODES_PER_PAGE
+    ).limit(EPISODES_PER_PAGE).all()
+    return episodes, total, page
 
 
 @router.get("/{podcast_id}/episodes/bulk-summary")
@@ -184,6 +223,10 @@ async def delete_podcast(
 async def list_episodes_html(
     podcast_id: str,
     request: Request,
+    page: int = Query(default=1, ge=1, le=1_000_000),
+    q: str = Query(default="", max_length=200),
+    episode_status: str = Query(default="", alias="status", pattern="^(|pending|processing|complete|failed|skipped|expired)$"),
+    sort: str = Query(default="date-desc", pattern="^(date-desc|date-asc|title-asc|title-desc|status)$"),
     db: Session = Depends(get_db),
     _: None = Depends(verify_admin),
 ):
@@ -194,12 +237,8 @@ async def list_episodes_html(
     if not podcast:
         raise HTTPException(status_code=404, detail="Podcast not found")
 
-    episodes = (
-        db.query(Episode)
-        .filter_by(podcast_id=podcast_id)
-        .order_by(Episode.published_at.desc())
-        .all()
-    )
+    episodes, total, page = _episode_page(db, podcast_id, page, q, episode_status, sort)
+    last_page = max(1, (total + EPISODES_PER_PAGE - 1) // EPISODES_PER_PAGE)
 
     return templates.TemplateResponse(
         request,
@@ -208,6 +247,12 @@ async def list_episodes_html(
             "title": podcast.title or "Episodes",
             "podcast": podcast,
             "episodes": episodes,
+            "catalogue": {"page": page, "pages": last_page, "total": total,
+                          "start": (page - 1) * EPISODES_PER_PAGE + 1 if total else 0,
+                          "end": min(page * EPISODES_PER_PAGE, total),
+                          "search": q, "status": episode_status, "sort": sort,
+                          "previous": str(request.url.include_query_params(page=page - 1)) if page > 1 else None,
+                          "next": str(request.url.include_query_params(page=page + 1)) if page < last_page else None},
             "audio_eligible": {episode.id: is_usable_audio_url(episode.original_audio_url) for episode in episodes},
         },
     )
@@ -368,6 +413,7 @@ async def toggle_auto_process(
 @router.get("/{podcast_id}/episodes/status")
 async def get_episode_statuses(
     podcast_id: str,
+    episode_id: list[str] | None = Query(default=None, max_length=100),
     db: Session = Depends(get_db),
     _: None = Depends(verify_admin),
 ):
@@ -378,11 +424,10 @@ async def get_episode_statuses(
     if not podcast:
         raise HTTPException(status_code=404, detail="Podcast not found")
 
-    episodes = (
-        db.query(Episode)
-        .filter_by(podcast_id=podcast_id)
-        .all()
-    )
+    query = db.query(Episode).filter_by(podcast_id=podcast_id)
+    if episode_id is not None:
+        query = query.filter(Episode.id.in_(episode_id))
+    episodes = query.all()
 
     return {
         "auto_process": podcast.auto_process,

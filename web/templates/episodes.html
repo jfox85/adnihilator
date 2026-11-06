@@ -48,29 +48,33 @@
                 Auto-process: <span id="autoProcessStatus">{{ "ON" if podcast.auto_process else "OFF" }}</span>
             </button>
         </div>
-        <div class="search-filter">
-            <input type="text" id="searchInput" placeholder="Search episodes..." oninput="filterEpisodes()">
-            <select id="statusFilter" onchange="filterEpisodes()">
-                <option value="">All Statuses</option>
-                <option value="pending">Pending</option>
-                <option value="processing">Processing</option>
-                <option value="complete">Complete</option>
-                <option value="failed">Failed</option>
-                <option value="skipped">Skipped</option>
+        <form class="search-filter" method="get" id="catalogueFilters">
+            <label for="searchInput">Search catalogue</label>
+            <input type="search" id="searchInput" name="q" maxlength="200" placeholder="Search all episodes…" value="{{ catalogue.search }}">
+            <label for="statusFilter">Status</label>
+            <select id="statusFilter" name="status" onchange="this.form.requestSubmit()">
+                {% for value, label in [('', 'All Statuses'), ('pending', 'Pending'), ('processing', 'Processing'), ('complete', 'Complete'), ('failed', 'Failed'), ('skipped', 'Skipped'), ('expired', 'Expired')] %}
+                <option value="{{ value }}" {% if catalogue.status == value %}selected{% endif %}>{{ label }}</option>
+                {% endfor %}
             </select>
-            <select id="sortBy" onchange="sortEpisodes()">
-                <option value="date-desc">Date (Newest)</option>
-                <option value="date-asc">Date (Oldest)</option>
-                <option value="title-asc">Title (A-Z)</option>
-                <option value="title-desc">Title (Z-A)</option>
-                <option value="status">Status</option>
+            <label for="sortBy">Sort</label>
+            <select id="sortBy" name="sort" onchange="this.form.requestSubmit()">
+                {% for value, label in [('date-desc', 'Date (Newest)'), ('date-asc', 'Date (Oldest)'), ('title-asc', 'Title (A–Z)'), ('title-desc', 'Title (Z–A)'), ('status', 'Status')] %}
+                <option value="{{ value }}" {% if catalogue.sort == value %}selected{% endif %}>{{ label }}</option>
+                {% endfor %}
             </select>
-        </div>
+            <button type="submit" class="btn-primary">Search</button>
+        </form>
     </div>
 </div>
 
 <div class="card">
-    <h2>Episodes <span id="episodeCount">({{ episodes|length }})</span></h2>
+    <h2>Episodes <span id="episodeCount">({{ catalogue.total }} matching)</span></h2>
+    <nav class="catalogue-pages" aria-label="Episode pages">
+        <span>Showing {{ catalogue.start }}–{{ catalogue.end }} of {{ catalogue.total }} · Page {{ catalogue.page }} of {{ catalogue.pages }}</span>
+        {% if catalogue.previous %}<a class="btn-secondary" href="{{ catalogue.previous }}">Previous</a>{% endif %}
+        {% if catalogue.next %}<a class="btn-secondary" href="{{ catalogue.next }}">Next</a>{% endif %}
+    </nav>
     {% if episodes %}
     <div class="episode-list" id="episodeList">
         {% for episode in episodes %}
@@ -151,7 +155,7 @@
         {% endfor %}
     </div>
     {% else %}
-    <p>No episodes found. The feed will be synced automatically.</p>
+    <p>No episodes match these filters. Clear the search or status filter to see more episodes.</p>
     {% endif %}
 </div>
 
@@ -292,7 +296,10 @@ function updateEpisodeUI(episodeId, data) {
 
 async function pollStatuses() {
     try {
-        const response = await fetch(`/podcasts/${podcastId}/episodes/status`, {
+        const params = new URLSearchParams();
+        document.querySelectorAll('.episode-row').forEach(row => params.append('episode_id', row.dataset.id));
+        if (!params.size) return;
+        const response = await fetch(`/podcasts/${podcastId}/episodes/status?${params}`, {
             credentials: 'include'
         });
         if (!response.ok) return;
@@ -478,56 +485,22 @@ async function refreshPodcast() {
 }
 
 function filterEpisodes() {
-    const search = document.getElementById('searchInput').value.toLowerCase();
-    const status = document.getElementById('statusFilter').value;
-    const rows = document.querySelectorAll('.episode-row');
-    let visible = 0;
-
-    rows.forEach(row => {
-        const title = row.dataset.title;
-        const rowStatus = row.dataset.status;
-        const matchesSearch = !search || title.includes(search);
-        const matchesStatus = !status || rowStatus === status;
-
-        if (matchesSearch && matchesStatus) {
-            row.style.display = '';
-            visible++;
-        } else {
-            row.style.display = 'none';
-        }
-    });
-
-    document.getElementById('episodeCount').textContent = `(${visible})`;
+    // Filtering and sorting apply to the full catalogue on the server. If a
+    // callback moves a row out of a status filter, reload its bounded page.
+    const selectedStatus = {{ catalogue.status|tojson }};
+    if (selectedStatus && Array.from(document.querySelectorAll('.episode-row')).some(
+        row => row.dataset.status !== selectedStatus
+    )) window.location.reload();
 }
 
-function sortEpisodes() {
-    const sortBy = document.getElementById('sortBy').value;
-    const list = document.getElementById('episodeList');
-    const rows = Array.from(list.querySelectorAll('.episode-row'));
-
-    rows.sort((a, b) => {
-        switch(sortBy) {
-            case 'date-desc':
-                return (b.dataset.date || '').localeCompare(a.dataset.date || '');
-            case 'date-asc':
-                return (a.dataset.date || '').localeCompare(b.dataset.date || '');
-            case 'title-asc':
-                return a.dataset.title.localeCompare(b.dataset.title);
-            case 'title-desc':
-                return b.dataset.title.localeCompare(a.dataset.title);
-            case 'status':
-                const statusOrder = ['processing', 'pending', 'failed', 'complete', 'skipped'];
-                return statusOrder.indexOf(a.dataset.status) - statusOrder.indexOf(b.dataset.status);
-            default:
-                return 0;
-        }
-    });
-
-    rows.forEach(row => list.appendChild(row));
-}
 </script>
 
 <style>
+.catalogue-pages { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; margin: 1rem 0; }
+.catalogue-pages a { display: inline-flex; align-items: center; min-height: 44px; padding: .5rem 1rem; }
+.search-filter { flex-wrap: wrap; }
+.search-filter label { align-self: center; }
+
 .podcast-header {
     display: flex;
 }
