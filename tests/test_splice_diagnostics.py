@@ -24,13 +24,19 @@ def ffmpeg_failure() -> subprocess.CalledProcessError:
 class TestSpliceDiagnostics:
     @pytest.mark.parametrize("stage", ["copy", "filter", "extract", "concat"])
     @pytest.mark.parametrize("suffix", [b"", b"\xe2 \xff"])
+    @pytest.mark.parametrize("diagnostic,canary", [
+        ("https://name:SYNTHPASSWORD@example.invalid/audio?key=SYNTHCANARY", "SYNTHPASSWORD"),
+        ("HTTPS://name:SPLICE-UPPER-CREDENTIAL@example.invalid/audio", "SPLICE-UPPER-CREDENTIAL"),
+        ("https://SPLICE-USERNAME-CREDENTIAL@example.invalid/audio", "SPLICE-USERNAME-CREDENTIAL"),
+        ("Authorization: Basic dXNlcjpTUExJQ0UtQkFTSUMtU0VDUkVU", "dXNlcjpTUExJQ0UtQkFTSUMtU0VDUkVU"),
+    ])
     def test_formatted_failure_traceback_does_not_expose_credentials(
-        self, stage: str, suffix: bytes
+        self, stage: str, suffix: bytes, diagnostic: str, canary: str
     ) -> None:
         """Suppress the raw command exception as well as sanitizing stderr."""
         source = "https://name:SYNTHPASSWORD@example.invalid/audio?key=SYNTHCANARY"
         error = subprocess.CalledProcessError(
-            1, ["ffmpeg", "-i", source], stderr=f"failed {source}".encode() + suffix
+            1, ["ffmpeg", "-i", source], stderr=f"failed {diagnostic}".encode() + suffix
         )
         effects = [subprocess.CompletedProcess([], 0), error] if stage == "concat" else [error]
         with patch("adnihilator.splice.subprocess.run", side_effect=effects):
@@ -42,6 +48,7 @@ class TestSpliceDiagnostics:
                 else:
                     _splice_with_concat(source, "output.mp3", [(0, 1)])
         diagnostic = "".join(traceback.format_exception(failure.value))
+        assert canary not in diagnostic
         assert "SYNTHCANARY" not in diagnostic
         assert "SYNTHPASSWORD" not in diagnostic
         assert "[REDACTED]" in diagnostic
