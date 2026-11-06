@@ -265,3 +265,33 @@ ssh root@jonefox.com "sqlite3 /opt/adnihilator/data/adnihilator.db \
   'CREATE INDEX IF NOT EXISTS ix_episodes_status_created_at ON episodes(status, created_at); \
    CREATE INDEX IF NOT EXISTS ix_episodes_status_claimed_at ON episodes(status, claimed_at);'"
 ```
+
+
+## Provider outage recovery migration (owner-approved rollout only)
+
+Run this additive migration before starting the upgraded web service, using the
+approved reconciled release, the actual server interpreter and an explicit
+existing SQLite path. Stop workers for the rollout and take the approved SQLite
+backup first (account for WAL); preserve private configuration and transcripts.
+No deployment or paid provider call is performed by the migration.
+
+```bash
+"$SERVER_PYTHON" "$RELEASE_DIR/scripts/migrate_provider_outages.py" --db "$DATABASE_PATH"
+```
+
+The script creates only `provider_outages` and `episode_provider_holds`. For a
+pre-existing R1 outage database it adds nullable `last_probe_at` without changing
+stored holds, active leases or episode retry counts. Concurrent invocations
+serialize schema inspection and ALTER in one transaction. Repeating it is safe;
+an error rolls back partial DDL. Missing/non-SQLite paths are rejected. It never
+uses an implicit default database. Episode/transcript tables and CHECK constraints
+are unchanged; there is no automatic destructive downgrade/drop operation.
+
+Deploy the new web/API before the worker. Establish the durable rollout
+maintenance pause described in [provider outage recovery](docs/provider-outage-recovery.md)
+before loading workers; confirm the owner's A1 credit/resumption window before
+Resume permits an ordinary recovery episode. New outages thereafter recover
+automatically after the bounded cooldown. Do not issue a paid health call or
+requeue historical failures as part of migration. For rollback, keep workers
+stopped and retain the additive tables/held state; use a separately approved
+restore/reconciliation plan instead of dropping holds or resetting retry budgets.
