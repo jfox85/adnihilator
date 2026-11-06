@@ -173,6 +173,7 @@
 const podcastId = '{{ podcast.id }}';
 const feedUrl = window.location.origin + '/feed/{{ podcast.feed_token }}.xml';
 let pollInterval = null;
+let bulkActionInFlight = false;
 let lastStatuses = {};
 
 function copyFeedUrl() {
@@ -345,6 +346,7 @@ function restoreCatalogueState() {
 }
 
 async function pollStatuses(deferNavigation = false) {
+    if (bulkActionInFlight && !deferNavigation) return;
     try {
         const params = new URLSearchParams({
             catalogue_page: {{ catalogue.page|tojson }}, q: {{ catalogue.search|tojson }},
@@ -370,7 +372,7 @@ async function pollStatuses(deferNavigation = false) {
         }
 
         if (changedCatalogue) {
-            if (!deferNavigation) reloadCatalogue();
+            if (!deferNavigation && !bulkActionInFlight) reloadCatalogue();
             return true;
         }
         return false;
@@ -432,8 +434,11 @@ async function skipEpisode(podcastId, episodeId) {
 async function bulkAction(action) {
     const queueing = action === 'queue';
     const button = document.querySelector(queueing ? '[onclick="queueAll()"]' : '[onclick="skipAll()"]');
-    if (button?.disabled) return;
-    if (button) button.disabled = true;
+    const other = document.querySelector(queueing ? '[onclick="skipAll()"]' : '[onclick="queueAll()"]');
+    const controls = Array.from(new Set([button, other].filter(Boolean)));
+    if (bulkActionInFlight || controls.some(control => control.disabled)) return;
+    bulkActionInFlight = true;
+    controls.forEach(control => { control.disabled = true; });
     try {
         const preview = await fetch(`/podcasts/${podcastId}/episodes/bulk-summary`, {
             credentials: 'include', headers: {'Accept': 'application/json'}
@@ -474,7 +479,8 @@ async function bulkAction(action) {
     } catch (error) {
         alert('Could not ' + action + ' episodes. Please retry; refresh the page to check their current status.');
     } finally {
-        if (button) button.disabled = false;
+        bulkActionInFlight = false;
+        controls.forEach(control => { control.disabled = false; });
     }
 }
 

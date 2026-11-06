@@ -1,6 +1,9 @@
 """Catalogue filtering, ordering and polling stay bounded across page boundaries."""
 
+import json
 import re
+import shutil
+import subprocess
 from collections.abc import Iterator
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -132,3 +135,61 @@ class TestCataloguePagination:
         assert len(after) == 100
         assert before[0] not in after
         assert before != after
+
+    @pytest.mark.parametrize("action,visible_status", [("queue", "pending"), ("skip", "skipped")])
+    def test_background_poll_cannot_navigate_before_delayed_bulk_result(
+        self, catalogue_client: TestClient, action: str, visible_status: str,
+    ) -> None:
+        """Replay a committed action whose response arrives after the next poll."""
+        if not shutil.which("node"):
+            pytest.skip("Node is required to execute actual rendered scripts")
+        from web import dependencies
+
+        if action == "skip":
+            with dependencies.SessionFactory() as db:
+                db.query(Episode).filter_by(podcast_id="catalogue").update({Episode.status: "pending"})
+                db.commit()
+        page = catalogue_client.get(f"/podcasts/catalogue/episodes?status={visible_status}")
+        assert row_ids(page) == []
+        preview = catalogue_client.get("/podcasts/catalogue/episodes/bulk-summary").json()
+        result = catalogue_client.post(
+            f"/podcasts/catalogue/episodes/{action}-all",
+            json={"episode_ids": preview[action]["episode_ids"]},
+        ).json()
+        assert result["count"] == 251
+        statuses = catalogue_client.get(
+            f"/podcasts/catalogue/episodes/status?catalogue_page=1&status={visible_status}"
+        ).json()
+        program = r'''
+const vm=require('node:vm'),assert=require('node:assert/strict');
+const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const buttons=[{id:'catalogueQueueAll',disabled:false},{id:'catalogueSkipAll',disabled:false}];
+const nodes={searchInput:{value:''},autoProcessStatus:{textContent:''}};
+let deliverBulk;const events=[];
+const response=body=>({ok:true,status:200,json:async()=>body});
+const sandbox={console,URLSearchParams,Intl,Number,Date,String,setInterval:()=>1,clearInterval(){},setTimeout(){},
+ document:{activeElement:buttons[input.action==='queue'?0:1],addEventListener(){},querySelectorAll(){return[]},
+ getElementById:id=>nodes[id],querySelector:s=>s.startsWith('[data-id')?null:buttons[s.includes('nth-child(2)')?1:0]},
+ window:{scrollY:0,location:{href:'http://fixture/podcasts/catalogue/episodes',pathname:'/podcasts/catalogue/episodes',search:'',reload(){events.push(['reload'])}},history:{state:{},replaceState(state){this.state=state}}},
+ confirm:()=>true,alert:message=>events.push(['alert',message]),
+ fetch:async url=>url.endsWith('bulk-summary')?response(input.preview):url.includes('/episodes/status?')?response(input.statuses):new Promise(resolve=>{deliverBulk=()=>resolve(response(input.result))})};
+vm.createContext(sandbox);input.scripts.forEach(script=>vm.runInContext(script,sandbox));
+(async()=>{
+ const action=sandbox.bulkAction(input.action);
+ for(let i=0;i<20&&!deliverBulk;i++)await new Promise(setImmediate);
+ assert(deliverBulk,'bulk request did not start');
+ await sandbox.pollStatuses(); // Same callback used by the ordinary interval.
+ assert.deepEqual(events,[],'background polling navigated before the committed result arrived');
+ deliverBulk();await action;
+ assert.equal(events[0][0],'alert');assert.match(events[0][1],/251 episode\(s\) (queued|skipped)/);
+ assert.equal(events[1][0],'reload');assert(!events.some(e=>String(e[1]).includes('Could not')));
+ assert(buttons.every(button=>!button.disabled));
+})().catch(error=>{console.error(error);process.exitCode=1});
+'''
+        observed = subprocess.run(
+            ["node", "-e", program],
+            input=json.dumps({"action": action, "scripts": re.findall(r"<script>(.*?)</script>", page.text, re.S),
+                              "preview": preview, "result": result, "statuses": statuses}),
+            text=True, capture_output=True, timeout=10,
+        )
+        assert observed.returncode == 0, observed.stdout + observed.stderr
