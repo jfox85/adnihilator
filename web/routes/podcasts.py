@@ -4,14 +4,16 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
+from fastapi import APIRouter, Body, Depends, Form, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..dependencies import get_db
 from ..auth import verify_admin
 from ..models import Podcast
+from ..formatting import format_cost, format_duration
 from ..services.audio import is_usable_audio_url
 from ..values import finite_nonnegative_number
 
@@ -50,6 +52,36 @@ def relative_time(dt: datetime | None) -> str:
 # Register custom filters
 templates.env.filters["regex_replace"] = regex_replace
 templates.env.filters["relative_time"] = relative_time
+templates.env.filters["duration"] = format_duration
+templates.env.filters["cost"] = format_cost
+
+
+class BulkSelection(BaseModel):
+    """Episode identities the owner actually confirmed for a bulk action."""
+
+    episode_ids: list[str]
+
+
+@router.get("/{podcast_id}/episodes/bulk-summary")
+async def bulk_summary(
+    podcast_id: str,
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_admin),
+) -> dict:
+    """Preview the exact eligible scope, including episodes hidden by filters."""
+    from ..models import Episode, EpisodeStatus
+
+    if db.get(Podcast, podcast_id) is None:
+        raise HTTPException(status_code=404, detail="Podcast not found")
+    episodes = db.query(Episode).filter_by(podcast_id=podcast_id).all()
+    queue_ids = [ep.id for ep in episodes if ep.status in {
+        EpisodeStatus.SKIPPED.value, EpisodeStatus.FAILED.value
+    } and is_usable_audio_url(ep.original_audio_url)]
+    skip_ids = [ep.id for ep in episodes if ep.status in {
+        EpisodeStatus.PENDING.value, EpisodeStatus.FAILED.value
+    }]
+    return {"queue": {"count": len(queue_ids), "episode_ids": queue_ids},
+            "skip": {"count": len(skip_ids), "episode_ids": skip_ids}}
 
 
 @router.get("")
@@ -245,6 +277,7 @@ async def skip_episode(
 @router.post("/{podcast_id}/episodes/skip-all")
 async def skip_all_episodes(
     podcast_id: str,
+    selection: BulkSelection | None = Body(default=None),
     db: Session = Depends(get_db),
     _: None = Depends(verify_admin),
 ):
@@ -255,32 +288,40 @@ async def skip_all_episodes(
     if not podcast:
         raise HTTPException(status_code=404, detail="Podcast not found")
 
-    # Skip all pending/failed episodes
-    updated = (
-        db.query(Episode)
-        .filter_by(podcast_id=podcast_id)
-        .filter(Episode.status.in_([EpisodeStatus.PENDING.value, EpisodeStatus.FAILED.value]))
-        .update({Episode.status: EpisodeStatus.SKIPPED.value}, synchronize_session=False)
-    )
+    # Skip only confirmed identities when the client supplied a preview.
+    selected_ids = set(selection.episode_ids) if selection is not None else None
+    candidates = db.query(Episode.id).filter_by(podcast_id=podcast_id).filter(
+        Episode.status.in_([EpisodeStatus.PENDING.value, EpisodeStatus.FAILED.value])
+    ).all()
+    skipped_ids = []
+    for (episode_id,) in candidates:
+        if selected_ids is not None and episode_id not in selected_ids:
+            continue
+        changed = db.query(Episode).filter(
+            Episode.id == episode_id, Episode.podcast_id == podcast_id,
+            Episode.status.in_([EpisodeStatus.PENDING.value, EpisodeStatus.FAILED.value]),
+        ).update({Episode.status: EpisodeStatus.SKIPPED.value}, synchronize_session=False)
+        if changed:
+            skipped_ids.append(episode_id)
     db.commit()
-
-    return {"status": "skipped", "count": updated}
+    return {"status": "skipped", "count": len(skipped_ids), "episode_ids": skipped_ids}
 
 
 @router.post("/{podcast_id}/episodes/queue-all")
 async def queue_all_episodes(
     podcast_id: str,
+    selection: BulkSelection | None = Body(default=None),
     db: Session = Depends(get_db),
     _: None = Depends(verify_admin),
 ):
-    """Queue all unprocessed episodes for processing."""
+    """Queue eligible episodes, optionally bounded to a confirmed selection."""
     from ..models import Episode, EpisodeStatus
 
     podcast = db.query(Podcast).filter_by(id=podcast_id).first()
     if not podcast:
         raise HTTPException(status_code=404, detail="Podcast not found")
 
-    # Queue all skipped/failed episodes
+    selected_ids = set(selection.episode_ids) if selection is not None else None
     candidates = (
         db.query(Episode.id, Episode.original_audio_url)
         .filter_by(podcast_id=podcast_id)
@@ -289,6 +330,8 @@ async def queue_all_episodes(
     )
     queued_ids = []
     for episode_id, audio_url in candidates:
+        if selected_ids is not None and episode_id not in selected_ids:
+            continue
         if not is_usable_audio_url(audio_url):
             continue
         changed = db.query(Episode).filter(
@@ -301,7 +344,6 @@ async def queue_all_episodes(
         if changed:
             queued_ids.append(episode_id)
     db.commit()
-
     return {"status": "queued", "count": len(queued_ids), "episode_ids": queued_ids}
 
 

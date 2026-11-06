@@ -77,6 +77,7 @@ class TestAudioAdmission:
         active = add_episode(factory, podcast_id, "processing", "http://127.0.0.1/audio.mp3")
         html = client.get(f"/podcasts/{podcast_id}/episodes", auth=AUTH).text
         script = next(script for script in re.findall(r"<script>(.*?)</script>", html, re.S) if "const podcastId =" in script)
+        preview = client.get(f"/podcasts/{podcast_id}/episodes/bulk-summary", auth=AUTH).json()
         bulk = client.post(f"/podcasts/{podcast_id}/episodes/queue-all", auth=AUTH).json()
         conflicts = [client.post(f"/podcasts/{podcast_id}/episodes/{active}/{action}", auth=AUTH).status_code for action in ("queue", "skip")]
         program = r"""
@@ -84,11 +85,11 @@ const fs = require('fs'), vm = require('vm'), assert = require('assert');
 const input = JSON.parse(fs.readFileSync(0, 'utf8'));
 const updates = [], alerts = [];
 const sandbox = {window:{location:{origin:'http://fixture.invalid'}},
- document:{addEventListener(){},querySelectorAll(){throw Error('Bulk changed unreturned rows')}},
+ document:{addEventListener(){},querySelector(){return null},querySelectorAll(){throw Error('Bulk changed unreturned rows')}},
  setInterval(){return 1},setTimeout(){},confirm(){return true},alert(text){alerts.push(text)},console,
- fetch:async()=>({ok:true,json:async()=>input.bulk})};
+ fetch:async(url)=>({ok:true,json:async()=>url.endsWith('bulk-summary')?input.preview:input.bulk})};
 vm.createContext(sandbox); vm.runInContext(input.script,sandbox);
-sandbox.updateEpisodeUI=(id,data)=>updates.push([id,data.status]);
+sandbox.updateEpisodeUI=(id,data)=>updates.push([id,data.status]); sandbox.filterEpisodes=()=>{};
 (async()=>{
  await sandbox.queueAll(); assert.deepStrictEqual(updates,[[input.valid,'pending']]);
  updates.length=0;
@@ -96,10 +97,10 @@ sandbox.updateEpisodeUI=(id,data)=>updates.push([id,data.status]);
   sandbox.fetch=async()=>({ok:input.conflicts[index]<400,status:input.conflicts[index]});
   await sandbox[action]('podcast','active');
  }
- assert.deepStrictEqual(updates,[]); assert.strictEqual(alerts.length,2);
+ assert.deepStrictEqual(updates,[]); assert.strictEqual(alerts.length,3);
 })().catch(error=>{console.error(error);process.exitCode=1});
 """
-        result = subprocess.run(["node", "-e", program], input=json.dumps({"script": script, "bulk": bulk, "valid": valid, "conflicts": conflicts}), capture_output=True, text=True)
+        result = subprocess.run(["node", "-e", program], input=json.dumps({"script": script, "bulk": bulk, "preview": preview, "valid": valid, "conflicts": conflicts}), capture_output=True, text=True)
         assert result.returncode == 0, result.stdout + result.stderr
 
     @pytest.mark.parametrize("enclosures,expected", [

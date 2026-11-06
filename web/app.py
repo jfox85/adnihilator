@@ -25,6 +25,7 @@ from .auth import (
 )
 from .database import get_engine, init_db, get_session_factory
 from .dependencies import get_db
+from .formatting import format_cost, format_duration
 from .routes import podcasts, api, feeds, opml
 from .services.scheduler import create_scheduler
 from . import dependencies
@@ -69,6 +70,8 @@ def relative_time(dt: datetime | None) -> str:
 # Register custom filters
 templates.env.filters["regex_replace"] = regex_replace
 templates.env.filters["relative_time"] = relative_time
+templates.env.filters["duration"] = format_duration
+templates.env.filters["cost"] = format_cost
 
 
 @asynccontextmanager

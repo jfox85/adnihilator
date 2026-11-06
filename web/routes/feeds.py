@@ -8,6 +8,7 @@ from feedgen.feed import FeedGenerator
 from sqlalchemy.orm import Session
 
 from ..dependencies import get_db
+from ..formatting import format_duration as format_display_duration
 from ..models import Episode, EpisodeStatus, Podcast
 from ..services.r2 import get_audio_url
 from ..values import finite_nonnegative_number
@@ -18,13 +19,7 @@ def format_duration(seconds: int | float | None) -> str | None:
     seconds = finite_nonnegative_number(seconds)
     if seconds is None:
         return None
-    seconds = int(seconds)
-    hours = seconds // 3600
-    minutes = (seconds % 3600) // 60
-    secs = seconds % 60
-    if hours > 0:
-        return f"{hours}:{minutes:02d}:{secs:02d}"
-    return f"{minutes}:{secs:02d}"
+    return format_display_duration(seconds)
 
 
 router = APIRouter(tags=["feeds"])

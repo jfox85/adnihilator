@@ -87,8 +87,8 @@
                         {% if episode.published_at %}
                         {{ episode.published_at.strftime('%b %d, %Y') }}
                         {% endif %}
-                        {% if episode.duration %}
-                        &middot; {{ (episode.duration // 60) }}min
+                        {% if episode.duration is not none %}
+                        &middot; {{ episode.duration|duration }}
                         {% endif %}
                         <span id="audio-{{ episode.id }}" {% if audio_eligible[episode.id] %}hidden{% endif %}>No usable audio enclosure</span>
                     </span>
@@ -118,16 +118,16 @@
                 <div class="episode-error" id="error-{{ episode.id }}" {% if not (episode.error_message and episode.status == 'failed') %}style="display:none"{% endif %}>
                     <strong>Error:</strong> <span class="error-text">{{ episode.error_message or '' }}</span>
                 </div>
-                <div class="episode-stats" id="stats-{{ episode.id }}" {% if not episode.ads_removed_seconds %}style="display:none"{% endif %}>
-                    <strong>Ads Removed:</strong> <span class="stats-ads">{{ "%.1f"|format(episode.ads_removed_seconds or 0) }}</span>s
+                <div class="episode-stats" id="stats-{{ episode.id }}" {% if episode.status != 'complete' and not episode.ads_removed_seconds %}style="display:none"{% endif %}>
+                    <strong>Ads Removed:</strong> <span class="stats-ads">{% if episode.ads_removed_seconds == 0 %}No ads detected{% else %}{{ episode.ads_removed_seconds|duration }}{% endif %}</span>
                     <span class="stats-duration">
-                    {% if episode.processed_duration %}
-                    &middot; <strong>Final Duration:</strong> {{ (episode.processed_duration // 60)|int }}:{{ "%02d"|format((episode.processed_duration % 60)|int) }}
+                    {% if episode.processed_duration is not none %}
+                    &middot; <strong>Final Duration:</strong> {{ episode.processed_duration|duration }}
                     {% endif %}
                     </span>
                     <span class="stats-cost" id="cost-{{ episode.id }}" {% if episode.llm_cost_usd is none %}style="display:none"{% endif %}>
                     {% if episode.llm_cost_usd is not none %}
-                    &middot; <strong>Cost:</strong> ${{ "%.4f"|format(episode.llm_cost_usd) }}
+                    &middot; <strong>Cost:</strong> {{ episode.llm_cost_usd|cost }}
                     {% if episode.detection_source %}<span class="detection-source">({{ episode.detection_source }})</span>{% endif %}
                     {% endif %}
                     </span>
@@ -190,7 +190,9 @@ function updateEpisodeUI(episodeId, data) {
 
     // Skip update if nothing meaningful changed
     const hasProgressChange = data.progress_step !== undefined || data.progress_percent !== undefined;
-    if (oldStatus === newStatus && !data.ads_removed_seconds && !hasProgressChange && !hasAudioChange) return;
+    const hasStatsChange = ['ads_removed_seconds', 'processed_duration', 'llm_cost_usd']
+        .some(field => Object.prototype.hasOwnProperty.call(data, field));
+    if (oldStatus === newStatus && !hasStatsChange && !hasProgressChange && !hasAudioChange) return;
 
     // Update data attribute
     row.dataset.status = newStatus;
@@ -232,14 +234,15 @@ function updateEpisodeUI(episodeId, data) {
     // Update stats
     const statsDiv = document.getElementById('stats-' + episodeId);
     if (statsDiv) {
-        if (data.ads_removed_seconds) {
+        if (data.ads_removed_seconds || newStatus === 'complete') {
             statsDiv.style.display = '';
-            statsDiv.querySelector('.stats-ads').textContent = data.ads_removed_seconds.toFixed(1);
-            if (data.processed_duration) {
-                const mins = Math.floor(data.processed_duration / 60);
-                const secs = Math.floor(data.processed_duration % 60);
+            statsDiv.querySelector('.stats-ads').textContent = data.ads_removed_seconds === 0
+                ? 'No ads detected' : formatDuration(data.ads_removed_seconds);
+            if (data.processed_duration !== null && data.processed_duration !== undefined) {
                 statsDiv.querySelector('.stats-duration').innerHTML =
-                    ` &middot; <strong>Final Duration:</strong> ${mins}:${secs.toString().padStart(2, '0')}`;
+                    ` &middot; <strong>Final Duration:</strong> ${formatDuration(data.processed_duration)}`;
+            } else {
+                statsDiv.querySelector('.stats-duration').textContent = '';
             }
 
             // Update LLM cost
@@ -247,7 +250,7 @@ function updateEpisodeUI(episodeId, data) {
             if (costSpan) {
                 if (data.llm_cost_usd !== null && data.llm_cost_usd !== undefined) {
                     costSpan.style.display = '';
-                    let costHtml = ` &middot; <strong>Cost:</strong> $${data.llm_cost_usd.toFixed(4)}`;
+                    let costHtml = ` &middot; <strong>Cost:</strong> ${formatCost(data.llm_cost_usd)}`;
                     if (data.detection_source) {
                         costHtml += ` <span class="detection-source">(${data.detection_source})</span>`;
                     }
@@ -357,38 +360,50 @@ async function skipEpisode(podcastId, episodeId) {
     }
 }
 
-async function queueAll() {
-    if (!confirm('Queue all unprocessed episodes for ad removal?')) return;
-    const response = await fetch(`/podcasts/${podcastId}/episodes/queue-all`, {
-        method: 'POST',
-        credentials: 'include'
-    });
-    if (response.ok) {
-        const data = await response.json();
-        for (const episodeId of data.episode_ids) {
-            updateEpisodeUI(episodeId, { status: 'pending', error_message: null });
+async function bulkAction(action) {
+    const queueing = action === 'queue';
+    const button = document.querySelector(queueing ? '[onclick="queueAll()"]' : '[onclick="skipAll()"]');
+    if (button?.disabled) return;
+    if (button) button.disabled = true;
+    try {
+        const preview = await fetch(`/podcasts/${podcastId}/episodes/bulk-summary`, {
+            credentials: 'include', headers: {'Accept': 'application/json'}
+        });
+        if (preview.status === 401) {
+            window.location.assign('/login?next=' + encodeURIComponent(window.location.pathname + window.location.search));
+            return;
         }
-    } else {
-        alert('Failed to queue episodes');
+        if (!preview.ok) throw new Error('preview');
+        const summary = (await preview.json())[action];
+        if (!summary.count) {
+            alert('No eligible episodes to ' + action + '.');
+            return;
+        }
+        const message = queueing
+            ? `Queue ${summary.count} skipped or failed episodes in this podcast? This includes episodes hidden by filters. Processing uses paid API credits; the final cost depends on episode length and providers. Processing and completed episodes will stay unchanged.`
+            : `Skip ${summary.count} pending or failed episodes in this podcast? This includes episodes hidden by filters. Processing and completed episodes will stay unchanged.`;
+        if (!confirm(message)) return;
+        const response = await fetch(`/podcasts/${podcastId}/episodes/${queueing ? 'queue-all' : 'skip-all'}`, {
+            method: 'POST', credentials: 'include',
+            headers: {'Accept': 'application/json', 'Content-Type': 'application/json'},
+            body: JSON.stringify({episode_ids: summary.episode_ids})
+        });
+        if (!response.ok) throw new Error('action');
+        const data = await response.json();
+        for (const id of data.episode_ids) {
+            updateEpisodeUI(id, {status: queueing ? 'pending' : 'skipped', error_message: null});
+        }
+        filterEpisodes();
+        alert(`${data.count} episode(s) ${queueing ? 'queued' : 'skipped'}.`);
+    } catch (error) {
+        alert('Could not ' + action + ' episodes. Please retry; refresh the page to check their current status.');
+    } finally {
+        if (button) button.disabled = false;
     }
 }
 
-async function skipAll() {
-    if (!confirm('Skip all pending episodes?')) return;
-    const response = await fetch(`/podcasts/${podcastId}/episodes/skip-all`, {
-        method: 'POST',
-        credentials: 'include'
-    });
-    if (response.ok) {
-        const data = await response.json();
-        // Update all pending/failed to skipped
-        document.querySelectorAll('[data-status="pending"], [data-status="failed"]').forEach(row => {
-            updateEpisodeUI(row.dataset.id, { status: 'skipped', error_message: null });
-        });
-    } else {
-        alert('Failed to skip episodes');
-    }
-}
+async function queueAll() { await bulkAction('queue'); }
+async function skipAll() { await bulkAction('skip'); }
 
 async function toggleAutoProcess() {
     const response = await fetch(`/podcasts/${podcastId}/auto-process`, {
