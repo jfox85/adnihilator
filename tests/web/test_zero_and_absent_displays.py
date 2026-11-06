@@ -98,3 +98,39 @@ class TestZeroAndAbsentDisplays:
         feed = feedparser.parse(client.get("/feed/display-feed.xml").content)
         active = next(entry for entry in feed.entries if entry.id == "active")
         assert active.itunes_duration == "00:00:00"
+
+
+class TestHistoricalValuePresence:
+    @pytest.mark.parametrize("status,removed,processed,cost", [
+        ("complete", -1, -2, Decimal("-3")),
+        ("complete", float("inf"), float("inf"), Decimal("-3")),
+        ("failed", -1, None, None),
+        ("complete", 0, 0, Decimal("0")),
+        ("complete", None, None, None),
+        ("complete", 1, 62, Decimal("0.03125")),
+    ])
+    def test_initial_field_presence_matches_validated_live_values(
+        self, client: TestClient, status: str, removed: float | None,
+        processed: float | None, cost: Decimal | None,
+    ) -> None:
+        """Invalid stored values use the same availability view as a live poll."""
+        from web import dependencies
+
+        with dependencies.SessionFactory() as db:
+            db.add(Episode(id="legacy-presence", podcast_id="display", guid="legacy-presence", title="Legacy view",
+                           status=status, ads_removed_seconds=removed, processed_duration=processed,
+                           llm_cost_usd=cost, detection_source="llm"))
+            db.commit()
+        data = client.get("/podcasts/display/episodes/status").json()["episodes"]["legacy-presence"]
+        page = BeautifulSoup(client.get("/podcasts/display/episodes").text, "html.parser")
+        stats = page.select_one('[data-id="legacy-presence"] .episode-stats')
+        initial_final = bool(stats.select_one('.stats-duration').get_text(strip=True))
+        cost_span = stats.select_one('.stats-cost')
+        initial_cost = "display:none" not in cost_span.get("style", "").replace(" ", "")
+        initial_stats = "display:none" not in stats.get("style", "").replace(" ", "")
+        assert initial_final == (data["processed_duration"] is not None)
+        assert initial_cost == (data["llm_cost_usd"] is not None)
+        assert initial_stats == (data["status"] == "complete" or bool(data["ads_removed_seconds"]))
+        with dependencies.SessionFactory() as db:
+            stored = db.get(Episode, "legacy-presence")
+            assert (stored.ads_removed_seconds, stored.processed_duration, stored.llm_cost_usd) == (removed, processed, cost)

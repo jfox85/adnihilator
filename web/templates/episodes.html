@@ -118,16 +118,19 @@
                 <div class="episode-error" id="error-{{ episode.id }}" {% if not (episode.error_message and episode.status == 'failed') %}style="display:none"{% endif %}>
                     <strong>Error:</strong> <span class="error-text">{{ episode.error_message or '' }}</span>
                 </div>
-                <div class="episode-stats" id="stats-{{ episode.id }}" {% if episode.status != 'complete' and not episode.ads_removed_seconds %}style="display:none"{% endif %}>
-                    <strong>Ads Removed:</strong> <span class="stats-ads">{% if episode.ads_removed_seconds == 0 %}No ads detected{% else %}{{ episode.ads_removed_seconds|duration }}{% endif %}</span>
+                {% set removed_seconds = episode.ads_removed_seconds|finite_number %}
+                {% set processed_duration = episode.processed_duration|finite_number %}
+                {% set llm_cost = episode.llm_cost_usd|finite_number %}
+                <div class="episode-stats" id="stats-{{ episode.id }}" {% if episode.status != 'complete' and not removed_seconds %}style="display:none"{% endif %}>
+                    <strong>Ads Removed:</strong> <span class="stats-ads">{% if removed_seconds == 0 %}No ads detected{% else %}{{ removed_seconds|duration }}{% endif %}</span>
                     <span class="stats-duration">
-                    {% if episode.processed_duration is not none %}
-                    &middot; <strong>Final Duration:</strong> {{ episode.processed_duration|duration }}
+                    {% if processed_duration is not none %}
+                    &middot; <strong>Final Duration:</strong> {{ processed_duration|duration }}
                     {% endif %}
                     </span>
-                    <span class="stats-cost" id="cost-{{ episode.id }}" {% if episode.llm_cost_usd is none %}style="display:none"{% endif %}>
-                    {% if episode.llm_cost_usd is not none %}
-                    &middot; <strong>Cost:</strong> {{ episode.llm_cost_usd|cost }}
+                    <span class="stats-cost" id="cost-{{ episode.id }}" {% if llm_cost is none %}style="display:none"{% endif %}>
+                    {% if llm_cost is not none %}
+                    &middot; <strong>Cost:</strong> {{ llm_cost|cost }}
                     {% if episode.detection_source %}<span class="detection-source">({{ episode.detection_source }})</span>{% endif %}
                     {% endif %}
                     </span>
