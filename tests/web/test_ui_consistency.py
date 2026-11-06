@@ -123,13 +123,14 @@ const c = {console, Intl, Number, Date, String, setInterval:()=>1, clearInterval
  json:async()=>url.endsWith('bulk-summary')?payload.preview:{count:1,episode_ids:['skip']}}}};
 vm.createContext(c); payload.scripts.forEach(s=>vm.runInContext(s,c));
 c.updateEpisodeUI=()=>{}; c.filterEpisodes=()=>{};
+c.pollStatuses=async()=>{calls.push({url:'status-refresh'})};
 (async()=>{
  await c.queueAll(); assert.equal(calls.length,1); // Cancel spends no processing call.
  assert.match(confirms[0], /Queue 2/); assert.match(confirms[0], /paid API credits/);
  assert.match(confirms[0], /hidden by filters/); assert.equal(button.disabled,false);
- approve=true; await c.queueAll(); assert.equal(calls.length,3);
+ approve=true; await c.queueAll(); assert.equal(calls.length,4);
  assert.deepEqual(JSON.parse(calls[2].options.body).episode_ids.sort(),['fail','skip']);
- assert.match(alerts.at(-1), /1 episode\(s\) queued/);
+ assert.match(alerts.at(-1), /1 of 2 episode\(s\) queued; 1 changed state since preview/);
  assert.equal(c.formatDuration(3602),'01:00:02');
  assert.equal(c.formatCost(0.03125),'$0.0313');
  assert.equal(c.formatCost(1234.123456),'$1,234.1235');
@@ -138,4 +139,57 @@ c.updateEpisodeUI=()=>{}; c.filterEpisodes=()=>{};
 '''
         result = subprocess.run([node, "-e", script], input=json.dumps({"scripts": scripts, "preview": preview}),
                                 text=True, capture_output=True, timeout=10)
+        assert result.returncode == 0, result.stderr
+
+
+class TestBulkResultReconciliation:
+    @pytest.mark.parametrize("action", ["queue", "skip"])
+    @pytest.mark.parametrize("accepted", [0, 48, 50])
+    def test_rendered_bulk_result_refreshes_changed_rows_and_explains_shortfall(
+        self, ui_client: TestClient, action: str, accepted: int
+    ) -> None:
+        """Paused tabs reconcile every result, including zero accepted IDs."""
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("Node is required to execute the rendered browser script")
+        scripts = re.findall(r"<script>(.*?)</script>", ui_client.get("/podcasts/podcast/episodes").text, re.S)
+        harness = r'''
+const vm=require('node:vm');
+const assert=require('node:assert/strict');
+const payload=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const ids=Array.from({length:50},(_,i)=>'episode-'+i);
+const button={disabled:false}; const events=[], states=new Map(ids.map(id=>[id,'failed']));
+const verb=payload.action==='queue'?'queued':'skipped';
+const target=payload.action==='queue'?'pending':'skipped';
+const context={console,Intl,Number,Date,String,setInterval:()=>1,clearInterval:()=>{},setTimeout:()=>1,
+ document:{addEventListener:()=>{},querySelector:()=>button},
+ window:{location:{pathname:'/podcasts/podcast/episodes',search:'',assign:()=>{}}},
+ confirm:()=>true,alert:message=>events.push(['alert',message]),
+ fetch:async(url,options)=>({ok:true,status:200,json:async()=>url.endsWith('bulk-summary')
+  ?{[payload.action]:{count:50,episode_ids:ids}}
+  :{count:payload.accepted,episode_ids:ids.slice(0,payload.accepted)}})};
+vm.createContext(context); payload.scripts.forEach(script=>vm.runInContext(script,context));
+context.updateEpisodeUI=(id,row)=>states.set(id,row.status);
+context.filterEpisodes=()=>{};
+context.pollStatuses=async()=>{
+ assert.equal(button.disabled,true,'bulk control must stay disabled until refresh finishes');
+ events.push(['poll']);
+ ids.forEach((id,index)=>states.set(id,payload.accepted===48&&index>=48?(index===48?'processing':'complete'):target));
+};
+(async()=>{
+ await context.bulkAction(payload.action);
+ assert.equal(events.filter(event=>event[0]==='poll').length,1,'every successful bulk result must force one status refresh');
+ assert.equal(events[0][0],'poll','refresh must complete before result notice');
+ const notice=events.find(event=>event[0]==='alert')[1];
+ if(payload.accepted<50){
+  assert.match(notice,new RegExp(payload.accepted+' of 50'));
+  assert.match(notice,new RegExp((50-payload.accepted)+' changed state since preview'));
+ }else assert.match(notice,new RegExp('50 episode\\(s\\) '+verb));
+ assert.equal(states.get('episode-48'),payload.accepted===48?'processing':target);
+ assert.equal(states.get('episode-49'),payload.accepted===48?'complete':target);
+ assert.equal(button.disabled,false);
+ console.log(JSON.stringify({action:payload.action,accepted:payload.accepted,notice,events}));
+})().catch(error=>{console.error(error);process.exitCode=1});
+'''
+        result = subprocess.run([node, "-e", harness], input=json.dumps({"scripts": scripts, "action": action, "accepted": accepted}), text=True, capture_output=True, timeout=10)
         assert result.returncode == 0, result.stderr

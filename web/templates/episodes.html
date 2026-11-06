@@ -394,7 +394,12 @@ async function bulkAction(action) {
             updateEpisodeUI(id, {status: queueing ? 'pending' : 'skipped', error_message: null});
         }
         filterEpisodes();
-        alert(`${data.count} episode(s) ${queueing ? 'queued' : 'skipped'}.`);
+        await pollStatuses();
+        const changed = Math.max(0, summary.count - data.count);
+        const verb = queueing ? 'queued' : 'skipped';
+        alert(changed
+            ? `${data.count} of ${summary.count} episode(s) ${verb}; ${changed} changed state since preview.`
+            : `${data.count} episode(s) ${verb}.`);
     } catch (error) {
         alert('Could not ' + action + ' episodes. Please retry; refresh the page to check their current status.');
     } finally {
