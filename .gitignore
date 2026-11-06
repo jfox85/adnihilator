@@ -108,3 +108,7 @@ whisper_models/
 .worktrees/
 .envrc
 .tmuxp.yaml
+
+# Adversarial hunt scratch and local agent configuration
+.pi/tmp/
+.pi/agents/
