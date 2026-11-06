@@ -84,21 +84,29 @@ def requeue_stuck_episodes(db: Session) -> int:
         .all()
     )
 
+    recovered = 0
     for episode in stuck:
-        episode.claimed_at = None
-        episode.progress_step = None
-        episode.progress_percent = None
-        episode.error_message = "Reclaimed: worker stopped responding while processing"
-        if episode.retry_count < MAX_RETRIES:
-            episode.retry_count += 1
-            episode.status = EpisodeStatus.PENDING.value
-        else:
-            episode.status = EpisodeStatus.FAILED.value
+        # Another request can renew or recover this lease after our SELECT.
+        # Only the unchanged expired lease may spend a recovery attempt.
+        retry_available = Episode.retry_count < MAX_RETRIES
+        recovered += db.query(Episode).filter(
+            Episode.id == episode.id,
+            Episode.status == EpisodeStatus.PROCESSING.value,
+            Episode.claimed_at == episode.claimed_at,
+            Episode.claimed_at < cutoff,
+        ).update({
+            Episode.claimed_at: None,
+            Episode.progress_step: None,
+            Episode.progress_percent: None,
+            Episode.error_message: "Reclaimed: worker stopped responding while processing",
+            Episode.retry_count: case((retry_available, Episode.retry_count + 1), else_=Episode.retry_count),
+            Episode.status: case((retry_available, EpisodeStatus.PENDING.value), else_=EpisodeStatus.FAILED.value),
+        }, synchronize_session=False)
 
     if stuck:
         db.commit()
 
-    return len(stuck)
+    return recovered
 
 
 def get_worker_auth(x_worker_api_key: str = Header(...)):

@@ -13,6 +13,7 @@ from ..dependencies import get_db
 from ..auth import verify_admin
 from ..models import Podcast
 from ..services.audio import is_usable_audio_url
+from ..values import finite_nonnegative_number
 
 router = APIRouter(prefix="/podcasts", tags=["podcasts"])
 
@@ -347,11 +348,11 @@ async def get_episode_statuses(
                 "status": ep.status,
                 "audio_eligible": is_usable_audio_url(ep.original_audio_url),
                 "error_message": ep.error_message,
-                "ads_removed_seconds": ep.ads_removed_seconds,
-                "processed_duration": ep.processed_duration,
+                "ads_removed_seconds": finite_nonnegative_number(ep.ads_removed_seconds),
+                "processed_duration": finite_nonnegative_number(ep.processed_duration),
                 "progress_step": ep.progress_step,
-                "progress_percent": ep.progress_percent,
-                "llm_cost_usd": float(ep.llm_cost_usd) if ep.llm_cost_usd is not None else None,
+                "progress_percent": finite_nonnegative_number(ep.progress_percent, maximum=100),
+                "llm_cost_usd": finite_nonnegative_number(ep.llm_cost_usd),
                 "llm_model": ep.llm_model,
                 "detection_source": ep.detection_source,
             }
