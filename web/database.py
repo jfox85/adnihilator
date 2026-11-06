@@ -9,6 +9,11 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 Base = declarative_base()
 
 
+def _sqlite_casefold(value: str | None) -> str | None:
+    """Give SQLite the same Unicode-insensitive title key as catalogue queries."""
+    return value.casefold() if value is not None else None
+
+
 def get_database_path():
     """Get the database path from environment or default."""
     return os.environ.get(
@@ -41,6 +46,7 @@ def get_engine(database_url: str | None = None):
     if database_url.startswith("sqlite"):
         @event.listens_for(engine, "connect")
         def set_sqlite_pragma(dbapi_connection, connection_record):
+            dbapi_connection.create_function("catalogue_casefold", 1, _sqlite_casefold, deterministic=True)
             cursor = dbapi_connection.cursor()
             cursor.execute("PRAGMA journal_mode=WAL")
             cursor.close()

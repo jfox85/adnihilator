@@ -72,10 +72,11 @@ def _episode_page(
 ) -> tuple[list[Episode], int, int]:
     """Filter and sort the whole catalogue before selecting a bounded page."""
     query = db.query(Episode).filter_by(podcast_id=podcast_id)
+    display_title = func.coalesce(func.nullif(Episode.title, ""), Episode.guid)
     if search:
         query = query.filter(
-            func.lower(func.coalesce(Episode.title, Episode.guid)).contains(
-                search.lower(), autoescape=True,
+            func.catalogue_casefold(display_title).contains(
+                search.casefold(), autoescape=True,
             )
         )
     if state:
@@ -83,7 +84,7 @@ def _episode_page(
     total = query.count()
     last_page = max(1, (total + EPISODES_PER_PAGE - 1) // EPISODES_PER_PAGE)
     page = min(page, last_page)
-    title = func.lower(func.coalesce(Episode.title, Episode.guid))
+    title = func.catalogue_casefold(display_title)
     ordering = {
         "date-desc": Episode.published_at.desc(),
         "date-asc": Episode.published_at.asc(),
@@ -237,6 +238,7 @@ async def list_episodes_html(
     if not podcast:
         raise HTTPException(status_code=404, detail="Podcast not found")
 
+    q = q.strip()
     episodes, total, page = _episode_page(db, podcast_id, page, q, episode_status, sort)
     last_page = max(1, (total + EPISODES_PER_PAGE - 1) // EPISODES_PER_PAGE)
 
@@ -251,8 +253,8 @@ async def list_episodes_html(
                           "start": (page - 1) * EPISODES_PER_PAGE + 1 if total else 0,
                           "end": min(page * EPISODES_PER_PAGE, total),
                           "search": q, "status": episode_status, "sort": sort,
-                          "previous": str(request.url.include_query_params(page=page - 1)) if page > 1 else None,
-                          "next": str(request.url.include_query_params(page=page + 1)) if page < last_page else None},
+                          "previous": request.url.path + "?" + request.url.include_query_params(page=page - 1).query if page > 1 else None,
+                          "next": request.url.path + "?" + request.url.include_query_params(page=page + 1).query if page < last_page else None},
             "audio_eligible": {episode.id: is_usable_audio_url(episode.original_audio_url) for episode in episodes},
         },
     )
@@ -414,23 +416,33 @@ async def toggle_auto_process(
 async def get_episode_statuses(
     podcast_id: str,
     episode_id: list[str] | None = Query(default=None, max_length=100),
+    catalogue_page: int | None = Query(default=None, ge=1, le=1_000_000),
+    q: str = Query(default="", max_length=200),
+    episode_status: str = Query(default="", alias="status", pattern="^(|pending|processing|complete|failed|skipped|expired)$"),
+    sort: str = Query(default="date-desc", pattern="^(date-desc|date-asc|title-asc|title-desc|status)$"),
     db: Session = Depends(get_db),
     _: None = Depends(verify_admin),
 ):
-    """Get status of all episodes for polling updates."""
+    """Poll a bounded catalogue window, selected IDs, or legacy queue clients."""
     from ..models import Episode
 
     podcast = db.query(Podcast).filter_by(id=podcast_id).first()
     if not podcast:
         raise HTTPException(status_code=404, detail="Podcast not found")
 
-    query = db.query(Episode).filter_by(podcast_id=podcast_id)
-    if episode_id is not None:
-        query = query.filter(Episode.id.in_(episode_id))
-    episodes = query.all()
+    catalogue = None
+    if catalogue_page is not None:
+        episodes, total, page = _episode_page(db, podcast_id, catalogue_page, q.strip(), episode_status, sort)
+        catalogue = {"page": page, "total": total, "ids": [ep.id for ep in episodes]}
+    else:
+        query = db.query(Episode).filter_by(podcast_id=podcast_id)
+        if episode_id is not None:
+            query = query.filter(Episode.id.in_(episode_id))
+        episodes = query.all()
 
     return {
         "auto_process": podcast.auto_process,
+        "catalogue": catalogue,
         "episodes": {
             ep.id: {
                 "status": ep.status,

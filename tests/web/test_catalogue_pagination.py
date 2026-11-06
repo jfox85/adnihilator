@@ -88,3 +88,47 @@ class TestCataloguePagination:
         result = catalogue_client.get("/podcasts/catalogue/episodes/bulk-summary").json()
         assert result["queue"]["count"] == 251
         assert len(result["queue"]["episode_ids"]) == 251
+
+    def test_unicode_and_empty_titles_search_by_displayed_name(self, catalogue_client: TestClient) -> None:
+        from web import dependencies
+
+        with dependencies.SessionFactory() as db:
+            db.get(Episode, "ep-003").title = "ÉCOLE ÁRBOL Straße"
+            episode = db.get(Episode, "ep-004")
+            episode.title = ""
+            episode.guid = "visible-empty-fallback"
+            db.commit()
+        for query in ("ÉCOLE", "école", "ÁRBOL", "árbol", "STRASSE"):
+            response = catalogue_client.get("/podcasts/catalogue/episodes", params={"q": query})
+            assert row_ids(response) == ["ep-003"]
+        response = catalogue_client.get("/podcasts/catalogue/episodes?q=visible-empty-fallback")
+        assert row_ids(response) == ["ep-004"]
+
+    def test_navigation_is_relative_to_current_origin(self, catalogue_client: TestClient) -> None:
+        response = catalogue_client.get("/podcasts/catalogue/episodes?page=2&status=failed")
+        assert 'href="/podcasts/catalogue/episodes?' in response.text
+        assert 'href="http://testserver/podcasts/' not in response.text
+
+    def test_catalogue_poll_reconciles_incoming_bulk_matches(self, catalogue_client: TestClient) -> None:
+        url = "/podcasts/catalogue/episodes/status?catalogue_page=1&status=pending"
+        assert catalogue_client.get(url).json()["catalogue"]["total"] == 0
+        preview = catalogue_client.get("/podcasts/catalogue/episodes/bulk-summary").json()["queue"]
+        queued = catalogue_client.post("/podcasts/catalogue/episodes/queue-all", json={"episode_ids": preview["episode_ids"]})
+        assert queued.json()["count"] == 251
+        data = catalogue_client.get(url).json()
+        assert data["catalogue"]["total"] == 251
+        assert len(data["episodes"]) == len(data["catalogue"]["ids"]) == 100
+        assert all(ep["status"] == "pending" for ep in data["episodes"].values())
+
+    def test_status_sorted_poll_reconciles_changed_membership(self, catalogue_client: TestClient) -> None:
+        from web import dependencies
+
+        url = "/podcasts/catalogue/episodes/status?catalogue_page=1&sort=status"
+        before = catalogue_client.get(url).json()["catalogue"]["ids"]
+        with dependencies.SessionFactory() as db:
+            db.get(Episode, before[0]).status = "complete"
+            db.commit()
+        after = catalogue_client.get(url).json()["catalogue"]["ids"]
+        assert len(after) == 100
+        assert before[0] not in after
+        assert before != after
