@@ -7,6 +7,7 @@ import feedparser
 from sqlalchemy.orm import Session
 
 from ..models import Episode, EpisodeStatus, Podcast
+from .audio import select_audio_enclosure
 
 
 def parse_duration(duration_str: str | None) -> int | None:
@@ -84,12 +85,7 @@ def sync_podcast(db: Session, podcast: Podcast) -> int:
             continue
 
         # Extract audio URL from enclosures
-        audio_url = None
-        if hasattr(entry, "enclosures") and entry.enclosures:
-            for enc in entry.enclosures:
-                if hasattr(enc, "href"):
-                    audio_url = enc.href
-                    break
+        audio_url = select_audio_enclosure(getattr(entry, "enclosures", []))
 
         # Parse published date
         published_at = None
@@ -117,7 +113,7 @@ def sync_podcast(db: Session, podcast: Podcast) -> int:
             original_audio_url=audio_url,
             source_url=source_url,
             published_at=published_at,
-            status=EpisodeStatus.PENDING.value if podcast.auto_process else EpisodeStatus.SKIPPED.value,
+            status=EpisodeStatus.PENDING.value if podcast.auto_process and audio_url else EpisodeStatus.SKIPPED.value,
         )
         db.add(episode)
         added += 1
