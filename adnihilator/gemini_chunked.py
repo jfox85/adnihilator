@@ -18,6 +18,7 @@ from .gemini_common import (
     create_genai_client,
     extract_usage,
     file_state_name,
+    validate_detections,
 )
 from .models import AdSpan, SponsorInfo
 
@@ -233,12 +234,9 @@ If no ads found: {{"ads": []}}"""
 
     # Convert to absolute timestamps
     ads = []
-    for ad in result.get("ads", []):
-        start_time = ad.get("start_time")
-        end_time = ad.get("end_time")
-
-        if start_time is None or end_time is None:
-            continue
+    for ad in validate_detections(result):
+        start_time = ad.start_time
+        end_time = ad.end_time
 
         # Convert chunk-relative to absolute timestamps
         abs_start = chunk_start + start_time
@@ -249,15 +247,15 @@ If no ads found: {{"ads": []}}"""
         abs_end = min(chunk_end, abs_end)
 
         if abs_start >= abs_end:
-            continue
+            raise ValueError("Gemini detection does not overlap its audio chunk")
 
         ads.append({
             "start": abs_start,
             "end": abs_end,
-            "sponsor": ad.get("sponsor", "Unknown"),
-            "ad_type": ad.get("ad_type", "dynamic_insertion"),
-            "confidence": ad.get("confidence", 0.9),
-            "language": ad.get("language", "unknown"),
+            "sponsor": ad.sponsor,
+            "ad_type": ad.ad_type if "ad_type" in ad.model_fields_set else "dynamic_insertion",
+            "confidence": ad.confidence,
+            "language": ad.language,
             "chunk_start": chunk_start,  # For debugging
         })
 

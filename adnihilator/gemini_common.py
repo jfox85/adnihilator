@@ -13,11 +13,18 @@ Gemini 3.x request rules (Gemini 3.6 Flash / 3.5 Flash-Lite migration guide):
 import re
 from typing import Any
 
+from .models import GeminiAdDetection, GeminiDetectionResponse
+
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
 DEFAULT_THINKING_LEVEL = "minimal"
 VALID_THINKING_LEVELS = ("minimal", "low", "medium", "high")
 
 _GEMINI_MAJOR_RE = re.compile(r"^(?:models/)?gemini-(\d+)")
+
+
+def validate_detections(payload: Any) -> list[GeminiAdDetection]:
+    """Reject invalid provider data instead of claiming complete empty coverage."""
+    return GeminiDetectionResponse.model_validate(payload).ads
 
 
 def supports_thinking_level(model: str) -> bool:

@@ -18,7 +18,7 @@ from adnihilator.ad_timestamps import extract_ad_timestamps
 from adnihilator.audio import get_duration
 from adnihilator.config import load_config
 from adnihilator.external_transcript import fetch_external_transcript
-from adnihilator.models import AdSpan, DetectionResult
+from adnihilator.models import AdSpan, DetectionResult, FinalAdReview
 from adnihilator.splice import splice_audio
 from adnihilator.sponsors import extract_sponsors
 from adnihilator.transcribe import transcribe_audio, transcribe_audio_parakeet
@@ -1429,8 +1429,6 @@ content cannot be recovered from the processed file."""
                 response_format={"type": "json_object"},
             )
 
-            result = json.loads(response.choices[0].message.content or "{}")
-
             usage = {
                 "provider": "openai",
                 "model": self.config.llm.model,
@@ -1438,18 +1436,31 @@ content cannot be recovered from the processed file."""
                 "output_tokens": response.usage.completion_tokens if response.usage else 0,
             }
 
-            approved_indices = set(result.get("approved_ads", list(range(len(ad_spans)))))
-            rejected = result.get("rejected_ads", [])
-            merge_suggestions = result.get("merge_suggestions", [])
-            concerns = result.get("concerns", [])
+            content = response.choices[0].message.content
+            if not content or not content.strip():
+                raise ValueError("Empty final review response")
+            result = FinalAdReview.model_validate_json(content)
+            original_count = len(ad_spans)
+            referenced_indices = (
+                result.approved_ads
+                + [rejection.index for rejection in result.rejected_ads]
+                + [index for merge in result.merge_suggestions for index in merge.indices]
+            )
+            if any(index >= original_count for index in referenced_indices):
+                raise ValueError("Final review index is outside the supplied ads")
+
+            approved_indices = set(result.approved_ads)
+            rejected = result.rejected_ads
+            merge_suggestions = result.merge_suggestions
+            concerns = result.concerns
 
             if concerns:
                 for concern in concerns:
                     print(f"    Review concern: {concern}")
 
             for rej in rejected:
-                idx = rej.get("index")
-                reason = rej.get("reason", "unknown")
+                idx = rej.index
+                reason = rej.reason
                 if idx is not None and 0 <= idx < len(ad_spans):
                     ad = ad_spans[idx]
                     if "transcript_explicit" in ad.sources:
@@ -1462,11 +1473,11 @@ content cannot be recovered from the processed file."""
                     approved_indices.discard(idx)
 
             for merge in merge_suggestions:
-                indices = merge.get("indices", [])
+                indices = merge.indices
                 valid_indices = [i for i in indices if 0 <= i < len(ad_spans) and i in approved_indices]
                 if len(valid_indices) >= 2:
                     to_merge = [ad_spans[i] for i in valid_indices]
-                    print(f"    Merging ads {valid_indices}: {merge.get('reason', '')}")
+                    print(f"    Merging ads {valid_indices}: {merge.reason}")
                     merged = AdSpan(
                         start=min(s.start for s in to_merge),
                         end=max(s.end for s in to_merge),
@@ -1483,8 +1494,11 @@ content cannot be recovered from the processed file."""
             final_spans = [ad_spans[i] for i in sorted(approved_indices) if i < len(ad_spans)]
             final_spans.sort(key=lambda x: x.start)
 
-            overall_confidence = result.get("overall_confidence", 0.8)
-            print(f"    Final review confidence: {overall_confidence:.0%}")
+            overall_confidence = result.overall_confidence
+            if overall_confidence is None:
+                print("    Final review confidence: not provided")
+            else:
+                print(f"    Final review confidence: {overall_confidence:.0%}")
 
             return final_spans, usage
 
@@ -1931,6 +1945,7 @@ range. If you cannot find any clear ad copy, return an empty list."""
             # Track LLM usage for this job
             llm_usage = None  # Will be populated if LLM is used
             detection_source = None  # Track which method detected ads
+            transcript_detection_pending = False
             raw_gemini_candidates = []  # Store raw Gemini candidates for debugging
 
             # Extract sponsors from description
@@ -2009,10 +2024,12 @@ range. If you cannot find any clear ad copy, return an empty list."""
                         else:
                             transcript_source = "external"
                         detection_source = "external"
+                        transcript_detection_pending = True
                         print(f"    Found external transcript ({transcript_source}): {len(segments)} segments")
 
                 # Check if parallel mode enabled
                 if self.config.detection.parallel_enabled:
+                    transcript_detection_pending = False
                     # PARALLEL DETECTION MODE
                     import concurrent.futures
 
@@ -2351,9 +2368,13 @@ range. If you cannot find any clear ad copy, return an empty list."""
                                 print(f"    Gemini cost: ${llm_usage['cost']:.4f}")
 
                         except Exception as e:
-                            print(f"  Warning: Gemini detection failed: {e}")
-                            print("  Falling back to Whisper...")
-                            gemini_client = None  # Fall through to Whisper
+                            raise DetectionSafetyError(
+                                f"Required Gemini detection failed; refusing to splice episode: {e}"
+                            ) from e
+                    elif self.config.gemini.enabled:
+                        raise DetectionSafetyError(
+                            "Required Gemini detection is unavailable; refusing to splice episode"
+                        )
 
                 # TIER 3: Fall back to Whisper if no external transcript and Gemini failed/disabled
                 if segments is None and not ad_spans:
@@ -2393,6 +2414,7 @@ range. If you cannot find any clear ad copy, return an empty list."""
                         )
                         print(f"    Two-pass complete: {len(segments)} segments, {len(ad_spans)} ads detected")
                     else:
+                        transcript_detection_pending = True
                         self.api_client.update_progress(job.id, "transcribing", 0)
 
                         def on_transcribe_progress(percent: int) -> None:
@@ -2425,10 +2447,13 @@ range. If you cannot find any clear ad copy, return an empty list."""
                             f.write(f"[{seg.start:.1f}s - {seg.end:.1f}s] {seg.text}\n")
                     print(f"  Saved transcript to {transcript_path}")
 
-                # If we don't have ad_spans yet (external transcript or single-pass mode),
-                # run heuristic detection + LLM refinement
-                # Skip if parallel detection already ran (detection_source will be set)
-                if not ad_spans and segments and detection_source is None:
+                # A source label records provenance, not whether detection ran.
+                # External and single-pass transcripts still require this stage.
+                if transcript_detection_pending:
+                    if not segments:
+                        raise DetectionSafetyError(
+                            "Required transcript detection has no transcript; refusing to splice episode"
+                        )
                     # Detect ads
                     print("  Detecting ads...")
                     self.api_client.update_progress(job.id, "detecting")

@@ -18,6 +18,7 @@ from .gemini_common import (
     create_genai_client,
     extract_usage,
     file_state_name,
+    validate_detections,
 )
 from .models import AdSpan, SponsorInfo
 
@@ -148,28 +149,18 @@ class GeminiAudioClient:
 
             # Convert to AdSpan objects
             ad_spans = []
-            for ad in result.get("ads", []):
-                start_time = ad.get("start_time")
-                end_time = ad.get("end_time")
-
-                # Validate timestamps
-                if start_time is None or end_time is None:
-                    logger.warning(f"Skipping ad with missing timestamps: {ad}")
-                    continue
-
-                if start_time >= end_time:
-                    logger.warning(f"Skipping ad with invalid time range: {ad}")
-                    continue
-
-                sponsor = ad.get("sponsor", "Unknown")
-                ad_type = ad.get("ad_type")
-                reason = ad.get("reason", "")
+            for ad in validate_detections(result):
+                start_time = ad.start_time
+                end_time = ad.end_time
+                sponsor = ad.sponsor
+                ad_type = ad.ad_type
+                reason = ad.reason
 
                 ad_spans.append(
                     AdSpan(
                         start=start_time,
                         end=end_time,
-                        confidence=ad.get("confidence", 0.95),
+                        confidence=ad.confidence if "confidence" in ad.model_fields_set else 0.95,
                         reason=f"Gemini: {sponsor} ({ad_type or 'unknown'}) - {reason}",
                         candidate_indices=[],  # Not applicable for Gemini
                         ad_type=ad_type,
