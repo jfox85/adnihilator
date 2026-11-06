@@ -7,11 +7,14 @@ model = "gpt-4o-mini"
 api_key_env = "OPENAI_API_KEY"
 
 [gemini]
-# Enable Gemini 2.5 Flash for audio-based ad detection
-# This is faster (~41s) but more expensive (~$0.087/episode) than Whisper+LLM
+# Enable Gemini 3.5 Flash-Lite for audio-based ad detection (google-genai SDK)
 enabled = true
 api_key_env = "GEMINI_API_KEY"
-model = "gemini-2.5-flash"
+model = "gemini-3.5-flash-lite"
+# Gemini 3+ thinking level: minimal (default for 3.5 Flash-Lite), low, medium, high.
+# Not sent for pre-Gemini-3 model overrides. Sampling params (temperature/top_p/top_k)
+# are deprecated for Gemini 3.5+ and intentionally not configurable.
+thinking_level = "minimal"
 # Use chunked detection for episodes longer than this (seconds)
 # Chunked mode splits audio into 5-min chunks for more reliable detection
 # Default: 1800 (30 minutes)
