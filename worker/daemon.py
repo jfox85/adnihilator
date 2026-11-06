@@ -1,6 +1,7 @@
 """Worker daemon for processing podcast episodes."""
 
 import json
+import math
 import os
 import re
 import subprocess
@@ -18,7 +19,7 @@ from adnihilator.ad_timestamps import extract_ad_timestamps
 from adnihilator.audio import get_duration
 from adnihilator.config import load_config
 from adnihilator.external_transcript import fetch_external_transcript
-from adnihilator.models import AdSpan, DetectionResult, FinalAdReview
+from adnihilator.models import AdSpan, DetectionResult, FinalAdReview, TranscriptAdDetection, TranscriptSegment
 from adnihilator.provider_errors import redact_secrets
 from adnihilator.provider_responses import completed_openai_text
 from adnihilator.splice import splice_audio
@@ -135,6 +136,14 @@ class WorkerDaemon:
                 raise DetectionSafetyError(
                     f"Gemini runtime is unavailable; refusing to start worker: {redact_secrets(str(e), extra_secrets=[self.config.gemini.api_key])}"
                 ) from None
+
+    @staticmethod
+    def _ensure_required_transcript(segments: list[TranscriptSegment] | None) -> None:
+        """A required text lane must supply actual transcript evidence."""
+        if not segments or not any(segment.text.strip() for segment in segments):
+            raise DetectionSafetyError(
+                "Required transcript detection has no transcript; refusing to splice episode"
+            )
 
     @staticmethod
     def _ensure_parallel_detection_succeeded(
@@ -1297,7 +1306,7 @@ Return JSON:
             )
 
             import json
-            result = json.loads(response.choices[0].message.content or "{}")
+            result = json.loads(completed_openai_text(response))
 
             usage = {
                 "provider": "openai",
@@ -1306,16 +1315,17 @@ Return JSON:
                 "output_tokens": response.usage.completion_tokens if response.usage else 0,
             }
 
-            if result.get("found") and result.get("ad_start") is not None and result.get("ad_end") is not None:
-                start = max(window_start, min(float(result["ad_start"]), window_end))
-                end = max(window_start, min(float(result["ad_end"]), window_end))
+            if result.get("found") is True:
+                decision = TranscriptAdDetection.model_validate(result)
+                start = max(window_start, decision.ad_start)
+                end = min(window_end, decision.ad_end)
 
                 if start < end:
                     return [AdSpan(
                         start=start,
                         end=end,
-                        confidence=result.get("confidence", 0.7),
-                        reason=f"hunt_mode: {result.get('reason', 'found ' + sponsor_name)}",
+                        confidence=decision.confidence,
+                        reason=f"hunt_mode: {decision.reason if 'reason' in decision.model_fields_set else 'found ' + sponsor_name}",
                         sources=["hunt"],
                         candidate_indices=[],
                     )], usage
@@ -1868,7 +1878,7 @@ range. If you cannot find any clear ad copy, return an empty list."""
                 if response.usage:
                     usage_total["input_tokens"] += response.usage.prompt_tokens
                     usage_total["output_tokens"] += response.usage.completion_tokens
-                result = json.loads(response.choices[0].message.content or "{}")
+                result = json.loads(completed_openai_text(response))
             except Exception as e:
                 print(f"    Mega-span refine failed ({redact_secrets(str(e), extra_secrets=[llm_client.api_key])}), keeping original span")
                 refined.append(span)
@@ -1888,8 +1898,15 @@ range. If you cannot find any clear ad copy, return an empty list."""
             malformed = False
             for r in ranges:
                 try:
-                    rs = max(span.start, float(r["start"]))
-                    re_ = min(span.end, float(r["end"]))
+                    raw_start = float(r["start"])
+                    raw_end = float(r["end"])
+                    if (isinstance(r["start"], bool) or isinstance(r["end"], bool)
+                            or not math.isfinite(raw_start) or not math.isfinite(raw_end)
+                            or raw_end <= raw_start):
+                        malformed = True
+                        break
+                    rs = max(span.start, raw_start)
+                    re_ = min(span.end, raw_end)
                 except (KeyError, TypeError, ValueError):
                     # A malformed entry could be half of a real multi-part ad.
                     # Bail to the conservative original-span fallback rather
@@ -1897,7 +1914,8 @@ range. If you cannot find any clear ad copy, return an empty list."""
                     malformed = True
                     break
                 if re_ <= rs:
-                    continue
+                    malformed = True
+                    break
                 sub_spans.append(AdSpan(
                     start=rs,
                     end=re_,
@@ -2014,7 +2032,10 @@ range. If you cannot find any clear ad copy, return an empty list."""
                 # TIER 2a: Try external transcript first (FREE - if source_url available)
                 if job.source_url:
                     print("  Checking for external transcript...")
-                    segments = fetch_external_transcript(job.source_url)
+                    external_segments = fetch_external_transcript(job.source_url)
+                    segments = external_segments if external_segments and any(
+                        segment.text.strip() for segment in external_segments
+                    ) else None
                     if segments:
                         # Determine source based on URL
                         if 'lexfridman.com' in job.source_url:
@@ -2093,6 +2114,7 @@ range. If you cannot find any clear ad copy, return an empty list."""
                                     )
                                 transcript_source = self.engine
 
+                            self._ensure_required_transcript(segments)
                             # Find keyword candidates
                             cands = find_ad_candidates(
                                 segments, duration, sponsors=sponsor_info, podcast_name=job.podcast_title
@@ -2380,8 +2402,8 @@ range. If you cannot find any clear ad copy, return an empty list."""
                 if segments is None and not ad_spans:
                     detection_source = "whisper"
 
-                    # Create LLM client to determine transcription strategy
-                    llm_client = create_llm_client(self.config)
+                    # Required worker decisions cannot use optional CLI fallback.
+                    llm_client = create_llm_client(self.config, require_success=True)
 
                     # Use two-pass mode if LLM is OpenAI (fast segment-level + targeted word-level)
                     if isinstance(llm_client, OpenAIClient):
@@ -2412,6 +2434,7 @@ range. If you cannot find any clear ad copy, return an empty list."""
                             podcast_name=job.podcast_title,
                             engine=self.engine,
                         )
+                        self._ensure_required_transcript(segments)
                         print(f"    Two-pass complete: {len(segments)} segments, {len(ad_spans)} ads detected")
                     else:
                         transcript_detection_pending = True
@@ -2450,10 +2473,7 @@ range. If you cannot find any clear ad copy, return an empty list."""
                 # A source label records provenance, not whether detection ran.
                 # External and single-pass transcripts still require this stage.
                 if transcript_detection_pending:
-                    if not segments:
-                        raise DetectionSafetyError(
-                            "Required transcript detection has no transcript; refusing to splice episode"
-                        )
+                    self._ensure_required_transcript(segments)
                     # Detect ads
                     print("  Detecting ads...")
                     self.api_client.update_progress(job.id, "detecting")
@@ -2464,7 +2484,7 @@ range. If you cannot find any clear ad copy, return an empty list."""
                     # Refine with LLM
                     print("  Refining with LLM...")
                     self.api_client.update_progress(job.id, "refining")
-                    llm_client = create_llm_client(self.config)
+                    llm_client = create_llm_client(self.config, require_success=True)
                     ad_spans = llm_client.refine_candidates(
                         segments, candidates, self.config,
                         sponsors=sponsor_info, podcast_title=job.podcast_title

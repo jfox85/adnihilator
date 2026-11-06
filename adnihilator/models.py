@@ -69,6 +69,39 @@ class MergedDetectionResponse(BaseModel):
     ads: list[MergedAdDetection]
 
 
+class TranscriptAdDetection(BaseModel):
+    """A complete line-index or legacy timestamp transcript decision."""
+
+    model_config = ConfigDict(strict=True, allow_inf_nan=False)
+    start_line: int | None = Field(default=None, ge=0)
+    end_line: int | None = Field(default=None, ge=0)
+    ad_start: float | None = None
+    ad_end: float | None = None
+    confidence: float = Field(default=0.7, ge=0, le=1)
+    reason: str = "LLM analysis"
+
+    @model_validator(mode="after")
+    def validate_bounds(self) -> "TranscriptAdDetection":
+        """Never silently skip missing, reversed or partial boundary pairs."""
+        has_lines = self.start_line is not None or self.end_line is not None
+        has_times = self.ad_start is not None or self.ad_end is not None
+        if has_lines:
+            if self.start_line is None or self.end_line is None or self.end_line < self.start_line:
+                raise ValueError("Transcript line bounds must be a complete ordered pair")
+        if has_times and (self.ad_start is None or self.ad_end is None or self.ad_end <= self.ad_start):
+            raise ValueError("Transcript timestamps must be a complete increasing pair")
+        if not has_lines and not has_times:
+            raise ValueError("Transcript decision must provide line bounds or timestamps")
+        return self
+
+
+class TranscriptRefinementResponse(BaseModel):
+    """A required transcript refinement must explicitly decide every ad record."""
+
+    model_config = ConfigDict(strict=True)
+    ads: list[TranscriptAdDetection]
+
+
 class FinalReviewRejection(BaseModel):
     """An explicit rejection of one supplied advertisement index."""
 

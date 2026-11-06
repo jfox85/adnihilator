@@ -1,11 +1,20 @@
 """LLM-based advertisement refinement."""
 
 import json
+import math
 from abc import ABC, abstractmethod
 from typing import Any
 
 from .config import Config
-from .models import AdCandidate, AdSpan, MergedDetectionResponse, SponsorInfo, TranscriptSegment
+from .models import (
+    AdCandidate,
+    AdSpan,
+    MergedDetectionResponse,
+    SponsorInfo,
+    TranscriptAdDetection,
+    TranscriptRefinementResponse,
+    TranscriptSegment,
+)
 from .provider_responses import completed_openai_text
 from .redaction import redact_secrets
 
@@ -56,6 +65,10 @@ BOUNDARY RULES:
 2. END: Include all back-to-back sponsors as one block - end AFTER the final URL/CTA
 3. Back-to-back sponsors (Sponsor A -> Sponsor B) are ONE ad block
 4. Be CONSERVATIVE - when in doubt, it's probably content, not an ad"""
+
+
+class InvalidRefinementResponse(ValueError):
+    """A required refinement did not produce a complete authoritative decision."""
 
 
 class AdLLMClient(ABC):
@@ -167,17 +180,22 @@ def merge_nearby_candidates(
 class OpenAIClient(AdLLMClient):
     """OpenAI-based LLM client for ad refinement."""
 
-    def __init__(self, api_key: str, model: str = "gpt-4.1-mini", base_url: str | None = None):
+    def __init__(
+        self, api_key: str, model: str = "gpt-4.1-mini", base_url: str | None = None,
+        *, require_success: bool = False,
+    ) -> None:
         """Initialize the OpenAI client.
 
         Args:
             api_key: OpenAI API key.
             model: Model to use.
             base_url: Optional custom base URL for API.
+            require_success: Reject API errors instead of optional heuristic fallback.
         """
         self.api_key = api_key
         self.model = model
         self.base_url = base_url
+        self.require_success = require_success
 
     def refine_candidates(
         self,
@@ -193,7 +211,11 @@ class OpenAIClient(AdLLMClient):
         except ImportError:
             raise ImportError("openai is required. Run: pip install openai")
 
-        client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+        try:
+            client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+        except Exception as error:
+            safe_error = redact_secrets(str(error), extra_secrets=[self.api_key])
+            raise InvalidRefinementResponse(f"OpenAI refinement client unavailable: {safe_error}") from None
 
         # Merge nearby candidates first
         merged_candidates = merge_nearby_candidates(candidates, MERGE_THRESHOLD)
@@ -234,56 +256,46 @@ class OpenAIClient(AdLLMClient):
                     api_params["temperature"] = 0.1
                 response = client.chat.completions.create(**api_params)
 
-                result = self._parse_response(response.choices[0].message.content or "")
+                try:
+                    result = TranscriptRefinementResponse.model_validate(
+                        self._parse_response(completed_openai_text(response))
+                    )
+                    if not context_segments:
+                        raise ValueError("No transcript context for refinement")
+                    for ad in result.ads:
+                        if ad.start_line is not None:
+                            if ad.start_line >= len(context_segments) or ad.end_line >= len(context_segments):
+                                raise ValueError("Transcript line index is outside the supplied context")
+                            ad_start = context_segments[ad.start_line].start
+                            ad_end = context_segments[ad.end_line].end
+                        else:
+                            # Preserve legacy timestamps while requiring overlap
+                            # with actual supplied transcript evidence.
+                            ad_start = max(context_segments[0].start, ad.ad_start)
+                            ad_end = min(max(segment.end for segment in context_segments), ad.ad_end)
+                        if not math.isfinite(ad_start) or not math.isfinite(ad_end) or ad_start >= ad_end:
+                            raise ValueError("Transcript detection does not overlap valid transcript context")
+                        spans.append(AdSpan(
+                            start=ad_start, end=ad_end, confidence=ad.confidence,
+                            reason=ad.reason, candidate_indices=candidate_indices,
+                        ))
+                except Exception as error:
+                    safe_error = redact_secrets(str(error), extra_secrets=[self.api_key])
+                    raise InvalidRefinementResponse(f"Invalid OpenAI transcript decision: {safe_error}") from None
 
-                # Handle ads list from response
-                ads_list = result.get("ads", [])
-
-                for ad_result in ads_list:
-                    # New format: line numbers that we map to timestamps
-                    start_line = ad_result.get("start_line")
-                    end_line = ad_result.get("end_line")
-
-                    if start_line is not None and end_line is not None:
-                        # Map line numbers to timestamps using context_segments
-                        if 0 <= start_line < len(context_segments) and 0 <= end_line < len(context_segments):
-                            ad_start = context_segments[start_line].start
-                            ad_end = context_segments[end_line].end
-
-                            if ad_start < ad_end:
-                                spans.append(
-                                    AdSpan(
-                                        start=ad_start,
-                                        end=ad_end,
-                                        confidence=ad_result.get("confidence", 0.7),
-                                        reason=ad_result.get("reason", "LLM analysis"),
-                                        candidate_indices=candidate_indices,
-                                    )
-                                )
-                    else:
-                        # Backwards compatibility: direct timestamps
-                        ad_start = ad_result.get("ad_start")
-                        ad_end = ad_result.get("ad_end")
-
-                        if ad_start is not None and ad_end is not None and ad_start < ad_end:
-                            spans.append(
-                                AdSpan(
-                                    start=ad_start,
-                                    end=ad_end,
-                                    confidence=ad_result.get("confidence", 0.7),
-                                    reason=ad_result.get("reason", "LLM analysis"),
-                                    candidate_indices=candidate_indices,
-                                )
-                            )
-
+            except InvalidRefinementResponse:
+                raise
             except Exception as e:
+                safe_error = redact_secrets(str(e), extra_secrets=[self.api_key])
+                if self.require_success:
+                    raise InvalidRefinementResponse(f"Required OpenAI refinement failed: {safe_error}") from None
                 # Fall back to heuristic for this candidate
                 spans.append(
                     AdSpan(
                         start=merged_candidate.start,
                         end=merged_candidate.end,
                         confidence=merged_candidate.heuristic_score * 0.6,
-                        reason=f"heuristic_fallback (LLM error: {str(e)[:50]})",
+                        reason=f"heuristic_fallback (LLM error: {safe_error[:50]})",
                         candidate_indices=candidate_indices,
                     )
                 )
@@ -413,28 +425,17 @@ If NO ads found: {{"ads": [], "reason": "<explanation>"}}"""
         """Parse LLM response JSON."""
         content = content.strip()
 
-        # Handle markdown code blocks
-        if "```" in content:
-            # Extract content between code fences
-            parts = content.split("```")
-            for part in parts:
-                part = part.strip()
-                if part.startswith("json"):
-                    part = part[4:].strip()
-                if part.startswith("{"):
-                    content = part
-                    break
+        # Retain the conventional complete JSON fence, but never salvage a
+        # partial object from an unfinished response or surrounding content.
+        if content.startswith("```") and content.endswith("```"):
+            content = content[3:-3].strip()
+            if content.startswith("json"):
+                content = content[4:].strip()
 
-        # Try to find JSON object in response
-        start = content.find("{")
-        end = content.rfind("}") + 1
-        if start >= 0 and end > start:
-            content = content[start:end]
-
-        try:
-            return json.loads(content)
-        except json.JSONDecodeError:
-            return {"ads": [], "reason": "Failed to parse LLM response", "confidence": 0.5}
+        result = json.loads(content)
+        if not isinstance(result, dict):
+            raise ValueError("OpenAI refinement must return a JSON object")
+        return result
 
     def _hunt_missing_sponsors(
         self,
@@ -502,15 +503,20 @@ If NO ads found: {{"ads": [], "reason": "<explanation>"}}"""
                     hunt_params["temperature"] = 0.1
                 response = client.chat.completions.create(**hunt_params)
 
-                result = self._parse_response(response.choices[0].message.content or "")
+                result = self._parse_response(completed_openai_text(response))
 
                 for ad in result.get("ads", []):
-                    if ad.get("is_ad") and ad.get("ad_start") is not None and ad.get("ad_end") is not None:
+                    if ad.get("is_ad") is True:
+                        validated = TranscriptAdDetection.model_validate(ad)
+                        start = max(window_start, validated.ad_start)
+                        end = min(window_end, validated.ad_end)
+                        if start >= end:
+                            raise ValueError("Hunt detection does not overlap its transcript window")
                         hunt_spans.append(AdSpan(
-                            start=ad["ad_start"],
-                            end=ad["ad_end"],
-                            confidence=ad.get("confidence", 0.6),
-                            reason=f"hunt_mode: {ad.get('reason', 'found missing sponsor')}",
+                            start=start,
+                            end=end,
+                            confidence=validated.confidence if "confidence" in validated.model_fields_set else 0.6,
+                            reason=f"hunt_mode: {validated.reason if 'reason' in validated.model_fields_set else 'found missing sponsor'}",
                             candidate_indices=[],
                         ))
             except Exception:
@@ -811,11 +817,12 @@ Analyze the candidates and transcript to produce refined ad boundaries."""
         return result
 
 
-def create_llm_client(config: Config) -> AdLLMClient:
+def create_llm_client(config: Config, *, require_success: bool = False) -> AdLLMClient:
     """Create an LLM client based on configuration.
 
     Args:
         config: Configuration object.
+        require_success: Disable optional API-error fallback for required worker decisions.
 
     Returns:
         An AdLLMClient implementation.
@@ -835,6 +842,7 @@ def create_llm_client(config: Config) -> AdLLMClient:
             api_key=api_key,
             model=config.llm.model,
             base_url=config.llm.base_url,
+            require_success=require_success,
         )
 
     raise ValueError(f"Unknown LLM provider: {provider}. Supported: none, openai")

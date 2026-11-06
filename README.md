@@ -169,7 +169,14 @@ device = "cpu"   # or "cuda" for GPU
 1. Description timestamps (if high-confidence timestamps found)
 2. External transcript (if `source_url` available)
 3. Gemini audio detection (if enabled and API key set)
-4. Whisper + LLM refinement (fallback)
+4. Local transcription and refinement when no earlier detection path supplied coverage
+
+Required worker detection fails before splicing when an enabled provider fails,
+its decision is incomplete or invalid, or a required transcript is missing.
+Two-pass and parallel modes both require transcript evidence; valid explicit
+no-ad decisions remain successful. Optional external lookups may fall back to
+local transcription. Explicit `--llm-provider none` retains heuristic detection;
+optional CLI refinement retains its existing API-error heuristic fallback.
 
 ## Web Service Setup (Optional)
 
