@@ -9,7 +9,7 @@ _QUERY_SECRET = re.compile(
     r"(?i)([?&](?:key|api[_-]?key|access_token|token|signature|x-amz-signature|x-amz-credential|x-goog-signature|x-goog-credential)=)[^&\s\"'<>]+"
 )
 _ASSIGNED_SECRET = re.compile(
-    r"(?i)(\b(?:x-goog-api-key|x-api-key|api[_-]?key|access[_-]?key|secret[_-]?key|password|token|key|authorization)[\"']?\s*[:=]\s*[\"']?(?:Bearer\s+)?)[^\s,}\"'&<>]+"
+    r"(?i)(\b(?:x-goog-api-key|x-api-key|api[_-]?key|access[_-]?key|secret[_-]?key|password|token|key|authorization)[\"']?\s*[:=]\s*[\"']?(?:(?:Bearer|Basic)\s+)?)[^\s,}\"'&<>]+"
 )
 
 
@@ -28,4 +28,4 @@ def redact_secrets(message: str, extra_secrets: Iterable[str | None] = ()) -> st
     message = _ASSIGNED_SECRET.sub(r"\1[REDACTED]", message)
     message = re.sub(r"(?i)(\bBearer\s+)[A-Za-z0-9._~+/=-]+", r"\1[REDACTED]", message)
     message = re.sub(r"\b(?:sk-[A-Za-z0-9_-]+|AIza[A-Za-z0-9_-]+)", "[REDACTED]", message)
-    return re.sub(r"(https?://)[^/@\s]+:[^/@\s]+@", r"\1[REDACTED]@", message)
+    return re.sub(r"(?i)(https?://)[^/?#@\s]+@", r"\1[REDACTED]@", message)
