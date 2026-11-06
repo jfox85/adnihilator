@@ -11,7 +11,7 @@
         <div class="podcast-artwork-placeholder">No Art</div>
         {% endif %}
         <div class="podcast-details">
-            <h2>{{ podcast.title or "Untitled Podcast" }}</h2>
+            <h2>{{ podcast.title or ("Subscription needs attention" if podcast.last_sync_error else "Untitled Podcast") }}</h2>
             {% if podcast.description %}
             <p class="podcast-description">{{ (podcast.description|regex_replace('\n+', ' '))[:300] }}{% if podcast.description|length > 300 %}...{% endif %}</p>
             {% endif %}
@@ -23,6 +23,9 @@
                     <button onclick="copyFeedUrl()" class="btn-copy" title="Copy feed URL">📋</button>
                 </span>
             </p>
+            {% if podcast.last_sync_error %}
+            <p class="feed-sync-error" role="alert">{{ podcast.last_sync_error|feed_error }}</p>
+            {% endif %}
             <div class="podcast-header-actions">
                 <span class="last-refreshed" id="lastRefreshed"
                       {% if podcast.last_synced_at %}
@@ -33,7 +36,7 @@
                     {{ podcast.last_synced_at|relative_time }}
                     {% endif %}
                 </span>
-                <button onclick="refreshPodcast()" class="btn-refresh" id="refreshBtn">Refresh</button>
+                <button onclick="refreshPodcast()" class="btn-refresh" id="refreshBtn">{{ "Retry" if podcast.last_sync_error else "Refresh" }}</button>
             </div>
         </div>
     </div>
@@ -148,7 +151,11 @@
         {% endfor %}
     </div>
     {% else %}
+    {% if podcast.last_sync_error %}
+    <p>Episodes could not be loaded. Choose Retry to update this feed.</p>
+    {% else %}
     <p>No episodes found. The feed will be synced automatically.</p>
+    {% endif %}
     {% endif %}
 </div>
 
@@ -427,30 +434,14 @@ async function refreshPodcast() {
     const btn = document.getElementById('refreshBtn');
     btn.disabled = true;
     btn.textContent = 'Refreshing...';
-
-    const response = await fetch(`/podcasts/${podcastId}/sync`, {
-        method: 'POST',
-        credentials: 'include'
-    });
-    if (response.ok) {
-        const data = await response.json();
-        // Update last refreshed timestamp
-        const elem = document.getElementById('lastRefreshed');
-        if (elem && data.last_synced_at) {
-            elem.textContent = formatRelativeTime(data.last_synced_at);
-            elem.dataset.timestamp = data.last_synced_at;
-            elem.title = formatFullTimestamp(data.last_synced_at);
-        }
-        if (data.episodes_added > 0) {
-            alert(`Refreshed: ${data.episodes_added} new episodes. Reloading page...`);
-            window.location.reload();
-        }
+    try {
+        await fetch(`/podcasts/${podcastId}/sync`, {method: 'POST', credentials: 'include'});
+        // Render the persisted success or failure consistently with Dashboard.
+        window.location.reload();
+    } catch (error) {
         btn.disabled = false;
-        btn.textContent = 'Refresh';
-    } else {
-        alert('Failed to refresh podcast');
-        btn.disabled = false;
-        btn.textContent = 'Refresh';
+        btn.textContent = 'Retry';
+        alert('Could not reach the service. Try refreshing again.');
     }
 }
 
@@ -505,6 +496,7 @@ function sortEpisodes() {
 </script>
 
 <style>
+.feed-sync-error { overflow-wrap: anywhere; }
 .podcast-header {
     display: flex;
 }

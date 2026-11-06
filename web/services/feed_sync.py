@@ -4,13 +4,16 @@ from collections.abc import Mapping
 from datetime import datetime
 from email.message import Message
 from hashlib import sha256
+import re
 from time import mktime
-from urllib.parse import urlsplit, urlunsplit
+from urllib.error import URLError
+from urllib.parse import urljoin, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request
 
 import feedparser
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from adnihilator.redaction import redact_secrets
 
@@ -28,6 +31,20 @@ class _HTTPOnlyRedirect(HTTPRedirectHandler):
     # feedparser adds its own redirect/auth handler at order 490. Our guard
     # must run first; the default urllib redirect order (500) is too late.
     handler_order = 400
+
+    def http_error_302(
+        self, req: Request, fp: object, code: int, msg: str, headers: Message,
+    ) -> object:
+        """Reject unsupported targets before urllib's own redirect handling."""
+        target = headers.get("location") or headers.get("uri")
+        if target and not is_usable_audio_url(urljoin(req.full_url, target)):
+            raise FeedSyncError("Feed redirect must use an HTTP(S) URL with a host")
+        return super().http_error_302(req, fp, code, msg, headers)
+
+    http_error_301 = http_error_302
+    http_error_303 = http_error_302
+    http_error_307 = http_error_302
+    http_error_308 = http_error_302
 
     def redirect_request(
         self, req: Request, fp: object, code: int, msg: str,
@@ -76,6 +93,31 @@ def _sync_failure(db: Session, podcast_id: str, error: Exception) -> FeedSyncErr
         # original failure and leave the caller's session usable regardless.
         db.rollback()
     return FeedSyncError(message)
+
+
+def feed_error_message(diagnostic: str | None) -> str | None:
+    """Present an actionable feed failure without exposing internal diagnostics.
+
+    Read-time formatting also covers previously saved errors, leaving their
+    safe diagnostic detail unchanged for administrative API clients.
+    """
+    if not diagnostic:
+        return None
+    reason = re.sub(r"^Feed sync failed(?: \([^)]*\))?:\s*", "", redact_secrets(diagnostic))
+    http_status = re.match(r"Feed server returned HTTP (\d{3})\b", reason)
+    if http_status:
+        message = f"The feed server returned HTTP {http_status.group(1)}."
+    elif reason.startswith("Could not connect to the feed server"):
+        message = "Could not connect to the feed server."
+    elif reason.startswith("Response is not a recognized RSS or Atom feed"):
+        message = "The server response is not an RSS or Atom feed."
+    elif reason.startswith("Feed redirect must use"):
+        message = "The feed redirected to an unsupported address. Only HTTP and HTTPS are allowed."
+    elif reason.startswith("Feed URL must use"):
+        message = "The feed address must use HTTP or HTTPS."
+    else:
+        message = "The feed could not be updated."
+    return f"{message} Check the feed URL or choose Retry."
 
 
 def parse_duration(duration_str: str | None) -> int | None:
@@ -149,6 +191,11 @@ def _sync_podcast_entries(db: Session, podcast: Podcast) -> int:
     response_status = feed.get("status")
     if isinstance(response_status, int) and response_status >= 400:
         raise FeedSyncError(f"Feed server returned HTTP {response_status}")
+    parse_error = feed.get("bozo_exception")
+    if isinstance(parse_error, FeedSyncError):
+        raise parse_error
+    if isinstance(parse_error, URLError):
+        raise FeedSyncError("Could not connect to the feed server") from None
     if not feed.get("version") and not feed.entries:
         raise FeedSyncError("Response is not a recognized RSS or Atom feed")
 
@@ -218,6 +265,10 @@ def _sync_podcast_entries(db: Session, podcast: Podcast) -> int:
         added += 1
 
     podcast.last_sync_error = None
+    # A concurrent failed refresh may have saved an error after this instance
+    # loaded NULL. Include NULL in the same successful UPDATE even when the
+    # in-memory value appears unchanged, so the last success really clears it.
+    flag_modified(podcast, "last_sync_error")
     podcast.last_synced_at = datetime.utcnow()
     db.commit()
     return added

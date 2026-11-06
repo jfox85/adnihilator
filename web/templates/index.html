@@ -4,7 +4,12 @@
 <div class="card">
     <h2>Add Podcast</h2>
     <form action="/podcasts" method="post">
-        <input type="url" name="source_rss_url" placeholder="https://example.com/feed.xml" required>
+        {% if source_rss_error %}
+        <p id="source-rss-error" class="feed-sync-error" role="alert">{{ source_rss_error }}</p>
+        {% endif %}
+        <input type="url" name="source_rss_url" aria-label="Podcast feed URL"
+               placeholder="https://example.com/feed.xml" value="{{ source_rss_url or '' }}"
+               {% if source_rss_error %}aria-invalid="true" aria-describedby="source-rss-error"{% endif %} required>
         <button type="submit">Add Podcast</button>
     </form>
 </div>
@@ -40,7 +45,7 @@
                     <button onclick="copyFeedUrl('{{ podcast.feed_token }}')" class="btn-copy" title="Copy feed URL" aria-label="Copy feed URL">📋</button>
                 </span>
                 {% if podcast.last_sync_error %}
-                <p class="feed-sync-error" role="alert">{{ podcast.last_sync_error }}</p>
+                <p class="feed-sync-error" role="alert">{{ podcast.last_sync_error|feed_error }}</p>
                 {% endif %}
             </div>
             <div class="podcast-item-actions">

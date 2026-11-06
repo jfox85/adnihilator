@@ -27,6 +27,7 @@ from .database import get_engine, init_db, get_session_factory
 from .dependencies import get_db
 from .routes import podcasts, api, feeds, opml
 from .services.scheduler import create_scheduler
+from .services.feed_sync import feed_error_message
 from . import dependencies
 
 # Configure logging
@@ -69,6 +70,7 @@ def relative_time(dt: datetime | None) -> str:
 # Register custom filters
 templates.env.filters["regex_replace"] = regex_replace
 templates.env.filters["relative_time"] = relative_time
+templates.env.filters["feed_error"] = feed_error_message
 
 
 @asynccontextmanager

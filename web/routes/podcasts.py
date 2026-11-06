@@ -13,6 +13,7 @@ from ..dependencies import get_db
 from ..auth import verify_admin
 from ..models import Podcast
 from ..services.audio import is_usable_audio_url
+from ..services.feed_sync import feed_error_message
 from ..values import finite_nonnegative_number
 
 router = APIRouter(prefix="/podcasts", tags=["podcasts"])
@@ -50,6 +51,7 @@ def relative_time(dt: datetime | None) -> str:
 # Register custom filters
 templates.env.filters["regex_replace"] = regex_replace
 templates.env.filters["relative_time"] = relative_time
+templates.env.filters["feed_error"] = feed_error_message
 
 
 @router.get("")
@@ -75,6 +77,7 @@ async def list_podcasts(
 
 @router.post("")
 async def add_podcast(
+    request: Request,
     source_rss_url: str = Form(...),
     db: Session = Depends(get_db),
     _: None = Depends(verify_admin),
@@ -83,6 +86,15 @@ async def add_podcast(
     from ..services.feed_sync import sync_podcast
 
     if not is_usable_audio_url(source_rss_url):
+        if "text/html" in request.headers.get("accept", ""):
+            return templates.TemplateResponse(
+                request, "index.html",
+                {"title": "Dashboard",
+                 "podcasts": db.query(Podcast).order_by(Podcast.created_at.desc()).all(),
+                 "source_rss_url": source_rss_url,
+                 "source_rss_error": "Use an HTTP or HTTPS feed URL."},
+                status_code=422,
+            )
         raise HTTPException(status_code=422, detail="Feed URL must use HTTP(S) with a host")
     podcast = Podcast(source_rss_url=source_rss_url)
     db.add(podcast)

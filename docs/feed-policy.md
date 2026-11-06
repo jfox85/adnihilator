@@ -10,8 +10,14 @@ Do not expose subscription creation to untrusted users without revisiting D11.
 A failed initial fetch/import retains the subscription, records a safe persistent
 `last_sync_error`, and displays **Subscription needs attention** plus **Retry**
 on the dashboard when no title was fetched. Existing titles remain visible.
+Dashboard and episode views show an actionable explanation and Retry for the
+same recorded failure. Browser form validation stays in the dashboard and keeps
+the attempted URL editable; API clients still receive structured 422 errors.
+Detailed safe diagnostics remain stored unchanged; presentation omits internal
+exception classes. Connection failures are distinct from non-feed content.
 Refresh, Retry and Refresh All use the same import boundary. A successful sync
-clears the recorded error and updates the last-success timestamp. Failed imports
+clears the recorded error and updates the last-success timestamp in the same
+commit, including an error saved by a competing refresh after its old snapshot. Failed imports
 roll back episode/metadata changes before saving diagnostics. A database outage
 can also prevent saving diagnostics; the original safe failure is still returned.
 The nullable error column is added to an existing SQLite database at startup;
