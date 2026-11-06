@@ -25,6 +25,7 @@ from .dependencies import get_db
 from .routes import podcasts, api, feeds, opml
 from .services.scheduler import create_scheduler
 from . import dependencies
+from .values import finite_nonnegative_number
 
 # Configure logging
 logging.basicConfig(
@@ -66,6 +67,7 @@ def relative_time(dt: datetime | None) -> str:
 # Register custom filters
 templates.env.filters["regex_replace"] = regex_replace
 templates.env.filters["relative_time"] = relative_time
+templates.env.filters["finite_number"] = finite_nonnegative_number
 
 
 @asynccontextmanager

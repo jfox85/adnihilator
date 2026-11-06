@@ -93,8 +93,11 @@
                     {% if episode.updated_at %}
                     <span class="completed-time">{{ episode.updated_at|relative_time }}</span>
                     {% endif %}
-                    {% if episode.ads_removed_seconds and episode.ads_removed_seconds > 0 %}
-                        {% set ads_removed = episode.ads_removed_seconds|int %}
+                    {% set removed_seconds = episode.ads_removed_seconds|finite_number %}
+                    {% if removed_seconds is none %}
+                    <span class="no-ads">—</span>
+                    {% elif removed_seconds > 0 %}
+                        {% set ads_removed = removed_seconds|int %}
                     <span class="time-saved">Removed {{ (ads_removed // 60) }}min {{ (ads_removed % 60) }}s</span>
                     {% elif episode.status == 'complete' %}
                     <span class="no-ads">No ads detected</span>
