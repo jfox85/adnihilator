@@ -42,8 +42,8 @@
 <div class="card">
     <div class="controls-bar">
         <div class="bulk-actions">
-            <button onclick="queueAll()" class="btn-primary">Adnihilate All</button>
-            <button onclick="skipAll()" class="btn-secondary">Skip All</button>
+            <button id="queueAllBtn" onclick="queueAll()" class="btn-primary">Adnihilate All</button>
+            <button id="skipAllBtn" onclick="skipAll()" class="btn-secondary">Skip All</button>
             <button onclick="toggleAutoProcess()" class="btn-toggle" id="autoProcessBtn">
                 Auto-process: <span id="autoProcessStatus">{{ "ON" if podcast.auto_process else "OFF" }}</span>
             </button>
@@ -111,8 +111,16 @@
                     {{ episode.description|safe }}
                 </div>
                 {% endif %}
-                <div class="episode-error" id="error-{{ episode.id }}" {% if not (episode.error_message and episode.status == 'failed') %}style="display:none"{% endif %}>
-                    <strong>Error:</strong> <span class="error-text">{{ episode.error_message or '' }}</span>
+                <div class="episode-error" id="error-{{ episode.id }}" {% if episode.status != 'failed' %}style="display:none"{% endif %}>
+                    {% if episode.status == 'failed' %}
+                    {% set error = episode.error_message|episode_error %}
+                    <strong class="error-summary">{{ error.summary }}</strong>
+                    <p class="error-action">{{ error.action }}</p>
+                    <details class="diagnostic-details" {% if not error.details %}hidden{% endif %}>
+                        <summary>Diagnostic details</summary>
+                        <pre class="error-text">{{ error.details }}</pre>
+                    </details>
+                    {% endif %}
                 </div>
                 <div class="episode-stats" id="stats-{{ episode.id }}" {% if not episode.ads_removed_seconds %}style="display:none"{% endif %}>
                     <strong>Ads Removed:</strong> <span class="stats-ads">{{ "%.1f"|format(episode.ads_removed_seconds or 0) }}</span>s
@@ -153,6 +161,8 @@ const podcastId = '{{ podcast.id }}';
 const feedUrl = window.location.origin + '/feed/{{ podcast.feed_token }}.xml';
 let pollInterval = null;
 let lastStatuses = {};
+let pollInFlight = false;
+const episodeRows = new Map(Array.from(document.querySelectorAll('.episode-row')).map(row => [row.dataset.id, row]));
 
 function copyFeedUrl() {
     navigator.clipboard.writeText(feedUrl).then(() => {
@@ -176,15 +186,15 @@ function toggleDetails(episodeId) {
 }
 
 function updateEpisodeUI(episodeId, data) {
-    const row = document.querySelector(`[data-id="${episodeId}"]`);
-    if (!row) return;
+    const row = episodeRows.get(episodeId);
+    if (!row) return false;
+    const signature = JSON.stringify(data);
+    if (lastStatuses[episodeId] === signature) return false;
+    lastStatuses[episodeId] = signature;
 
     const oldStatus = row.dataset.status;
     const newStatus = data.status;
 
-    // Skip update if nothing meaningful changed
-    const hasProgressChange = data.progress_step !== undefined || data.progress_percent !== undefined;
-    if (oldStatus === newStatus && !data.ads_removed_seconds && !hasProgressChange) return;
 
     // Update data attribute
     row.dataset.status = newStatus;
@@ -207,9 +217,15 @@ function updateEpisodeUI(episodeId, data) {
     // Update error - only show for failed episodes
     const errorDiv = document.getElementById('error-' + episodeId);
     if (errorDiv) {
-        if (data.error_message && newStatus === 'failed') {
+        if (newStatus === 'failed') {
+            if (!errorDiv.querySelector('.error-summary')) {
+                errorDiv.innerHTML = '<strong class="error-summary"></strong><p class="error-action"></p><details class="diagnostic-details"><summary>Diagnostic details</summary><pre class="error-text"></pre></details>';
+            }
             errorDiv.style.display = '';
-            errorDiv.querySelector('.error-text').textContent = data.error_message;
+            errorDiv.querySelector('.error-summary').textContent = data.error_summary || 'Processing failed';
+            errorDiv.querySelector('.error-action').textContent = data.error_action || 'Retry the episode, or contact the administrator if it keeps failing.';
+            errorDiv.querySelector('.error-text').textContent = data.error_message || '';
+            errorDiv.querySelector('.diagnostic-details').hidden = !data.error_message;
         } else {
             errorDiv.style.display = 'none';
         }
@@ -271,26 +287,24 @@ function updateEpisodeUI(episodeId, data) {
 }
 
 async function pollStatuses() {
+    if (pollInFlight || document.hidden) return;
+    pollInFlight = true;
     try {
-        const response = await fetch(`/podcasts/${podcastId}/episodes/status`, {
-            credentials: 'include'
-        });
-        if (!response.ok) return;
-
-        const data = await response.json();
-
-        // Update auto-process status
+        const data = await requestJSON(`/podcasts/${podcastId}/episodes/status`);
         document.getElementById('autoProcessStatus').textContent = data.auto_process ? 'ON' : 'OFF';
-
-        // Update each episode
+        let statusChanged = false;
         for (const [episodeId, epData] of Object.entries(data.episodes)) {
+            const row = episodeRows.get(episodeId);
+            if (row && row.dataset.status !== epData.status) statusChanged = true;
             updateEpisodeUI(episodeId, epData);
         }
-
-        // Re-apply filter in case statuses changed
-        filterEpisodes();
-    } catch (e) {
-        console.error('Poll error:', e);
+        if (statusChanged) filterEpisodes();
+        clearRequestNotice('episodes-poll');
+    } catch (error) {
+        reportRequestError(error, 'Live updates are unavailable. The displayed status may be out of date.', pollStatuses, 'episodes-poll');
+        if (error instanceof UIRequestError && error.auth) stopPolling();
+    } finally {
+        pollInFlight = false;
     }
 }
 
@@ -319,75 +333,44 @@ document.addEventListener('visibilitychange', () => {
 // Start polling on page load
 startPolling();
 
+function episodeControls(episodeId) {
+    return Array.from(episodeRows.get(episodeId)?.querySelectorAll('button') || []);
+}
 async function queueEpisode(podcastId, episodeId) {
-    const response = await fetch(`/podcasts/${podcastId}/episodes/${episodeId}/queue`, {
-        method: 'POST',
-        credentials: 'include'
-    });
-    if (response.ok) {
-        updateEpisodeUI(episodeId, { status: 'pending', error_message: null });
-    } else {
-        alert('Failed to queue episode');
-    }
+    await runUIAction(episodeControls(episodeId), async () => {
+        await requestJSON(`/podcasts/${podcastId}/episodes/${episodeId}/queue`, {method: 'POST'});
+        updateEpisodeUI(episodeId, {status: 'pending', error_message: null});
+        filterEpisodes();
+    }, 'The episode could not be queued. Refresh its status and try again.');
 }
-
 async function skipEpisode(podcastId, episodeId) {
-    const response = await fetch(`/podcasts/${podcastId}/episodes/${episodeId}/skip`, {
-        method: 'POST',
-        credentials: 'include'
-    });
-    if (response.ok) {
-        updateEpisodeUI(episodeId, { status: 'skipped', error_message: null });
-    } else {
-        alert('Failed to skip episode');
-    }
+    await runUIAction(episodeControls(episodeId), async () => {
+        await requestJSON(`/podcasts/${podcastId}/episodes/${episodeId}/skip`, {method: 'POST'});
+        updateEpisodeUI(episodeId, {status: 'skipped', error_message: null});
+        filterEpisodes();
+    }, 'The episode could not be skipped. Refresh its status and try again.');
 }
-
 async function queueAll() {
     if (!confirm('Queue all unprocessed episodes for ad removal?')) return;
-    const response = await fetch(`/podcasts/${podcastId}/episodes/queue-all`, {
-        method: 'POST',
-        credentials: 'include'
-    });
-    if (response.ok) {
-        const data = await response.json();
-        // Update all skipped/failed to pending
-        document.querySelectorAll('[data-status="skipped"], [data-status="failed"]').forEach(row => {
-            updateEpisodeUI(row.dataset.id, { status: 'pending', error_message: null });
-        });
-    } else {
-        alert('Failed to queue episodes');
-    }
+    await runUIAction(document.getElementById('queueAllBtn'), async () => {
+        await requestJSON(`/podcasts/${podcastId}/episodes/queue-all`, {method: 'POST'});
+        // Refresh from the server rather than guessing which rows changed.
+        await pollStatuses();
+    }, 'The episodes could not be queued. Try again shortly.');
 }
-
 async function skipAll() {
     if (!confirm('Skip all pending episodes?')) return;
-    const response = await fetch(`/podcasts/${podcastId}/episodes/skip-all`, {
-        method: 'POST',
-        credentials: 'include'
-    });
-    if (response.ok) {
-        const data = await response.json();
-        // Update all pending/failed to skipped
-        document.querySelectorAll('[data-status="pending"], [data-status="failed"]').forEach(row => {
-            updateEpisodeUI(row.dataset.id, { status: 'skipped', error_message: null });
-        });
-    } else {
-        alert('Failed to skip episodes');
-    }
+    await runUIAction(document.getElementById('skipAllBtn'), async () => {
+        await requestJSON(`/podcasts/${podcastId}/episodes/skip-all`, {method: 'POST'});
+        await pollStatuses();
+    }, 'The episodes could not be skipped. Try again shortly.');
 }
-
 async function toggleAutoProcess() {
-    const response = await fetch(`/podcasts/${podcastId}/auto-process`, {
-        method: 'POST',
-        credentials: 'include'
-    });
-    if (response.ok) {
-        const data = await response.json();
+    await runUIAction(document.getElementById('autoProcessBtn'), async () => {
+        const data = await requestJSON(`/podcasts/${podcastId}/auto-process`, {method: 'POST'});
+        if (typeof data.auto_process !== 'boolean') throw new UIRequestError('The setting could not be read.');
         document.getElementById('autoProcessStatus').textContent = data.auto_process ? 'ON' : 'OFF';
-    } else {
-        alert('Failed to toggle auto-process');
-    }
+    }, 'Auto-process could not be changed. Try again shortly.');
 }
 
 function formatRelativeTime(isoTimestamp) {
@@ -412,33 +395,19 @@ function formatFullTimestamp(isoTimestamp) {
 
 async function refreshPodcast() {
     const btn = document.getElementById('refreshBtn');
-    btn.disabled = true;
-    btn.textContent = 'Refreshing...';
-
-    const response = await fetch(`/podcasts/${podcastId}/sync`, {
-        method: 'POST',
-        credentials: 'include'
-    });
-    if (response.ok) {
-        const data = await response.json();
-        // Update last refreshed timestamp
-        const elem = document.getElementById('lastRefreshed');
-        if (elem && data.last_synced_at) {
-            elem.textContent = formatRelativeTime(data.last_synced_at);
-            elem.dataset.timestamp = data.last_synced_at;
-            elem.title = formatFullTimestamp(data.last_synced_at);
-        }
-        if (data.episodes_added > 0) {
-            alert(`Refreshed: ${data.episodes_added} new episodes. Reloading page...`);
-            window.location.reload();
-        }
-        btn.disabled = false;
-        btn.textContent = 'Refresh';
-    } else {
-        alert('Failed to refresh podcast');
-        btn.disabled = false;
-        btn.textContent = 'Refresh';
-    }
+    await runUIAction(btn, async () => {
+        btn.textContent = 'Refreshing...';
+        try {
+            const data = await requestJSON(`/podcasts/${podcastId}/sync`, {method: 'POST'});
+            const elem = document.getElementById('lastRefreshed');
+            if (elem && data.last_synced_at) {
+                elem.textContent = formatRelativeTime(data.last_synced_at);
+                elem.dataset.timestamp = data.last_synced_at;
+                elem.title = formatFullTimestamp(data.last_synced_at);
+            }
+            if (data.episodes_added > 0) window.location.reload();
+        } finally { btn.textContent = 'Refresh'; }
+    }, 'The feed could not be refreshed. Try again shortly.');
 }
 
 function filterEpisodes() {
@@ -467,7 +436,7 @@ function filterEpisodes() {
 function sortEpisodes() {
     const sortBy = document.getElementById('sortBy').value;
     const list = document.getElementById('episodeList');
-    const rows = Array.from(list.querySelectorAll('.episode-row'));
+    const rows = Array.from(episodeRows.values());
 
     rows.sort((a, b) => {
         switch(sortBy) {

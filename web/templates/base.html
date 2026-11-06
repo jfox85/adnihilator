@@ -176,6 +176,18 @@
         .tools-dropdown input[type="file"] {
             display: none;
         }
+        .diagnostic-details pre {
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            max-height: 18rem;
+            overflow: auto;
+        }
+        .diagnostic-details summary { cursor: pointer; }
+        #requestNotice[hidden] { display: none; }
+        #requestNotice a[hidden], #requestNotice button[hidden] { display: none; }
+        #requestNotice:focus { outline: 2px solid var(--text-link); outline-offset: 2px; }
+        #requestNotice button, #requestNotice a { min-height: 44px; min-width: 44px; }
+        #requestNotice a { display: inline-flex; align-items: center; }
     </style>
 </head>
 <body>
@@ -195,8 +207,15 @@
             </div>
         </div>
     </div>
+    <div id="requestNotice" class="card" role="status" tabindex="-1" aria-labelledby="requestNoticeText" hidden>
+        <p id="requestNoticeText"></p>
+        <a id="requestSignIn" href="/login" hidden>Sign in</a>
+        <button id="requestRetry" type="button" hidden>Retry</button>
+        <button id="requestDismiss" type="button" onclick="dismissRequestNotice()">Dismiss</button>
+    </div>
 
     <script>
+    {% include "ui_requests.js" %}
     function toggleToolsMenu() {
         document.getElementById('toolsDropdown').classList.toggle('open');
     }
@@ -211,38 +230,42 @@
 
     async function importOPML(input) {
         if (!input.files.length) return;
+        const previousFocus = document.activeElement;
+        clearRequestNotice('opml');
 
         const file = input.files[0];
         const formData = new FormData();
         formData.append('file', file);
+        input.disabled = true;
+        let failed = false;
 
         try {
-            const response = await fetch('/opml/import', {
+            const data = await requestJSON('/opml/import', {
                 method: 'POST',
                 body: formData
             });
+            if (!Number.isInteger(data.imported) || !Number.isInteger(data.skipped)) {
+                throw new UIRequestError('The import response could not be read.');
+            }
 
-            const data = await response.json();
-
-            if (response.ok) {
-                let msg = `Imported ${data.imported} podcast(s)`;
-                if (data.skipped > 0) {
-                    msg += `, ${data.skipped} skipped (already exist)`;
-                }
-                alert(msg);
-                if (data.imported > 0) {
-                    window.location.reload();
-                }
-            } else {
-                alert('Import failed: ' + (data.detail || 'Unknown error'));
+            let msg = `Imported ${data.imported} podcast(s)`;
+            if (data.skipped > 0) {
+                msg += `, ${data.skipped} skipped (already exist)`;
+            }
+            clearRequestNotice('opml');
+            alert(msg);
+            if (data.imported > 0) {
+                window.location.reload();
             }
         } catch (e) {
-            alert('Import failed: ' + e.message);
+            failed = true;
+            reportRequestError(e, 'The file could not be imported. Check that it is a valid OPML file and try again.', () => input.click(), 'opml');
+        } finally {
+            input.disabled = false;
+            input.value = '';
+            document.getElementById('toolsDropdown').classList.remove('open');
         }
-
-        // Reset file input
-        input.value = '';
-        document.getElementById('toolsDropdown').classList.remove('open');
+        if (failed) revealRequestNotice(previousFocus);
     }
     </script>
     {% block content %}{% endblock %}

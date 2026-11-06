@@ -50,8 +50,8 @@
                     {{ podcast.last_synced_at|relative_time }}
                     {% endif %}
                 </span>
-                <button onclick="refreshPodcast('{{ podcast.id }}')" class="btn-refresh">Refresh</button>
-                <button onclick="deletePodcast('{{ podcast.id }}')" class="btn-danger">Delete</button>
+                <button onclick="refreshPodcast('{{ podcast.id }}', this)" class="btn-refresh">Refresh</button>
+                <button onclick="deletePodcast('{{ podcast.id }}', this)" class="btn-danger">Delete</button>
             </div>
         </div>
         {% endfor %}
@@ -121,61 +121,34 @@ function updateLastRefreshed(podcastId, isoTimestamp) {
     }
 }
 
-async function refreshPodcast(id) {
-    const btn = event.target;
-    btn.disabled = true;
-    btn.textContent = 'Refreshing...';
-
-    const response = await fetch(`/podcasts/${id}/sync`, { method: 'POST' });
-    if (response.ok) {
-        const data = await response.json();
-        updateLastRefreshed(id, data.last_synced_at);
-        if (data.episodes_added > 0) {
-            alert(`Refreshed "${data.title}": ${data.episodes_added} new episodes`);
-        }
-        btn.disabled = false;
-        btn.textContent = 'Refresh';
-    } else {
-        alert('Failed to refresh podcast');
-        btn.disabled = false;
-        btn.textContent = 'Refresh';
-    }
+async function refreshPodcast(id, btn) {
+    await runUIAction(btn, async () => {
+        if (btn) btn.textContent = 'Refreshing...';
+        try {
+            const data = await requestJSON(`/podcasts/${id}/sync`, {method: 'POST'});
+            updateLastRefreshed(id, data.last_synced_at);
+        } finally { if (btn) btn.textContent = 'Refresh'; }
+    }, 'The feed could not be refreshed. Try again shortly.');
 }
-
 async function refreshAll() {
     const btn = document.getElementById('refreshAllBtn');
-    btn.disabled = true;
-    btn.textContent = 'Refreshing...';
-
-    const response = await fetch('/podcasts/sync-all', { method: 'POST' });
-    if (response.ok) {
-        const data = await response.json();
-        // Update all timestamps
-        for (const [podcastId, result] of Object.entries(data.results)) {
-            if (!result.error) {
-                // The API doesn't return timestamps for each, so reload to get fresh data
-            }
-        }
-        if (data.total_episodes_added > 0) {
-            alert(`Refreshed all: ${data.total_episodes_added} new episodes total`);
-        }
-        window.location.reload();
-    } else {
-        alert('Failed to refresh podcasts');
-        btn.disabled = false;
-        btn.textContent = 'Refresh All';
-    }
+    await runUIAction(btn, async () => {
+        resetRequestNoticeDismissal('refresh-all');
+        btn.textContent = 'Refreshing...';
+        try {
+            const data = await requestJSON('/podcasts/sync-all', {method: 'POST'});
+            if (Object.values(data.results).some(result => result.error)) {
+                showRequestNotice('Some feeds could not be refreshed. Try again shortly.', {retry: refreshAll, owner: 'refresh-all'});
+            } else { clearRequestNotice('refresh-all'); window.location.reload(); }
+        } finally { btn.textContent = 'Refresh All'; }
+    }, 'The feeds could not be refreshed. Try again shortly.');
 }
-
-async function deletePodcast(id) {
+async function deletePodcast(id, btn) {
     if (!confirm('Delete this podcast and all its episodes?')) return;
-
-    const response = await fetch(`/podcasts/${id}`, { method: 'DELETE' });
-    if (response.ok) {
+    await runUIAction(btn, async () => {
+        await requestJSON(`/podcasts/${id}`, {method: 'DELETE'});
         window.location.reload();
-    } else {
-        alert('Failed to delete podcast');
-    }
+    }, 'The podcast could not be deleted. Try again shortly.');
 }
 
 // Update relative times periodically

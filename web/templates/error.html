@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+    <h2>{{ heading }}</h2>
+    <p>{{ message }}</p>
+    {% if sign_in %}<p><a href="{{ sign_in }}">Sign in</a></p>{% endif %}
+    <p><a href="/">Back to Dashboard</a></p>
+</div>
+{% endblock %}
