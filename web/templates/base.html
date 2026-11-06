@@ -183,9 +183,10 @@
             overflow: auto;
         }
         .diagnostic-details summary { cursor: pointer; }
-        #requestNotice { position: sticky; top: 0; z-index: 50; }
         #requestNotice[hidden] { display: none; }
         #requestNotice a[hidden], #requestNotice button[hidden] { display: none; }
+        #requestNotice button, #requestNotice a { min-height: 44px; min-width: 44px; }
+        #requestNotice a { display: inline-flex; align-items: center; }
     </style>
 </head>
 <body>
@@ -209,6 +210,7 @@
         <p id="requestNoticeText"></p>
         <a id="requestSignIn" href="/login" hidden>Sign in</a>
         <button id="requestRetry" type="button" hidden>Retry</button>
+        <button id="requestDismiss" type="button" onclick="dismissRequestNotice()">Dismiss</button>
     </div>
 
     <script>
@@ -246,12 +248,13 @@
             if (data.skipped > 0) {
                 msg += `, ${data.skipped} skipped (already exist)`;
             }
+            clearRequestNotice('opml');
             alert(msg);
             if (data.imported > 0) {
                 window.location.reload();
             }
         } catch (e) {
-            reportRequestError(e, 'The file could not be imported. Check that it is a valid OPML file and try again.', () => input.click());
+            reportRequestError(e, 'The file could not be imported. Check that it is a valid OPML file and try again.', () => input.click(), 'opml');
         } finally {
             input.disabled = false;
             input.value = '';

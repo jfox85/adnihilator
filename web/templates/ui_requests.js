@@ -2,9 +2,19 @@ class UIRequestError extends Error {
     constructor(message, auth = false) { super(message); this.auth = auth; }
 }
 let requestNoticeOwner = null;
+let requestNoticeKey = null;
+let requestNoticePreviousFocus = null;
+const dismissedRequestNotices = new Map();
 function showRequestNotice(message, {auth = false, retry = null, owner = null} = {}) {
-    requestNoticeOwner = owner;
+    const key = JSON.stringify([message, auth]);
+    if (dismissedRequestNotices.get(owner) === key) return;
     const notice = document.getElementById('requestNotice');
+    if (!notice.hidden && requestNoticeOwner === owner && requestNoticeKey === key) return;
+    if (notice.hidden && document.activeElement && !notice.contains(document.activeElement)) {
+        requestNoticePreviousFocus = document.activeElement;
+    }
+    requestNoticeOwner = owner;
+    requestNoticeKey = key;
     document.getElementById('requestNoticeText').textContent = message;
     const signIn = document.getElementById('requestSignIn');
     signIn.hidden = !auth;
@@ -14,8 +24,17 @@ function showRequestNotice(message, {auth = false, retry = null, owner = null} =
     button.onclick = retry;
     notice.hidden = false;
 }
+function dismissRequestNotice() {
+    dismissedRequestNotices.set(requestNoticeOwner, requestNoticeKey);
+    document.getElementById('requestNotice').hidden = true;
+    if (requestNoticePreviousFocus?.isConnected) requestNoticePreviousFocus.focus();
+}
 function clearRequestNotice(owner = null) {
-    if (requestNoticeOwner === owner) document.getElementById('requestNotice').hidden = true;
+    dismissedRequestNotices.delete(owner);
+    if (requestNoticeOwner === owner) {
+        document.getElementById('requestNotice').hidden = true;
+        requestNoticeKey = null;
+    }
 }
 function reportRequestError(error, message, retry = null, owner = null) {
     const auth = error instanceof UIRequestError && error.auth;

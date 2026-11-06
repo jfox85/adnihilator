@@ -106,9 +106,44 @@ app.include_router(feeds.router)
 app.include_router(opml.router)
 
 
+def _accept_preference(accept: str, media_type: str) -> tuple[float, int, int]:
+    """Find a representation's quality using its most specific media range."""
+    target_type, target_subtype = media_type.split('/')
+    matches = []
+    for order, value in enumerate(accept.lower().split(',')):
+        media_range, *parameters = (part.strip() for part in value.split(';'))
+        if '/' not in media_range:
+            continue
+        major, minor = media_range.split('/', 1)
+        if major not in (target_type, '*') or minor not in (target_subtype, '*'):
+            continue
+        if major == '*' and minor != '*':
+            continue
+        quality = 1.0
+        for parameter in parameters:
+            name, separator, raw = parameter.partition('=')
+            if separator and name.strip() == 'q':
+                try:
+                    quality = float(raw.strip())
+                except ValueError:
+                    quality = 0.0
+                if not 0 <= quality <= 1:
+                    quality = 0.0
+        specificity = 0 if major == '*' else 1 if minor == '*' else 2
+        matches.append((specificity, -order, quality))
+    if not matches:
+        return (0.0, -1, 0)
+    specificity, order, quality = max(matches, key=lambda item: item[:2])
+    return (quality, specificity, order)
+
+
 def _browser_error_page(request: Request) -> bool:
-    """Use app pages for browser navigation while preserving API responses."""
-    return 'text/html' in request.headers.get('accept', '').lower() and not request.url.path.startswith(('/api/', '/feed/'))
+    """Select HTML only when acceptable and preferred to the JSON default."""
+    if request.url.path.startswith(('/api/', '/feed/')):
+        return False
+    accept = request.headers.get('accept', '')
+    html = _accept_preference(accept, 'text/html')
+    return html[0] > 0 and html > _accept_preference(accept, 'application/json')
 
 
 @app.exception_handler(StarletteHTTPException)

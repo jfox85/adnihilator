@@ -156,40 +156,50 @@ async function retryEpisode(podcastId, episodeId) {
 async function updateStatuses() {
     if (queuePollInFlight || document.hidden || !queueItems.size) return;
     queuePollInFlight = true;
+    let failure = null;
     try {
         for (const [podcastId, episodeIds] of queueGroups) {
             if (!episodeIds.some(id => queueItems.has(id))) continue;
-            const data = await requestJSON(`/podcasts/${podcastId}/episodes/status`);
-            for (const episodeId of episodeIds) {
-                const item = queueItems.get(episodeId);
-                const status = data.episodes[episodeId];
-                if (!item || !status) continue;
-                const signature = JSON.stringify(status);
-                if (queueSignatures.get(episodeId) === signature) continue;
-                queueSignatures.set(episodeId, signature);
-                const badge = item.querySelector('.status-badge');
-                if (badge) {
-                    badge.className = `status-badge status-${status.status}`;
-                    badge.textContent = status.status;
+            try {
+                const data = await requestJSON(`/podcasts/${podcastId}/episodes/status`);
+                for (const episodeId of episodeIds) {
+                    const item = queueItems.get(episodeId);
+                    const status = data.episodes[episodeId];
+                    if (!item || !status) continue;
+                    const signature = JSON.stringify(status);
+                    if (queueSignatures.get(episodeId) === signature) continue;
+                    queueSignatures.set(episodeId, signature);
+                    const badge = item.querySelector('.status-badge');
+                    if (badge) {
+                        badge.className = `status-badge status-${status.status}`;
+                        badge.textContent = status.status;
+                    }
+                    const statusDiv = item.querySelector('.queue-item-status');
+                    for (const [selector, value] of [['progress-step', status.progress_step], ['progress-percent', status.progress_percent == null ? null : status.progress_percent + '%']]) {
+                        let span = item.querySelector('.' + selector);
+                        if (value == null || value === '') { if (span) span.remove(); continue; }
+                        if (!span) { span = document.createElement('span'); span.className = selector; statusDiv.appendChild(span); }
+                        span.textContent = value;
+                    }
+                    if (!['pending', 'processing'].includes(status.status)) {
+                        item.remove();
+                        queueItems.delete(episodeId);
+                    }
                 }
-                const statusDiv = item.querySelector('.queue-item-status');
-                for (const [selector, value] of [['progress-step', status.progress_step], ['progress-percent', status.progress_percent == null ? null : status.progress_percent + '%']]) {
-                    let span = item.querySelector('.' + selector);
-                    if (value == null || value === '') { if (span) span.remove(); continue; }
-                    if (!span) { span = document.createElement('span'); span.className = selector; statusDiv.appendChild(span); }
-                    span.textContent = value;
-                }
-                if (!['pending', 'processing'].includes(status.status)) {
-                    item.remove();
-                    queueItems.delete(episodeId);
+            } catch (error) {
+                failure = error;
+                if (error instanceof UIRequestError && error.auth) {
+                    stopQueuePolling();
+                    break;
                 }
             }
         }
         showEmptyQueue();
-        clearRequestNotice('queue-poll');
-    } catch (error) {
-        reportRequestError(error, 'Live updates are unavailable. The displayed status may be out of date.', updateStatuses, 'queue-poll');
-        if (error instanceof UIRequestError && error.auth) stopQueuePolling();
+        if (failure) {
+            reportRequestError(failure, 'Live updates are unavailable. The displayed status may be out of date.', updateStatuses, 'queue-poll');
+        } else {
+            clearRequestNotice('queue-poll');
+        }
     } finally { queuePollInFlight = false; }
 }
 function startQueuePolling() {
