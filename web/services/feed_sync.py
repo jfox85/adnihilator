@@ -27,6 +27,16 @@ class FeedSyncError(RuntimeError):
     """A failed feed update with safe diagnostics and a rolled-back session."""
 
 
+def _request_origin(url: str) -> tuple[str, str, int | None]:
+    """Compare HTTP origins without treating default-port spelling as a change."""
+    parsed = urlsplit(url)
+    scheme = parsed.scheme.lower()
+    port = parsed.port
+    if port is None:
+        port = {"http": 80, "https": 443}.get(scheme)
+    return scheme, (parsed.hostname or "").lower(), port
+
+
 class _HTTPOnlyRedirect(HTTPRedirectHandler):
     """Allow private HTTP(S) redirects while refusing every other scheme."""
 
@@ -55,7 +65,13 @@ class _HTTPOnlyRedirect(HTTPRedirectHandler):
         """Validate the resolved redirect destination before opening it."""
         if not is_usable_audio_url(newurl):
             raise FeedSyncError("Feed redirect must use an HTTP(S) URL with a host")
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is not None and _request_origin(req.full_url) != _request_origin(redirected.full_url):
+            # feedparser turns source URL userinfo into Authorization. urllib
+            # otherwise copies it to any redirect target, including another
+            # origin. Retain it only within the original origin's scope.
+            redirected.remove_header("Authorization")
+        return redirected
 
 
 def episode_identity(entry: dict, audio_url: str | None) -> str | None:

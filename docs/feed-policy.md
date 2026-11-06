@@ -74,3 +74,14 @@ and create an implicit Queue/reprocess path. These actions preserve outputs, ret
 diagnostics. No Reprocess UI or endpoint is introduced (D10); an explicit workflow
 can be designed separately. D9 attempt-token fencing remains deferred: these
 status/lease checks do not identify successive processing attempts.
+
+## Credentials on feed redirects
+
+Feed fetches retain Authorization only within the same origin: scheme, hostname
+and effective port. Hostname case and explicit default-port spelling describe
+the same origin. A change of scheme, hostname or port removes the complete
+Authorization header before the redirected request is opened. HTTP(S) redirects
+to private or public destinations remain allowed. Same-origin authenticated
+feeds keep working. A publisher that requires authentication at another origin
+must provide an appropriate endpoint; the source origin's credential is scoped
+to that source, including when a redirect chain later returns there.
