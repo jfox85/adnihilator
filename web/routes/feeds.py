@@ -8,21 +8,18 @@ from feedgen.feed import FeedGenerator
 from sqlalchemy.orm import Session
 
 from ..dependencies import get_db
+from ..formatting import format_duration as format_display_duration
 from ..models import Episode, EpisodeStatus, Podcast
 from ..services.r2 import get_audio_url
+from ..values import finite_nonnegative_number
 
 
 def format_duration(seconds: int | float | None) -> str | None:
     """Format duration in seconds to HH:MM:SS format for iTunes."""
+    seconds = finite_nonnegative_number(seconds)
     if seconds is None:
         return None
-    seconds = int(seconds)
-    hours = seconds // 3600
-    minutes = (seconds % 3600) // 60
-    secs = seconds % 60
-    if hours > 0:
-        return f"{hours}:{minutes:02d}:{secs:02d}"
-    return f"{minutes}:{secs:02d}"
+    return format_display_duration(seconds)
 
 
 router = APIRouter(tags=["feeds"])
@@ -96,8 +93,10 @@ async def get_feed(
             fe.pubDate(pub_date)
 
         # Episode duration - use processed duration if available, otherwise original
-        duration = episode.processed_duration or episode.duration
-        if duration:
+        duration = finite_nonnegative_number(episode.processed_duration)
+        if duration is None:
+            duration = finite_nonnegative_number(episode.duration)
+        if duration is not None:
             fe.podcast.itunes_duration(format_duration(duration))
 
         # Audio enclosure pointing to R2

@@ -4,14 +4,19 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
+from fastapi import APIRouter, Body, Depends, Form, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from ..dependencies import get_db
 from ..auth import verify_admin
-from ..models import Podcast
+from ..models import Episode, EpisodeStatus, Podcast
+from ..formatting import format_cost, format_duration
+from ..services.audio import is_usable_audio_url
+from ..values import finite_nonnegative_number
 
 router = APIRouter(prefix="/podcasts", tags=["podcasts"])
 
@@ -48,6 +53,76 @@ def relative_time(dt: datetime | None) -> str:
 # Register custom filters
 templates.env.filters["regex_replace"] = regex_replace
 templates.env.filters["relative_time"] = relative_time
+templates.env.filters["duration"] = format_duration
+templates.env.filters["cost"] = format_cost
+templates.env.filters["finite_number"] = finite_nonnegative_number
+
+
+class BulkSelection(BaseModel):
+    """Episode identities the owner actually confirmed for a bulk action."""
+
+    episode_ids: list[str]
+
+
+EPISODES_PER_PAGE = 100
+
+
+def _episode_page(
+    db: Session, podcast_id: str, page: int, search: str, state: str, sort: str,
+) -> tuple[list[Episode], int, int]:
+    """Filter and sort the whole catalogue before selecting a bounded page."""
+    query = db.query(Episode).filter_by(podcast_id=podcast_id)
+    display_title = func.coalesce(func.nullif(Episode.title, ""), Episode.guid)
+    if search:
+        query = query.filter(
+            func.catalogue_casefold(display_title).contains(
+                search.casefold(), autoescape=True,
+            )
+        )
+    if state:
+        query = query.filter(Episode.status == state)
+    total = query.count()
+    last_page = max(1, (total + EPISODES_PER_PAGE - 1) // EPISODES_PER_PAGE)
+    page = min(page, last_page)
+    title = func.catalogue_casefold(display_title)
+    ordering = {
+        "date-desc": Episode.published_at.desc(),
+        "date-asc": Episode.published_at.asc(),
+        "title-asc": title.asc(),
+        "title-desc": title.desc(),
+        "status": case(
+            {state.value: index for index, state in enumerate([
+                EpisodeStatus.PROCESSING, EpisodeStatus.PENDING, EpisodeStatus.FAILED,
+                EpisodeStatus.COMPLETE, EpisodeStatus.SKIPPED,
+            ])}, value=Episode.status, else_=5,
+        ),
+    }
+    episodes = query.order_by(ordering[sort], Episode.id).offset(
+        (page - 1) * EPISODES_PER_PAGE
+    ).limit(EPISODES_PER_PAGE).all()
+    return episodes, total, page
+
+
+@router.get("/{podcast_id}/episodes/bulk-summary")
+async def bulk_summary(
+    podcast_id: str,
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_admin),
+) -> dict:
+    """Preview the exact eligible scope, including episodes hidden by filters."""
+    from ..models import Episode, EpisodeStatus
+
+    if db.get(Podcast, podcast_id) is None:
+        raise HTTPException(status_code=404, detail="Podcast not found")
+    episodes = db.query(Episode).filter_by(podcast_id=podcast_id).all()
+    queue_ids = [ep.id for ep in episodes if ep.status in {
+        EpisodeStatus.SKIPPED.value, EpisodeStatus.FAILED.value
+    } and is_usable_audio_url(ep.original_audio_url)]
+    skip_ids = [ep.id for ep in episodes if ep.status in {
+        EpisodeStatus.PENDING.value, EpisodeStatus.FAILED.value
+    }]
+    return {"queue": {"count": len(queue_ids), "episode_ids": queue_ids},
+            "skip": {"count": len(skip_ids), "episode_ids": skip_ids}}
 
 
 @router.get("")
@@ -149,6 +224,10 @@ async def delete_podcast(
 async def list_episodes_html(
     podcast_id: str,
     request: Request,
+    page: int = Query(default=1, ge=1, le=1_000_000),
+    q: str = Query(default="", max_length=200),
+    episode_status: str = Query(default="", alias="status", pattern="^(|pending|processing|complete|failed|skipped|expired)$"),
+    sort: str = Query(default="date-desc", pattern="^(date-desc|date-asc|title-asc|title-desc|status)$"),
     db: Session = Depends(get_db),
     _: None = Depends(verify_admin),
 ):
@@ -159,12 +238,9 @@ async def list_episodes_html(
     if not podcast:
         raise HTTPException(status_code=404, detail="Podcast not found")
 
-    episodes = (
-        db.query(Episode)
-        .filter_by(podcast_id=podcast_id)
-        .order_by(Episode.published_at.desc())
-        .all()
-    )
+    q = q.strip()
+    episodes, total, page = _episode_page(db, podcast_id, page, q, episode_status, sort)
+    last_page = max(1, (total + EPISODES_PER_PAGE - 1) // EPISODES_PER_PAGE)
 
     return templates.TemplateResponse(
         request,
@@ -173,6 +249,13 @@ async def list_episodes_html(
             "title": podcast.title or "Episodes",
             "podcast": podcast,
             "episodes": episodes,
+            "catalogue": {"page": page, "pages": last_page, "total": total,
+                          "start": (page - 1) * EPISODES_PER_PAGE + 1 if total else 0,
+                          "end": min(page * EPISODES_PER_PAGE, total),
+                          "search": q, "status": episode_status, "sort": sort,
+                          "previous": request.url.path + "?" + request.url.include_query_params(page=page - 1).query if page > 1 else None,
+                          "next": request.url.path + "?" + request.url.include_query_params(page=page + 1).query if page < last_page else None},
+            "audio_eligible": {episode.id: is_usable_audio_url(episode.original_audio_url) for episode in episodes},
         },
     )
 
@@ -191,11 +274,26 @@ async def queue_episode(
     if not episode:
         raise HTTPException(status_code=404, detail="Episode not found")
 
-    episode.status = EpisodeStatus.PENDING.value
-    episode.retry_count = 0
-    episode.error_message = None
-    db.commit()
+    if episode.status == EpisodeStatus.PROCESSING.value:
+        raise HTTPException(status_code=409, detail="Episode is processing")
+    if not is_usable_audio_url(episode.original_audio_url):
+        raise HTTPException(status_code=409, detail="Episode has no usable audio")
+    if episode.status == EpisodeStatus.PENDING.value:
+        return {"status": "already_queued"}
 
+    updated = db.query(Episode).filter(
+        Episode.id == episode_id,
+        Episode.podcast_id == podcast_id,
+        Episode.status.notin_([EpisodeStatus.PROCESSING.value, EpisodeStatus.PENDING.value]),
+        Episode.original_audio_url == episode.original_audio_url,
+    ).update({Episode.status: EpisodeStatus.PENDING.value, Episode.retry_count: 0,
+              Episode.error_message: None}, synchronize_session=False)
+    db.commit()
+    if not updated:
+        db.refresh(episode)
+        if episode.status == EpisodeStatus.PENDING.value:
+            return {"status": "already_queued"}
+        raise HTTPException(status_code=409, detail="Episode changed while queueing; refresh and try again")
     return {"status": "queued"}
 
 
@@ -213,15 +311,21 @@ async def skip_episode(
     if not episode:
         raise HTTPException(status_code=404, detail="Episode not found")
 
-    episode.status = EpisodeStatus.SKIPPED.value
+    updated = db.query(Episode).filter(
+        Episode.id == episode_id,
+        Episode.podcast_id == podcast_id,
+        Episode.status != EpisodeStatus.PROCESSING.value,
+    ).update({Episode.status: EpisodeStatus.SKIPPED.value}, synchronize_session=False)
     db.commit()
-
+    if not updated:
+        raise HTTPException(status_code=409, detail="Episode is processing")
     return {"status": "skipped"}
 
 
 @router.post("/{podcast_id}/episodes/skip-all")
 async def skip_all_episodes(
     podcast_id: str,
+    selection: BulkSelection | None = Body(default=None),
     db: Session = Depends(get_db),
     _: None = Depends(verify_admin),
 ):
@@ -232,41 +336,63 @@ async def skip_all_episodes(
     if not podcast:
         raise HTTPException(status_code=404, detail="Podcast not found")
 
-    # Skip all pending/failed episodes
-    updated = (
-        db.query(Episode)
-        .filter_by(podcast_id=podcast_id)
-        .filter(Episode.status.in_([EpisodeStatus.PENDING.value, EpisodeStatus.FAILED.value]))
-        .update({Episode.status: EpisodeStatus.SKIPPED.value}, synchronize_session=False)
-    )
+    # Skip only confirmed identities when the client supplied a preview.
+    selected_ids = set(selection.episode_ids) if selection is not None else None
+    candidates = db.query(Episode.id).filter_by(podcast_id=podcast_id).filter(
+        Episode.status.in_([EpisodeStatus.PENDING.value, EpisodeStatus.FAILED.value])
+    ).all()
+    skipped_ids = []
+    for (episode_id,) in candidates:
+        if selected_ids is not None and episode_id not in selected_ids:
+            continue
+        changed = db.query(Episode).filter(
+            Episode.id == episode_id, Episode.podcast_id == podcast_id,
+            Episode.status.in_([EpisodeStatus.PENDING.value, EpisodeStatus.FAILED.value]),
+        ).update({Episode.status: EpisodeStatus.SKIPPED.value}, synchronize_session=False)
+        if changed:
+            skipped_ids.append(episode_id)
     db.commit()
-
-    return {"status": "skipped", "count": updated}
+    return {"status": "skipped", "count": len(skipped_ids), "episode_ids": skipped_ids}
 
 
 @router.post("/{podcast_id}/episodes/queue-all")
 async def queue_all_episodes(
     podcast_id: str,
+    selection: BulkSelection | None = Body(default=None),
     db: Session = Depends(get_db),
     _: None = Depends(verify_admin),
 ):
-    """Queue all unprocessed episodes for processing."""
+    """Queue eligible episodes, optionally bounded to a confirmed selection."""
     from ..models import Episode, EpisodeStatus
 
     podcast = db.query(Podcast).filter_by(id=podcast_id).first()
     if not podcast:
         raise HTTPException(status_code=404, detail="Podcast not found")
 
-    # Queue all skipped/failed episodes
-    updated = (
-        db.query(Episode)
+    selected_ids = set(selection.episode_ids) if selection is not None else None
+    candidates = (
+        db.query(Episode.id, Episode.original_audio_url)
         .filter_by(podcast_id=podcast_id)
         .filter(Episode.status.in_([EpisodeStatus.SKIPPED.value, EpisodeStatus.FAILED.value]))
-        .update({Episode.status: EpisodeStatus.PENDING.value, Episode.retry_count: 0, Episode.error_message: None}, synchronize_session=False)
+        .all()
     )
+    queued_ids = []
+    for episode_id, audio_url in candidates:
+        if selected_ids is not None and episode_id not in selected_ids:
+            continue
+        if not is_usable_audio_url(audio_url):
+            continue
+        changed = db.query(Episode).filter(
+            Episode.id == episode_id,
+            Episode.podcast_id == podcast_id,
+            Episode.status.in_([EpisodeStatus.SKIPPED.value, EpisodeStatus.FAILED.value]),
+            Episode.original_audio_url == audio_url,
+        ).update({Episode.status: EpisodeStatus.PENDING.value, Episode.retry_count: 0,
+                  Episode.error_message: None}, synchronize_session=False)
+        if changed:
+            queued_ids.append(episode_id)
     db.commit()
-
-    return {"status": "queued", "count": updated}
+    return {"status": "queued", "count": len(queued_ids), "episode_ids": queued_ids}
 
 
 @router.post("/{podcast_id}/auto-process")
@@ -289,33 +415,44 @@ async def toggle_auto_process(
 @router.get("/{podcast_id}/episodes/status")
 async def get_episode_statuses(
     podcast_id: str,
+    episode_id: list[str] | None = Query(default=None, max_length=100),
+    catalogue_page: int | None = Query(default=None, ge=1, le=1_000_000),
+    q: str = Query(default="", max_length=200),
+    episode_status: str = Query(default="", alias="status", pattern="^(|pending|processing|complete|failed|skipped|expired)$"),
+    sort: str = Query(default="date-desc", pattern="^(date-desc|date-asc|title-asc|title-desc|status)$"),
     db: Session = Depends(get_db),
     _: None = Depends(verify_admin),
 ):
-    """Get status of all episodes for polling updates."""
+    """Poll a bounded catalogue window, selected IDs, or legacy queue clients."""
     from ..models import Episode
 
     podcast = db.query(Podcast).filter_by(id=podcast_id).first()
     if not podcast:
         raise HTTPException(status_code=404, detail="Podcast not found")
 
-    episodes = (
-        db.query(Episode)
-        .filter_by(podcast_id=podcast_id)
-        .all()
-    )
+    catalogue = None
+    if catalogue_page is not None:
+        episodes, total, page = _episode_page(db, podcast_id, catalogue_page, q.strip(), episode_status, sort)
+        catalogue = {"page": page, "total": total, "ids": [ep.id for ep in episodes]}
+    else:
+        query = db.query(Episode).filter_by(podcast_id=podcast_id)
+        if episode_id is not None:
+            query = query.filter(Episode.id.in_(episode_id))
+        episodes = query.all()
 
     return {
         "auto_process": podcast.auto_process,
+        "catalogue": catalogue,
         "episodes": {
             ep.id: {
                 "status": ep.status,
+                "audio_eligible": is_usable_audio_url(ep.original_audio_url),
                 "error_message": ep.error_message,
-                "ads_removed_seconds": ep.ads_removed_seconds,
-                "processed_duration": ep.processed_duration,
+                "ads_removed_seconds": finite_nonnegative_number(ep.ads_removed_seconds),
+                "processed_duration": finite_nonnegative_number(ep.processed_duration),
                 "progress_step": ep.progress_step,
-                "progress_percent": ep.progress_percent,
-                "llm_cost_usd": float(ep.llm_cost_usd) if ep.llm_cost_usd is not None else None,
+                "progress_percent": finite_nonnegative_number(ep.progress_percent, maximum=100),
+                "llm_cost_usd": finite_nonnegative_number(ep.llm_cost_usd),
                 "llm_model": ep.llm_model,
                 "detection_source": ep.detection_source,
             }
