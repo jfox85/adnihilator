@@ -12,7 +12,8 @@ from sqlalchemy.orm import Session
 
 from ..app import get_db
 from ..auth import verify_worker_api_key
-from ..models import Episode, EpisodeStatus
+from ..models import Episode, EpisodeStatus, EpisodeTranscript
+from ..transcript_migration import ready as transcripts_ready
 
 logger = logging.getLogger(__name__)
 
@@ -239,6 +240,9 @@ async def complete_episode(
     episode.llm_total_tokens = request.llm_total_tokens
     episode.llm_cost_usd = request.llm_cost_usd
     episode.detection_source = request.detection_source
+    transcript = db.get(EpisodeTranscript, episode_id) if transcripts_ready(db.get_bind()) else None
+    if transcript and transcript.state == "processing" and not transcript.active_checksum:
+        transcript.state, transcript.last_error = "failed", "persistence_pending"
 
     db.commit()
 
@@ -275,6 +279,10 @@ async def fail_episode(
         Episode.retry_count: case((retry_available, Episode.retry_count + 1), else_=Episode.retry_count),
         Episode.status: case((retry_available, EpisodeStatus.PENDING.value), else_=EpisodeStatus.FAILED.value),
     }, synchronize_session=False)
+    if changed and transcripts_ready(db.get_bind()):
+        transcript = db.get(EpisodeTranscript, episode_id)
+        if transcript and transcript.state == "processing" and not transcript.active_checksum:
+            transcript.state, transcript.last_error = "failed", "audio_job_failed"
     db.commit()
     db.refresh(episode)
     if not changed:
@@ -307,6 +315,14 @@ async def update_progress(
     # Renew the claim lease: a job that is still reporting progress is alive,
     # so refresh claimed_at to keep stuck-job recovery from requeueing it.
     episode.claimed_at = datetime.utcnow()
+    if transcripts_ready(db.get_bind()) and request.step in ("transcribing", "detecting", "splicing"):
+        coverage = db.get(EpisodeTranscript, episode_id) if transcripts_ready(db.get_bind()) else None
+        if coverage is None:
+            coverage = EpisodeTranscript(episode_id=episode_id, state="missing")
+            db.add(coverage)
+        coverage.downloaded_at = coverage.downloaded_at or datetime.utcnow()
+        if request.step == "transcribing" and not coverage.active_checksum:
+            coverage.state = "processing"
     db.commit()
 
     return {"status": "updated"}

@@ -149,3 +149,43 @@ class Episode(Base):
     def status_enum(self, value: EpisodeStatus):
         """Set status from enum."""
         self.status = value.value
+
+
+class EpisodeTranscript(Base):
+    """Coverage and atomic pointer to the last complete immutable document."""
+
+    __tablename__ = "episode_transcripts"
+    __table_args__ = (CheckConstraint("state IN ('available','missing','queued','processing','failed')"),)
+    episode_id: Mapped[str] = mapped_column(ForeignKey("episodes.id", ondelete="CASCADE"), primary_key=True)
+    state: Mapped[str] = mapped_column(String(20), default="missing")
+    active_checksum: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    indexed_checksum: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    downloaded_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class TranscriptVersion(Base):
+    """Private canonical text, immutable and separate from its rebuildable index."""
+
+    __tablename__ = "transcript_versions"
+    __table_args__ = (UniqueConstraint("episode_id", "checksum"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    episode_id: Mapped[str] = mapped_column(ForeignKey("episodes.id", ondelete="CASCADE"), index=True)
+    checksum: Mapped[str] = mapped_column(String(64))
+    canonical_json: Mapped[str] = mapped_column(Text)
+    episode_metadata_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class TranscriptJob(Base):
+    """Explicit transcript requests share worker polling but never audio status."""
+
+    __tablename__ = "transcript_jobs"
+    __table_args__ = (CheckConstraint("state IN ('queued','processing','complete','failed')"),)
+    episode_id: Mapped[str] = mapped_column(ForeignKey("episodes.id", ondelete="CASCADE"), primary_key=True)
+    state: Mapped[str] = mapped_column(String(20), default="queued", index=True)
+    attempt: Mapped[int] = mapped_column(Integer, default=0)
+    claim_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    claimed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

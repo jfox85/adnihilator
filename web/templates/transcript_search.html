@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block content %}
+<style>
+.transcript-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.transcript-form label { display: block; }
+.transcript-form .wide { grid-column: 1 / -1; }
+.transcript-form input[type="text"], .transcript-form select { box-sizing: border-box; }
+.transcript-form button { justify-self: start; }
+mark { color: #151515; background: #fff59d; border-radius: 2px; }
+@media (max-width: 600px) { .transcript-form { grid-template-columns: 1fr; } }
+</style>
+<h2>Find a conversation</h2>
+<p>Search saved transcripts. Each passage labels its source timeline and any unverified audio alignment.</p>
+<form method="get" action="/transcripts" class="card transcript-form">
+  <label class="wide">Podcast <select name="podcast_id">{% for podcast in podcasts %}<option value="{{ podcast.id }}" {% if podcast.id == podcast_id %}selected{% endif %}>{{ podcast.title }}</option>{% endfor %}</select></label>
+  <label class="wide">Remembered words <input type="text" name="query" value="{{ query }}" maxlength="500" placeholder="book memoir really enjoyed"></label>
+  <label>Published from (UTC) <input type="date" name="after" value="{{ after }}"></label>
+  <label>Published before (UTC, exclusive) <input type="date" name="before" value="{{ before }}"></label>
+  <label><input type="checkbox" name="phrase" value="true" {% if phrase %}checked{% endif %}> Exact phrase</label>
+  <label><input type="checkbox" name="latest" value="true" {% if latest %}checked{% endif %}> Latest published episode only</label>
+  <button type="submit">Search</button>
+</form>
+{% if listing.latest_published %}
+<div class="card">
+  <p><strong>Latest published:</strong> {{ listing.latest_published.title }} · {{ listing.latest_published.published_at|publication_date }}</p>
+  <p><strong>Latest with a transcript:</strong> {{ listing.latest_transcribed.title if listing.latest_transcribed else 'None available' }}</p>
+  <p><strong>Latest with an observed download:</strong> {{ listing.latest_downloaded.title if listing.latest_downloaded else 'Unknown' }}</p>
+</div>
+{% endif %}
+{% if result %}
+  {% if result.coverage_warning %}<div class="card"><strong>The latest episode is not searchable.</strong> {{ result.coverage_warning.episode.title }} · Transcript {{ result.coverage_warning.coverage.state }}. We did not search an older transcript instead. <a href="/transcripts/episodes/{{ result.coverage_warning.episode.episode_id }}">View availability</a></div>{% endif %}
+  {% for hit in result.hits %}
+  <article class="card">
+    <h3><a href="/transcripts/episodes/{{ hit.episode.episode_id }}?checksum={{ hit.checksum }}&ordinal={{ hit.focus_ordinal }}&query={{ query|urlencode }}#segment-{{ hit.focus_ordinal }}">{{ hit.episode.title }}</a></h3>
+    <p>{{ hit.episode.podcast }} · {{ hit.episode.published_at|publication_date }} · {{ 'Original audio time' if hit.timestamp_basis == 'original_audio' else 'External transcript time; audio alignment unverified' }}</p>
+    {% for segment in hit.segments if segment.ordinal >= hit.match_ordinal - 6 and segment.ordinal <= hit.match_ordinal + 5 %}<p><small>{{ segment.start|duration }}–{{ segment.end|duration }} {% if segment.ad %} · Ad passage{% endif %}</small> {{ segment.text|highlight(query) }}{% if segment.text_truncated %} … [preview truncated]{% endif %}</p>{% endfor %}
+    <p><a href="/transcripts/episodes/{{ hit.episode.episode_id }}?checksum={{ hit.checksum }}&ordinal={{ hit.focus_ordinal }}&query={{ query|urlencode }}#segment-{{ hit.focus_ordinal }}">Read the surrounding conversation</a></p>
+  </article>
+  {% else %}{% if not result.coverage_warning %}<p>No matching passages. Try a different remembered phrase; a negative result does not prove an uncovered episode lacked the discussion.</p>{% endif %}{% endfor %}
+{% endif %}
+<h3>Recent episode coverage</h3>
+{% for episode in listing.episodes %}<p><a href="/transcripts/episodes/{{ episode.episode_id }}">{{ episode.title }}</a> · {{ episode.published_at|publication_date }} · Transcript {{ episode.coverage.state }}{% if not episode.coverage.index_ready and episode.coverage.state == 'available' %} · Search index pending{% endif %}</p>{% endfor %}
+{% endblock %}

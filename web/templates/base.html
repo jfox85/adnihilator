@@ -14,7 +14,22 @@
             --bg-code: #f0f0f0;
             --text-primary: #333333;
             --text-secondary: #666666;
-            --text-muted: #888888;
+            --text-muted: #595959;
+            --action-primary: #0066cc;
+            --action-success: #187337;
+            --action-danger: #bd2130;
+            --text-success: #187337;
+            --text-danger: #bd2130;
+            --text-progress: #006b7a;
+            --status-pending-bg: #fff3cd;
+            --status-pending-text: #856404;
+            --status-processing-bg: #cce5ff;
+            --status-processing-text: #004085;
+            --status-complete-bg: #d4edda;
+            --status-complete-text: #155724;
+            --status-failed-bg: #f8d7da;
+            --status-failed-text: #721c24;
+            --status-failed-border: #f5c6cb;
             --text-link: #0066cc;
             --border-color: #dddddd;
             --border-light: #eeeeee;
@@ -33,7 +48,19 @@
                 --bg-code: #2d2d2d;
                 --text-primary: #e0e0e0;
                 --text-secondary: #b0b0b0;
-                --text-muted: #888888;
+                --text-muted: #b0b0b0;
+                --text-success: #75d995;
+                --text-danger: #ff9aa4;
+                --text-progress: #70d5e5;
+                --status-pending-bg: #3d340f;
+                --status-pending-text: #f5d675;
+                --status-processing-bg: #15344f;
+                --status-processing-text: #9bd1ff;
+                --status-complete-bg: #173b26;
+                --status-complete-text: #a0e1b1;
+                --status-failed-bg: #492329;
+                --status-failed-text: #ffb3bc;
+                --status-failed-border: #79404a;
                 --text-link: #66b3ff;
                 --border-color: #404040;
                 --border-light: #333333;
@@ -42,9 +69,10 @@
             }
         }
 
+        *, *::before, *::after { box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            max-width: 900px;
+            max-width: 940px;
             margin: 0 auto;
             padding: 20px;
             background: var(--bg-page);
@@ -60,7 +88,7 @@
             box-shadow: var(--shadow-card);
         }
         button, .btn {
-            background: #007bff;
+            background: var(--action-primary);
             color: white;
             border: none;
             padding: 10px 20px;
@@ -70,6 +98,7 @@
             display: inline-block;
         }
         button:hover, .btn:hover { background: #0056b3; }
+        :focus-visible { outline: 3px solid var(--text-link); outline-offset: 3px; }
         input[type="text"], input[type="url"], select {
             width: 100%;
             padding: 10px;
@@ -80,26 +109,40 @@
             color: var(--text-primary);
         }
         input[type="text"]:focus, input[type="url"]:focus, select:focus {
-            outline: none;
+            outline: 2px solid var(--text-link);
+            outline-offset: 2px;
             border-color: var(--text-link);
         }
         table { width: 100%; border-collapse: collapse; }
         th, td { padding: 10px; text-align: left; border-bottom: 1px solid var(--border-color); }
-        .status-pending { color: #ffc107; }
-        .status-processing { color: #17a2b8; }
-        .status-complete { color: #28a745; }
-        .status-failed { color: #dc3545; }
+        .status-badge {
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+        }
+        .status-pending { background: var(--status-pending-bg); color: var(--status-pending-text); }
+        .status-processing { background: var(--status-processing-bg); color: var(--status-processing-text); }
+        .status-complete { background: var(--status-complete-bg); color: var(--status-complete-text); }
+        .status-failed { background: var(--status-failed-bg); color: var(--status-failed-text); }
+        .status-skipped, .status-expired { background: var(--bg-hover); color: var(--text-muted); }
 
         .header {
             display: flex;
             justify-content: space-between;
             align-items: center;
             margin-bottom: 10px;
+            flex-wrap: wrap;
+            gap: 0.75rem;
         }
         .header-left {
             display: flex;
             align-items: center;
-            gap: 1.5rem;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+            min-width: 0;
         }
         .header h1 {
             margin: 0;
@@ -115,6 +158,17 @@
             font-size: 0.95rem;
             padding: 0.4rem 0.8rem;
             border-radius: 4px;
+        }
+        @media (max-width: 600px) {
+            .header-left { flex: 1 1 0; }
+            .header h1 { flex-basis: 100%; }
+            .header .nav-link {
+                display: inline-flex;
+                align-items: center;
+                box-sizing: border-box;
+                min-height: 44px;
+                padding: 0.4rem 0.5rem;
+            }
         }
         .nav-link:hover {
             background: var(--bg-hover);
@@ -161,20 +215,36 @@
             border-bottom: 1px solid var(--border-light);
         }
         .tools-dropdown a,
-        .tools-dropdown label {
+        .tools-dropdown .tools-import {
             display: block;
             padding: 10px 12px;
             color: var(--text-primary);
             text-decoration: none;
             cursor: pointer;
             font-size: 0.9rem;
+            width: 100%;
+            text-align: left;
+            background: transparent;
+            border-radius: 0;
         }
         .tools-dropdown a:hover,
-        .tools-dropdown label:hover {
+        .tools-dropdown .tools-import:hover {
             background: var(--bg-hover);
         }
         .tools-dropdown input[type="file"] {
             display: none;
+        }
+        @media (max-width: 600px) {
+            body { padding: 16px; }
+            .header-left { flex: 1; gap: 0.25rem; }
+            .header h1 { flex-basis: 100%; font-size: 1.75rem; }
+            .tools-menu { align-self: flex-end; }
+            button, .btn, input, select { min-height: 44px; min-width: 44px; }
+            a { display: inline-block; min-height: 44px; min-width: 44px; align-content: center; }
+            .episode-description a { display: inline; min-height: 0; min-width: 0; }
+            .nav-link { display: inline-flex; align-items: center; }
+            .tools-dropdown a, .tools-import { min-height: 44px; }
+            .status-badge { font-size: 0.8rem; }
         }
     </style>
 </head>
@@ -183,13 +253,14 @@
         <div class="header-left">
             <h1><a href="/">AdNihilator</a></h1>
             <a href="/queue" class="nav-link">Queue</a>
+            <a href="/transcripts" class="nav-link">Transcripts</a>
             <a href="/logout" class="nav-link" style="color: var(--text-muted); font-size: 0.85rem;">Logout</a>
         </div>
         <div class="tools-menu">
-            <button class="tools-btn" onclick="toggleToolsMenu()" title="Tools">&#9881;</button>
+            <button type="button" id="toolsButton" class="tools-btn" onclick="toggleToolsMenu()" title="Tools" aria-label="Tools" aria-expanded="false" aria-controls="toolsDropdown">&#9881;</button>
             <div class="tools-dropdown" id="toolsDropdown">
                 <div class="tools-dropdown-header">Import / Export</div>
-                <label for="opmlImport">Import OPML...</label>
+                <button type="button" class="tools-import" onclick="document.getElementById('opmlImport').click()">Import OPML…</button>
                 <input type="file" id="opmlImport" accept=".opml,.xml" onchange="importOPML(this)">
                 <a href="/opml/export" download>Export OPML</a>
             </div>
@@ -197,15 +268,30 @@
     </div>
 
     <script>
-    function toggleToolsMenu() {
-        document.getElementById('toolsDropdown').classList.toggle('open');
+    function setToolsMenuOpen(open, restoreFocus = false) {
+        document.getElementById('toolsDropdown').classList.toggle('open', open);
+        const trigger = document.getElementById('toolsButton');
+        trigger.setAttribute('aria-expanded', String(open));
+        if (restoreFocus) trigger.focus();
     }
+
+    function toggleToolsMenu() {
+        const dropdown = document.getElementById('toolsDropdown');
+        setToolsMenuOpen(!dropdown.classList.contains('open'));
+    }
+
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape' && document.getElementById('toolsDropdown').classList.contains('open')) {
+            e.preventDefault();
+            setToolsMenuOpen(false, true);
+        }
+    });
 
     // Close dropdown when clicking outside
     document.addEventListener('click', function(e) {
         const menu = document.querySelector('.tools-menu');
         if (!menu.contains(e.target)) {
-            document.getElementById('toolsDropdown').classList.remove('open');
+            setToolsMenuOpen(false);
         }
     });
 
@@ -242,7 +328,7 @@
 
         // Reset file input
         input.value = '';
-        document.getElementById('toolsDropdown').classList.remove('open');
+        setToolsMenuOpen(false, true);
     }
     </script>
     {% block content %}{% endblock %}

@@ -1,0 +1,1902 @@
+{
+  "segments": [
+    {
+      "index": 1253,
+      "start": 3444.32,
+      "end": 3446.48,
+      "text": "Finally, I I listened to the Everware Millionaire.",
+      "words": [
+        {
+          "word": " Fin",
+          "start": 3444.32,
+          "end": 3444.56,
+          "probability": 1.0
+        },
+        {
+          "word": "ally",
+          "start": 3444.56,
+          "end": 3444.72,
+          "probability": 1.0
+        },
+        {
+          "word": ",",
+          "start": 3444.72,
+          "end": 3444.7999999999997,
+          "probability": 1.0
+        },
+        {
+          "word": " I",
+          "start": 3444.8,
+          "end": 3445.04,
+          "probability": 1.0
+        },
+        {
+          "word": " I",
+          "start": 3445.04,
+          "end": 3445.12,
+          "probability": 1.0
+        },
+        {
+          "word": " l",
+          "start": 3445.12,
+          "end": 3445.2,
+          "probability": 1.0
+        },
+        {
+          "word": "isten",
+          "start": 3445.2,
+          "end": 3445.2799999999997,
+          "probability": 1.0
+        },
+        {
+          "word": "ed",
+          "start": 3445.28,
+          "end": 3445.36,
+          "probability": 1.0
+        },
+        {
+          "word": " to",
+          "start": 3445.36,
+          "end": 3445.52,
+          "probability": 1.0
+        },
+        {
+          "word": " the",
+          "start": 3445.52,
+          "end": 3445.6,
+          "probability": 1.0
+        },
+        {
+          "word": " E",
+          "start": 3445.6,
+          "end": 3445.7599999999998,
+          "probability": 1.0
+        },
+        {
+          "word": "ver",
+          "start": 3445.76,
+          "end": 3445.84,
+          "probability": 1.0
+        },
+        {
+          "word": "w",
+          "start": 3445.84,
+          "end": 3445.92,
+          "probability": 1.0
+        },
+        {
+          "word": "are",
+          "start": 3445.92,
+          "end": 3446.0,
+          "probability": 1.0
+        },
+        {
+          "word": " M",
+          "start": 3446.08,
+          "end": 3446.16,
+          "probability": 1.0
+        },
+        {
+          "word": "illi",
+          "start": 3446.16,
+          "end": 3446.24,
+          "probability": 1.0
+        },
+        {
+          "word": "on",
+          "start": 3446.24,
+          "end": 3446.3199999999997,
+          "probability": 1.0
+        },
+        {
+          "word": "aire",
+          "start": 3446.32,
+          "end": 3446.4,
+          "probability": 1.0
+        },
+        {
+          "word": ".",
+          "start": 3446.4,
+          "end": 3446.48,
+          "probability": 1.0
+        }
+      ]
+    },
+    {
+      "index": 1254,
+      "start": 3446.48,
+      "end": 3448.2400000000002,
+      "text": "We talked about it a few weeks ago.",
+      "words": [
+        {
+          "word": " We",
+          "start": 3446.48,
+          "end": 3446.56,
+          "probability": 1.0
+        },
+        {
+          "word": " tal",
+          "start": 3446.56,
+          "end": 3446.64,
+          "probability": 1.0
+        },
+        {
+          "word": "ked",
+          "start": 3446.64,
+          "end": 3446.72,
+          "probability": 1.0
+        },
+        {
+          "word": " about",
+          "start": 3446.72,
+          "end": 3446.7999999999997,
+          "probability": 1.0
+        },
+        {
+          "word": " it",
+          "start": 3446.8,
+          "end": 3446.96,
+          "probability": 1.0
+        },
+        {
+          "word": " a",
+          "start": 3446.96,
+          "end": 3447.04,
+          "probability": 1.0
+        },
+        {
+          "word": " f",
+          "start": 3447.04,
+          "end": 3447.12,
+          "probability": 1.0
+        },
+        {
+          "word": "ew",
+          "start": 3447.12,
+          "end": 3447.2,
+          "probability": 1.0
+        },
+        {
+          "word": " we",
+          "start": 3447.2,
+          "end": 3447.2799999999997,
+          "probability": 1.0
+        },
+        {
+          "word": "eks",
+          "start": 3447.28,
+          "end": 3447.44,
+          "probability": 1.0
+        },
+        {
+          "word": " a",
+          "start": 3447.44,
+          "end": 3447.68,
+          "probability": 1.0
+        },
+        {
+          "word": "go",
+          "start": 3447.68,
+          "end": 3447.9199999999996,
+          "probability": 1.0
+        },
+        {
+          "word": ".",
+          "start": 3447.92,
+          "end": 3448.2400000000002,
+          "probability": 1.0
+        }
+      ]
+    },
+    {
+      "index": 1255,
+      "start": 3448.24,
+      "end": 3450.16,
+      "text": "This is like the finance book of the year.",
+      "words": [
+        {
+          "word": " This",
+          "start": 3448.24,
+          "end": 3448.4799999999996,
+          "probability": 1.0
+        },
+        {
+          "word": " is",
+          "start": 3448.48,
+          "end": 3448.64,
+          "probability": 1.0
+        },
+        {
+          "word": " like",
+          "start": 3448.64,
+          "end": 3448.7999999999997,
+          "probability": 1.0
+        },
+        {
+          "word": " the",
+          "start": 3448.8,
+          "end": 3448.96,
+          "probability": 1.0
+        },
+        {
+          "word": " fin",
+          "start": 3448.96,
+          "end": 3449.12,
+          "probability": 1.0
+        },
+        {
+          "word": "ance",
+          "start": 3449.12,
+          "end": 3449.2799999999997,
+          "probability": 1.0
+        },
+        {
+          "word": " bo",
+          "start": 3449.28,
+          "end": 3449.36,
+          "probability": 1.0
+        },
+        {
+          "word": "ok",
+          "start": 3449.36,
+          "end": 3449.44,
+          "probability": 1.0
+        },
+        {
+          "word": " of",
+          "start": 3449.44,
+          "end": 3449.6,
+          "probability": 1.0
+        },
+        {
+          "word": " the",
+          "start": 3449.6,
+          "end": 3449.68,
+          "probability": 1.0
+        },
+        {
+          "word": " ye",
+          "start": 3449.68,
+          "end": 3449.8399999999997,
+          "probability": 1.0
+        },
+        {
+          "word": "ar",
+          "start": 3449.84,
+          "end": 3450.0,
+          "probability": 1.0
+        },
+        {
+          "word": ".",
+          "start": 3450.0,
+          "end": 3450.16,
+          "probability": 1.0
+        }
+      ]
+    },
+    {
+      "index": 1256,
+      "start": 3450.16,
+      "end": 3451.12,
+      "text": "It's so good.",
+      "words": [
+        {
+          "word": " It",
+          "start": 3450.16,
+          "end": 3450.3199999999997,
+          "probability": 1.0
+        },
+        {
+          "word": "'",
+          "start": 3450.32,
+          "end": 3450.4,
+          "probability": 1.0
+        },
+        {
+          "word": "s",
+          "start": 3450.4,
+          "end": 3450.56,
+          "probability": 1.0
+        },
+        {
+          "word": " so",
+          "start": 3450.56,
+          "end": 3450.7999999999997,
+          "probability": 1.0
+        },
+        {
+          "word": " good",
+          "start": 3450.8,
+          "end": 3451.04,
+          "probability": 1.0
+        },
+        {
+          "word": ".",
+          "start": 3451.04,
+          "end": 3451.12,
+          "probability": 1.0
+        }
+      ]
+    },
+    {
+      "index": 1257,
+      "start": 3451.12,
+      "end": 3457.68,
+      "text": "It's so well researched, and it's one of those books that it's good for the data nerds, it's good for people who want to be inspired.",
+      "words": [
+        {
+          "word": " It",
+          "start": 3451.12,
+          "end": 3451.2799999999997,
+          "probability": 1.0
+        },
+        {
+          "word": "'",
+          "start": 3451.28,
+          "end": 3451.36,
+          "probability": 1.0
+        },
+        {
+          "word": "s",
+          "start": 3451.36,
+          "end": 3451.44,
+          "probability": 1.0
+        },
+        {
+          "word": " so",
+          "start": 3451.44,
+          "end": 3451.68,
+          "probability": 1.0
+        },
+        {
+          "word": " well",
+          "start": 3451.68,
+          "end": 3451.9199999999996,
+          "probability": 1.0
+        },
+        {
+          "word": " res",
+          "start": 3451.92,
+          "end": 3452.08,
+          "probability": 1.0
+        },
+        {
+          "word": "e",
+          "start": 3452.24,
+          "end": 3452.3199999999997,
+          "probability": 1.0
+        },
+        {
+          "word": "ar",
+          "start": 3452.32,
+          "end": 3452.4,
+          "probability": 1.0
+        },
+        {
+          "word": "ch",
+          "start": 3452.4,
+          "end": 3452.48,
+          "probability": 1.0
+        },
+        {
+          "word": "ed",
+          "start": 3452.48,
+          "end": 3452.64,
+          "probability": 1.0
+        },
+        {
+          "word": ",",
+          "start": 3452.64,
+          "end": 3452.72,
+          "probability": 1.0
+        },
+        {
+          "word": " and",
+          "start": 3452.72,
+          "end": 3452.7999999999997,
+          "probability": 1.0
+        },
+        {
+          "word": " it",
+          "start": 3452.8,
+          "end": 3452.88,
+          "probability": 1.0
+        },
+        {
+          "word": "'",
+          "start": 3452.88,
+          "end": 3452.96,
+          "probability": 1.0
+        },
+        {
+          "word": "s",
+          "start": 3452.96,
+          "end": 3452.96,
+          "probability": 1.0
+        },
+        {
+          "word": " one",
+          "start": 3452.96,
+          "end": 3453.12,
+          "probability": 1.0
+        },
+        {
+          "word": " of",
+          "start": 3453.12,
+          "end": 3453.2,
+          "probability": 1.0
+        },
+        {
+          "word": " th",
+          "start": 3453.2,
+          "end": 3453.2799999999997,
+          "probability": 1.0
+        },
+        {
+          "word": "ose",
+          "start": 3453.28,
+          "end": 3453.36,
+          "probability": 1.0
+        },
+        {
+          "word": " bo",
+          "start": 3453.36,
+          "end": 3453.52,
+          "probability": 1.0
+        },
+        {
+          "word": "oks",
+          "start": 3453.52,
+          "end": 3453.68,
+          "probability": 1.0
+        },
+        {
+          "word": " that",
+          "start": 3453.68,
+          "end": 3453.9199999999996,
+          "probability": 1.0
+        },
+        {
+          "word": " it",
+          "start": 3453.92,
+          "end": 3454.0,
+          "probability": 1.0
+        },
+        {
+          "word": "'",
+          "start": 3454.0,
+          "end": 3454.08,
+          "probability": 1.0
+        },
+        {
+          "word": "s",
+          "start": 3454.08,
+          "end": 3454.16,
+          "probability": 1.0
+        },
+        {
+          "word": " good",
+          "start": 3454.16,
+          "end": 3454.3199999999997,
+          "probability": 1.0
+        },
+        {
+          "word": " for",
+          "start": 3454.32,
+          "end": 3454.4,
+          "probability": 1.0
+        },
+        {
+          "word": " the",
+          "start": 3454.4,
+          "end": 3454.56,
+          "probability": 1.0
+        },
+        {
+          "word": " dat",
+          "start": 3454.56,
+          "end": 3454.72,
+          "probability": 1.0
+        },
+        {
+          "word": "a",
+          "start": 3454.72,
+          "end": 3454.9599999999996,
+          "probability": 1.0
+        },
+        {
+          "word": " n",
+          "start": 3454.96,
+          "end": 3455.04,
+          "probability": 1.0
+        },
+        {
+          "word": "erd",
+          "start": 3455.04,
+          "end": 3455.2,
+          "probability": 1.0
+        },
+        {
+          "word": "s",
+          "start": 3455.2,
+          "end": 3455.4399999999996,
+          "probability": 1.0
+        },
+        {
+          "word": ",",
+          "start": 3455.44,
+          "end": 3455.6,
+          "probability": 1.0
+        },
+        {
+          "word": " it",
+          "start": 3455.6,
+          "end": 3455.68,
+          "probability": 1.0
+        },
+        {
+          "word": "'",
+          "start": 3455.68,
+          "end": 3455.7599999999998,
+          "probability": 1.0
+        },
+        {
+          "word": "s",
+          "start": 3455.76,
+          "end": 3455.92,
+          "probability": 1.0
+        },
+        {
+          "word": " good",
+          "start": 3455.92,
+          "end": 3456.2400000000002,
+          "probability": 1.0
+        },
+        {
+          "word": " for",
+          "start": 3456.24,
+          "end": 3456.4799999999996,
+          "probability": 1.0
+        },
+        {
+          "word": " people",
+          "start": 3456.48,
+          "end": 3456.64,
+          "probability": 1.0
+        },
+        {
+          "word": " who",
+          "start": 3456.64,
+          "end": 3456.8799999999997,
+          "probability": 1.0
+        },
+        {
+          "word": " want",
+          "start": 3456.88,
+          "end": 3457.04,
+          "probability": 1.0
+        },
+        {
+          "word": " to",
+          "start": 3457.04,
+          "end": 3457.12,
+          "probability": 1.0
+        },
+        {
+          "word": " be",
+          "start": 3457.12,
+          "end": 3457.2,
+          "probability": 1.0
+        },
+        {
+          "word": " insp",
+          "start": 3457.2,
+          "end": 3457.2799999999997,
+          "probability": 1.0
+        },
+        {
+          "word": "i",
+          "start": 3457.28,
+          "end": 3457.44,
+          "probability": 1.0
+        },
+        {
+          "word": "red",
+          "start": 3457.44,
+          "end": 3457.6,
+          "probability": 1.0
+        },
+        {
+          "word": ".",
+          "start": 3457.6,
+          "end": 3457.68,
+          "probability": 1.0
+        }
+      ]
+    },
+    {
+      "index": 1258,
+      "start": 3457.68,
+      "end": 3461.2,
+      "text": "Because some of the people who started businesses, you go, oh man, that's so inspiring.",
+      "words": [
+        {
+          "word": " Be",
+          "start": 3457.68,
+          "end": 3457.7599999999998,
+          "probability": 1.0
+        },
+        {
+          "word": "cause",
+          "start": 3457.76,
+          "end": 3457.84,
+          "probability": 1.0
+        },
+        {
+          "word": " some",
+          "start": 3457.84,
+          "end": 3458.0,
+          "probability": 1.0
+        },
+        {
+          "word": " of",
+          "start": 3458.0,
+          "end": 3458.08,
+          "probability": 1.0
+        },
+        {
+          "word": " the",
+          "start": 3458.08,
+          "end": 3458.16,
+          "probability": 1.0
+        },
+        {
+          "word": " people",
+          "start": 3458.16,
+          "end": 3458.3199999999997,
+          "probability": 1.0
+        },
+        {
+          "word": " who",
+          "start": 3458.32,
+          "end": 3458.48,
+          "probability": 1.0
+        },
+        {
+          "word": " star",
+          "start": 3458.48,
+          "end": 3458.56,
+          "probability": 1.0
+        },
+        {
+          "word": "ted",
+          "start": 3458.56,
+          "end": 3458.72,
+          "probability": 1.0
+        },
+        {
+          "word": " bus",
+          "start": 3458.72,
+          "end": 3458.7999999999997,
+          "probability": 1.0
+        },
+        {
+          "word": "in",
+          "start": 3458.8,
+          "end": 3458.8,
+          "probability": 1.0
+        },
+        {
+          "word": "ess",
+          "start": 3458.8,
+          "end": 3458.88,
+          "probability": 1.0
+        },
+        {
+          "word": "es",
+          "start": 3458.88,
+          "end": 3459.04,
+          "probability": 1.0
+        },
+        {
+          "word": ",",
+          "start": 3459.04,
+          "end": 3459.12,
+          "probability": 1.0
+        },
+        {
+          "word": " you",
+          "start": 3459.12,
+          "end": 3459.2799999999997,
+          "probability": 1.0
+        },
+        {
+          "word": " go",
+          "start": 3459.28,
+          "end": 3459.36,
+          "probability": 1.0
+        },
+        {
+          "word": ",",
+          "start": 3459.36,
+          "end": 3459.44,
+          "probability": 1.0
+        },
+        {
+          "word": " oh",
+          "start": 3459.44,
+          "end": 3459.52,
+          "probability": 1.0
+        },
+        {
+          "word": " man",
+          "start": 3459.6,
+          "end": 3459.7599999999998,
+          "probability": 1.0
+        },
+        {
+          "word": ",",
+          "start": 3459.76,
+          "end": 3459.84,
+          "probability": 1.0
+        },
+        {
+          "word": " that",
+          "start": 3459.84,
+          "end": 3459.92,
+          "probability": 1.0
+        },
+        {
+          "word": "'",
+          "start": 3459.92,
+          "end": 3460.0,
+          "probability": 1.0
+        },
+        {
+          "word": "s",
+          "start": 3460.0,
+          "end": 3460.08,
+          "probability": 1.0
+        },
+        {
+          "word": " so",
+          "start": 3460.08,
+          "end": 3460.3199999999997,
+          "probability": 1.0
+        },
+        {
+          "word": " insp",
+          "start": 3460.32,
+          "end": 3460.56,
+          "probability": 1.0
+        },
+        {
+          "word": "ir",
+          "start": 3460.56,
+          "end": 3460.7999999999997,
+          "probability": 1.0
+        },
+        {
+          "word": "ing",
+          "start": 3460.8,
+          "end": 3461.04,
+          "probability": 1.0
+        },
+        {
+          "word": ".",
+          "start": 3461.04,
+          "end": 3461.2,
+          "probability": 1.0
+        }
+      ]
+    },
+    {
+      "index": 1259,
+      "start": 3461.2,
+      "end": 3468.24,
+      "text": "But it's also kind of maddening how people who are very rich get the biggest tax breaks.",
+      "words": [
+        {
+          "word": " But",
+          "start": 3461.2,
+          "end": 3461.4399999999996,
+          "probability": 1.0
+        },
+        {
+          "word": " it",
+          "start": 3461.44,
+          "end": 3461.6,
+          "probability": 1.0
+        },
+        {
+          "word": "'",
+          "start": 3461.6,
+          "end": 3461.7599999999998,
+          "probability": 1.0
+        },
+        {
+          "word": "s",
+          "start": 3461.76,
+          "end": 3462.0800000000004,
+          "probability": 1.0
+        },
+        {
+          "word": " also",
+          "start": 3462.08,
+          "end": 3462.4,
+          "probability": 1.0
+        },
+        {
+          "word": " kind",
+          "start": 3462.4,
+          "end": 3462.7200000000003,
+          "probability": 1.0
+        },
+        {
+          "word": " of",
+          "start": 3462.72,
+          "end": 3463.04,
+          "probability": 1.0
+        },
+        {
+          "word": " mad",
+          "start": 3463.04,
+          "end": 3463.2799999999997,
+          "probability": 1.0
+        },
+        {
+          "word": "den",
+          "start": 3463.28,
+          "end": 3463.52,
+          "probability": 1.0
+        },
+        {
+          "word": "ing",
+          "start": 3463.52,
+          "end": 3463.7599999999998,
+          "probability": 1.0
+        },
+        {
+          "word": " how",
+          "start": 3463.92,
+          "end": 3464.2400000000002,
+          "probability": 1.0
+        },
+        {
+          "word": " people",
+          "start": 3464.24,
+          "end": 3464.56,
+          "probability": 1.0
+        },
+        {
+          "word": " who",
+          "start": 3464.56,
+          "end": 3464.88,
+          "probability": 1.0
+        },
+        {
+          "word": " are",
+          "start": 3464.88,
+          "end": 3465.12,
+          "probability": 1.0
+        },
+        {
+          "word": " very",
+          "start": 3465.12,
+          "end": 3465.44,
+          "probability": 1.0
+        },
+        {
+          "word": " ri",
+          "start": 3465.44,
+          "end": 3465.76,
+          "probability": 1.0
+        },
+        {
+          "word": "ch",
+          "start": 3465.76,
+          "end": 3466.0,
+          "probability": 1.0
+        },
+        {
+          "word": " get",
+          "start": 3466.24,
+          "end": 3466.56,
+          "probability": 1.0
+        },
+        {
+          "word": " the",
+          "start": 3466.56,
+          "end": 3466.72,
+          "probability": 1.0
+        },
+        {
+          "word": " b",
+          "start": 3466.72,
+          "end": 3466.7999999999997,
+          "probability": 1.0
+        },
+        {
+          "word": "ig",
+          "start": 3466.8,
+          "end": 3466.88,
+          "probability": 1.0
+        },
+        {
+          "word": "g",
+          "start": 3466.88,
+          "end": 3467.04,
+          "probability": 1.0
+        },
+        {
+          "word": "est",
+          "start": 3467.04,
+          "end": 3467.12,
+          "probability": 1.0
+        },
+        {
+          "word": " tax",
+          "start": 3467.12,
+          "end": 3467.44,
+          "probability": 1.0
+        },
+        {
+          "word": " bre",
+          "start": 3467.44,
+          "end": 3467.76,
+          "probability": 1.0
+        },
+        {
+          "word": "aks",
+          "start": 3467.76,
+          "end": 3468.0,
+          "probability": 1.0
+        },
+        {
+          "word": ".",
+          "start": 3468.0,
+          "end": 3468.24,
+          "probability": 1.0
+        }
+      ]
+    },
+    {
+      "index": 1260,
+      "start": 3468.24,
+      "end": 3470.56,
+      "text": "So it's it's got something for everyone.",
+      "words": [
+        {
+          "word": " So",
+          "start": 3468.24,
+          "end": 3468.4799999999996,
+          "probability": 1.0
+        },
+        {
+          "word": " it",
+          "start": 3468.56,
+          "end": 3468.64,
+          "probability": 1.0
+        },
+        {
+          "word": "'",
+          "start": 3468.64,
+          "end": 3468.7999999999997,
+          "probability": 1.0
+        },
+        {
+          "word": "s",
+          "start": 3468.8,
+          "end": 3468.8,
+          "probability": 1.0
+        },
+        {
+          "word": " it",
+          "start": 3468.88,
+          "end": 3468.96,
+          "probability": 1.0
+        },
+        {
+          "word": "'",
+          "start": 3468.96,
+          "end": 3469.04,
+          "probability": 1.0
+        },
+        {
+          "word": "s",
+          "start": 3469.04,
+          "end": 3469.12,
+          "probability": 1.0
+        },
+        {
+          "word": " got",
+          "start": 3469.12,
+          "end": 3469.2799999999997,
+          "probability": 1.0
+        },
+        {
+          "word": " somet",
+          "start": 3469.28,
+          "end": 3469.52,
+          "probability": 1.0
+        },
+        {
+          "word": "hing",
+          "start": 3469.52,
+          "end": 3469.68,
+          "probability": 1.0
+        },
+        {
+          "word": " for",
+          "start": 3469.68,
+          "end": 3469.8399999999997,
+          "probability": 1.0
+        },
+        {
+          "word": " ever",
+          "start": 3469.84,
+          "end": 3469.92,
+          "probability": 1.0
+        },
+        {
+          "word": "y",
+          "start": 3469.92,
+          "end": 3470.16,
+          "probability": 1.0
+        },
+        {
+          "word": "one",
+          "start": 3470.16,
+          "end": 3470.3199999999997,
+          "probability": 1.0
+        },
+        {
+          "word": ".",
+          "start": 3470.32,
+          "end": 3470.56,
+          "probability": 1.0
+        }
+      ]
+    },
+    {
+      "index": 1261,
+      "start": 3470.56,
+      "end": 3471.8399999999997,
+      "text": "Very, very good book.",
+      "words": [
+        {
+          "word": " Ver",
+          "start": 3470.56,
+          "end": 3470.72,
+          "probability": 1.0
+        },
+        {
+          "word": "y",
+          "start": 3470.72,
+          "end": 3470.8799999999997,
+          "probability": 1.0
+        },
+        {
+          "word": ",",
+          "start": 3470.88,
+          "end": 3470.96,
+          "probability": 1.0
+        },
+        {
+          "word": " very",
+          "start": 3470.96,
+          "end": 3471.12,
+          "probability": 1.0
+        },
+        {
+          "word": " good",
+          "start": 3471.12,
+          "end": 3471.2,
+          "probability": 1.0
+        },
+        {
+          "word": " bo",
+          "start": 3471.4,
+          "end": 3471.48,
+          "probability": 1.0
+        },
+        {
+          "word": "ok",
+          "start": 3471.48,
+          "end": 3471.56,
+          "probability": 1.0
+        },
+        {
+          "word": ".",
+          "start": 3471.68,
+          "end": 3471.8399999999997,
+          "probability": 1.0
+        }
+      ]
+    },
+    {
+      "index": 1262,
+      "start": 3471.84,
+      "end": 3473.84,
+      "text": "Um I will uh I will order it.",
+      "words": [
+        {
+          "word": " Um",
+          "start": 3471.84,
+          "end": 3472.0,
+          "probability": 1.0
+        },
+        {
+          "word": " I",
+          "start": 3472.56,
+          "end": 3472.72,
+          "probability": 1.0
+        },
+        {
+          "word": " will",
+          "start": 3472.72,
+          "end": 3472.7999999999997,
+          "probability": 1.0
+        },
+        {
+          "word": " uh",
+          "start": 3472.88,
+          "end": 3473.04,
+          "probability": 1.0
+        },
+        {
+          "word": " I",
+          "start": 3473.12,
+          "end": 3473.2,
+          "probability": 1.0
+        },
+        {
+          "word": " will",
+          "start": 3473.2,
+          "end": 3473.3599999999997,
+          "probability": 1.0
+        },
+        {
+          "word": " ord",
+          "start": 3473.36,
+          "end": 3473.44,
+          "probability": 1.0
+        },
+        {
+          "word": "er",
+          "start": 3473.44,
+          "end": 3473.6,
+          "probability": 1.0
+        },
+        {
+          "word": " it",
+          "start": 3473.6,
+          "end": 3473.7599999999998,
+          "probability": 1.0
+        },
+        {
+          "word": ".",
+          "start": 3473.76,
+          "end": 3473.84,
+          "probability": 1.0
+        }
+      ]
+    },
+    {
+      "index": 1263,
+      "start": 3473.84,
+      "end": 3475.52,
+      "text": "It's called Everywhere Millionaire.",
+      "words": [
+        {
+          "word": " It",
+          "start": 3473.84,
+          "end": 3473.92,
+          "probability": 1.0
+        },
+        {
+          "word": "'",
+          "start": 3473.92,
+          "end": 3474.0,
+          "probability": 1.0
+        },
+        {
+          "word": "s",
+          "start": 3474.0,
+          "end": 3474.0,
+          "probability": 1.0
+        },
+        {
+          "word": " c",
+          "start": 3474.0,
+          "end": 3474.08,
+          "probability": 1.0
+        },
+        {
+          "word": "all",
+          "start": 3474.08,
+          "end": 3474.08,
+          "probability": 1.0
+        },
+        {
+          "word": "ed",
+          "start": 3474.08,
+          "end": 3474.3199999999997,
+          "probability": 1.0
+        },
+        {
+          "word": " E",
+          "start": 3474.32,
+          "end": 3474.4,
+          "probability": 1.0
+        },
+        {
+          "word": "ver",
+          "start": 3474.4,
+          "end": 3474.48,
+          "probability": 1.0
+        },
+        {
+          "word": "yw",
+          "start": 3474.48,
+          "end": 3474.56,
+          "probability": 1.0
+        },
+        {
+          "word": "h",
+          "start": 3474.56,
+          "end": 3474.64,
+          "probability": 1.0
+        },
+        {
+          "word": "ere",
+          "start": 3474.64,
+          "end": 3474.7999999999997,
+          "probability": 1.0
+        },
+        {
+          "word": " M",
+          "start": 3474.8,
+          "end": 3474.88,
+          "probability": 1.0
+        },
+        {
+          "word": "illi",
+          "start": 3474.88,
+          "end": 3475.04,
+          "probability": 1.0
+        },
+        {
+          "word": "on",
+          "start": 3475.04,
+          "end": 3475.2,
+          "probability": 1.0
+        },
+        {
+          "word": "aire",
+          "start": 3475.2,
+          "end": 3475.3599999999997,
+          "probability": 1.0
+        },
+        {
+          "word": ".",
+          "start": 3475.36,
+          "end": 3475.52,
+          "probability": 1.0
+        }
+      ]
+    },
+    {
+      "index": 1264,
+      "start": 3475.52,
+      "end": 3476.0,
+      "text": "Yes.",
+      "words": [
+        {
+          "word": " Y",
+          "start": 3475.52,
+          "end": 3475.68,
+          "probability": 1.0
+        },
+        {
+          "word": "es",
+          "start": 3475.68,
+          "end": 3475.8399999999997,
+          "probability": 1.0
+        },
+        {
+          "word": ".",
+          "start": 3475.84,
+          "end": 3476.0,
+          "probability": 1.0
+        }
+      ]
+    },
+    {
+      "index": 1265,
+      "start": 3476.0,
+      "end": 3477.12,
+      "text": "I thoroughly enjoyed it.",
+      "words": [
+        {
+          "word": " I",
+          "start": 3476.0,
+          "end": 3476.16,
+          "probability": 1.0
+        },
+        {
+          "word": " th",
+          "start": 3476.16,
+          "end": 3476.24,
+          "probability": 1.0
+        },
+        {
+          "word": "or",
+          "start": 3476.24,
+          "end": 3476.3999999999996,
+          "probability": 1.0
+        },
+        {
+          "word": "ough",
+          "start": 3476.4,
+          "end": 3476.48,
+          "probability": 1.0
+        },
+        {
+          "word": "ly",
+          "start": 3476.48,
+          "end": 3476.56,
+          "probability": 1.0
+        },
+        {
+          "word": " en",
+          "start": 3476.56,
+          "end": 3476.64,
+          "probability": 1.0
+        },
+        {
+          "word": "jo",
+          "start": 3476.64,
+          "end": 3476.72,
+          "probability": 1.0
+        },
+        {
+          "word": "y",
+          "start": 3476.72,
+          "end": 3476.7999999999997,
+          "probability": 1.0
+        },
+        {
+          "word": "ed",
+          "start": 3476.8,
+          "end": 3476.88,
+          "probability": 1.0
+        },
+        {
+          "word": " it",
+          "start": 3476.88,
+          "end": 3477.04,
+          "probability": 1.0
+        },
+        {
+          "word": ".",
+          "start": 3477.04,
+          "end": 3477.12,
+          "probability": 1.0
+        }
+      ]
+    },
+    {
+      "index": 1266,
+      "start": 3477.12,
+      "end": 3482.44,
+      "text": "This is about the Portillos, it talks about all these people who got rich starting businesses, then just figured it out.",
+      "words": [
+        {
+          "word": " This",
+          "start": 3477.12,
+          "end": 3477.2799999999997,
+          "probability": 1.0
+        },
+        {
+          "word": " is",
+          "start": 3477.28,
+          "end": 3477.36,
+          "probability": 1.0
+        },
+        {
+          "word": " about",
+          "start": 3477.36,
+          "end": 3477.44,
+          "probability": 1.0
+        },
+        {
+          "word": " the",
+          "start": 3477.44,
+          "end": 3477.6,
+          "probability": 1.0
+        },
+        {
+          "word": " Port",
+          "start": 3477.6,
+          "end": 3477.7599999999998,
+          "probability": 1.0
+        },
+        {
+          "word": "ill",
+          "start": 3477.92,
+          "end": 3478.0,
+          "probability": 1.0
+        },
+        {
+          "word": "os",
+          "start": 3478.0,
+          "end": 3478.08,
+          "probability": 1.0
+        },
+        {
+          "word": ",",
+          "start": 3478.16,
+          "end": 3478.24,
+          "probability": 1.0
+        },
+        {
+          "word": " it",
+          "start": 3478.24,
+          "end": 3478.3199999999997,
+          "probability": 1.0
+        },
+        {
+          "word": " tal",
+          "start": 3478.4,
+          "end": 3478.48,
+          "probability": 1.0
+        },
+        {
+          "word": "ks",
+          "start": 3478.48,
+          "end": 3478.56,
+          "probability": 1.0
+        },
+        {
+          "word": " about",
+          "start": 3478.56,
+          "end": 3478.72,
+          "probability": 1.0
+        },
+        {
+          "word": " all",
+          "start": 3478.72,
+          "end": 3478.8799999999997,
+          "probability": 1.0
+        },
+        {
+          "word": " these",
+          "start": 3478.88,
+          "end": 3479.04,
+          "probability": 1.0
+        },
+        {
+          "word": " people",
+          "start": 3479.04,
+          "end": 3479.2,
+          "probability": 1.0
+        },
+        {
+          "word": " who",
+          "start": 3479.2,
+          "end": 3479.3599999999997,
+          "probability": 1.0
+        },
+        {
+          "word": " got",
+          "start": 3479.36,
+          "end": 3479.6,
+          "probability": 1.0
+        },
+        {
+          "word": " ri",
+          "start": 3479.8,
+          "end": 3479.96,
+          "probability": 1.0
+        },
+        {
+          "word": "ch",
+          "start": 3479.96,
+          "end": 3480.04,
+          "probability": 1.0
+        },
+        {
+          "word": " st",
+          "start": 3480.12,
+          "end": 3480.2,
+          "probability": 1.0
+        },
+        {
+          "word": "art",
+          "start": 3480.2,
+          "end": 3480.3599999999997,
+          "probability": 1.0
+        },
+        {
+          "word": "ing",
+          "start": 3480.36,
+          "end": 3480.52,
+          "probability": 1.0
+        },
+        {
+          "word": " bus",
+          "start": 3480.52,
+          "end": 3480.6,
+          "probability": 1.0
+        },
+        {
+          "word": "in",
+          "start": 3480.6,
+          "end": 3480.68,
+          "probability": 1.0
+        },
+        {
+          "word": "ess",
+          "start": 3480.68,
+          "end": 3480.7599999999998,
+          "probability": 1.0
+        },
+        {
+          "word": "es",
+          "start": 3480.76,
+          "end": 3480.84,
+          "probability": 1.0
+        },
+        {
+          "word": ",",
+          "start": 3480.84,
+          "end": 3480.92,
+          "probability": 1.0
+        },
+        {
+          "word": " then",
+          "start": 3480.92,
+          "end": 3481.16,
+          "probability": 1.0
+        },
+        {
+          "word": " just",
+          "start": 3481.16,
+          "end": 3481.3999999999996,
+          "probability": 1.0
+        },
+        {
+          "word": " fig",
+          "start": 3481.4,
+          "end": 3481.64,
+          "probability": 1.0
+        },
+        {
+          "word": "u",
+          "start": 3481.64,
+          "end": 3481.7999999999997,
+          "probability": 1.0
+        },
+        {
+          "word": "red",
+          "start": 3481.8,
+          "end": 3481.88,
+          "probability": 1.0
+        },
+        {
+          "word": " it",
+          "start": 3481.88,
+          "end": 3482.04,
+          "probability": 1.0
+        },
+        {
+          "word": " out",
+          "start": 3482.04,
+          "end": 3482.2799999999997,
+          "probability": 1.0
+        },
+        {
+          "word": ".",
+          "start": 3482.28,
+          "end": 3482.44,
+          "probability": 1.0
+        }
+      ]
+    },
+    {
+      "index": 1267,
+      "start": 3482.44,
+      "end": 3484.68,
+      "text": "Yeah, we spoke about an article yesterday.",
+      "words": [
+        {
+          "word": " Ye",
+          "start": 3482.44,
+          "end": 3482.6,
+          "probability": 1.0
+        },
+        {
+          "word": "ah",
+          "start": 3482.6,
+          "end": 3482.68,
+          "probability": 1.0
+        },
+        {
+          "word": ",",
+          "start": 3482.68,
+          "end": 3482.7599999999998,
+          "probability": 1.0
+        },
+        {
+          "word": " we",
+          "start": 3482.76,
+          "end": 3482.92,
+          "probability": 1.0
+        },
+        {
+          "word": " sp",
+          "start": 3482.92,
+          "end": 3483.0,
+          "probability": 1.0
+        },
+        {
+          "word": "ok",
+          "start": 3483.0,
+          "end": 3483.16,
+          "probability": 1.0
+        },
+        {
+          "word": "e",
+          "start": 3483.16,
+          "end": 3483.24,
+          "probability": 1.0
+        },
+        {
+          "word": " about",
+          "start": 3483.24,
+          "end": 3483.3999999999996,
+          "probability": 1.0
+        },
+        {
+          "word": " an",
+          "start": 3483.88,
+          "end": 3483.96,
+          "probability": 1.0
+        },
+        {
+          "word": " ar",
+          "start": 3484.04,
+          "end": 3484.12,
+          "probability": 1.0
+        },
+        {
+          "word": "tic",
+          "start": 3484.12,
+          "end": 3484.2,
+          "probability": 1.0
+        },
+        {
+          "word": "le",
+          "start": 3484.2,
+          "end": 3484.2,
+          "probability": 1.0
+        },
+        {
+          "word": " y",
+          "start": 3484.28,
+          "end": 3484.36,
+          "probability": 1.0
+        },
+        {
+          "word": "ester",
+          "start": 3484.36,
+          "end": 3484.36,
+          "probability": 1.0
+        },
+        {
+          "word": "da",
+          "start": 3484.44,
+          "end": 3484.52,
+          "probability": 1.0
+        },
+        {
+          "word": "y",
+          "start": 3484.52,
+          "end": 3484.52,
+          "probability": 1.0
+        },
+        {
+          "word": ".",
+          "start": 3484.6,
+          "end": 3484.68,
+          "probability": 1.0
+        }
+      ]
+    },
+    {
+      "index": 1268,
+      "start": 3484.92,
+      "end": 3485.48,
+      "text": "Great stories.",
+      "words": [
+        {
+          "word": " Gre",
+          "start": 3484.92,
+          "end": 3485.0,
+          "probability": 1.0
+        },
+        {
+          "word": "at",
+          "start": 3485.0,
+          "end": 3485.08,
+          "probability": 1.0
+        },
+        {
+          "word": " stor",
+          "start": 3485.08,
+          "end": 3485.24,
+          "probability": 1.0
+        },
+        {
+          "word": "ies",
+          "start": 3485.24,
+          "end": 3485.3999999999996,
+          "probability": 1.0
+        },
+        {
+          "word": ".",
+          "start": 3485.4,
+          "end": 3485.48,
+          "probability": 1.0
+        }
+      ]
+    },
+    {
+      "index": 1269,
+      "start": 3479.84,
+      "end": 3486.2799999999997,
+      "text": "I really enjoyed this.",
+      "words": [
+        {
+          "word": ".",
+          "start": 3479.84,
+          "end": 3480.0,
+          "probability": 1.0
+        },
+        {
+          "word": " I",
+          "start": 3485.48,
+          "end": 3485.64,
+          "probability": 1.0
+        },
+        {
+          "word": " really",
+          "start": 3485.64,
+          "end": 3485.7999999999997,
+          "probability": 1.0
+        },
+        {
+          "word": " en",
+          "start": 3485.8,
+          "end": 3485.88,
+          "probability": 1.0
+        },
+        {
+          "word": "jo",
+          "start": 3485.88,
+          "end": 3485.96,
+          "probability": 1.0
+        },
+        {
+          "word": "y",
+          "start": 3485.96,
+          "end": 3486.04,
+          "probability": 1.0
+        },
+        {
+          "word": "ed",
+          "start": 3486.04,
+          "end": 3486.12,
+          "probability": 1.0
+        },
+        {
+          "word": " this",
+          "start": 3486.12,
+          "end": 3486.2799999999997,
+          "probability": 1.0
+        }
+      ]
+    },
+    {
+      "index": 1270,
+      "start": 3486.44,
+      "end": 3487.64,
+      "text": "Very good book.",
+      "words": [
+        {
+          "word": " Ver",
+          "start": 3486.44,
+          "end": 3486.52,
+          "probability": 1.0
+        },
+        {
+          "word": "y",
+          "start": 3486.52,
+          "end": 3486.68,
+          "probability": 1.0
+        },
+        {
+          "word": " good",
+          "start": 3486.68,
+          "end": 3486.9199999999996,
+          "probability": 1.0
+        },
+        {
+          "word": " bo",
+          "start": 3486.92,
+          "end": 3487.16,
+          "probability": 1.0
+        },
+        {
+          "word": "ok",
+          "start": 3487.16,
+          "end": 3487.3999999999996,
+          "probability": 1.0
+        },
+        {
+          "word": ".",
+          "start": 3487.4,
+          "end": 3487.64,
+          "probability": 1.0
+        }
+      ]
+    },
+    {
+      "index": 1271,
+      "start": 3487.64,
+      "end": 3488.2799999999997,
+      "text": "All right.",
+      "words": [
+        {
+          "word": " All",
+          "start": 3487.64,
+          "end": 3487.8799999999997,
+          "probability": 1.0
+        },
+        {
+          "word": " right",
+          "start": 3487.88,
+          "end": 3488.12,
+          "probability": 1.0
+        },
+        {
+          "word": ".",
+          "start": 3488.12,
+          "end": 3488.2799999999997,
+          "probability": 1.0
+        }
+      ]
+    }
+  ]
+}

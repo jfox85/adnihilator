@@ -21,13 +21,15 @@ from .auth import (
     SESSION_MAX_AGE,
     check_credentials,
     create_session_token,
+    safe_login_destination,
     verify_admin,
 )
 from .database import get_engine, init_db, get_session_factory
 from .dependencies import get_db
-from .routes import podcasts, api, feeds, opml
+from .routes import podcasts, api, feeds, opml, transcripts, transcript_ui, transcript_mcp
 from .services.scheduler import create_scheduler
 from . import dependencies
+from .values import finite_nonnegative_number
 
 # Configure logging
 logging.basicConfig(
@@ -69,6 +71,7 @@ def relative_time(dt: datetime | None) -> str:
 # Register custom filters
 templates.env.filters["regex_replace"] = regex_replace
 templates.env.filters["relative_time"] = relative_time
+templates.env.filters["finite_number"] = finite_nonnegative_number
 
 
 @asynccontextmanager
@@ -101,6 +104,26 @@ app.include_router(podcasts.router)
 app.include_router(api.router)
 app.include_router(feeds.router)
 app.include_router(opml.router)
+app.include_router(transcripts.router)
+app.include_router(transcript_ui.router)
+app.include_router(transcript_mcp.router)
+
+
+@app.middleware("http")
+async def bound_transcript_body(request: Request, call_next):
+    """Bound streamed bodies before JSON parsing, including missing Content-Length."""
+    limit = 12 * 1024 * 1024 + 4096 if request.url.path.startswith("/api/worker/transcripts/") else 65536
+    if request.url.path.startswith("/api/worker/transcripts/") or request.url.path == "/mcp":
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > limit:
+                return JSONResponse({"detail": "Payload too large"}, status_code=413)
+            body.extend(chunk)
+        request._body = bytes(body)
+    response = await call_next(request)
+    if request.url.path.startswith(("/api/transcripts", "/api/worker/transcripts", "/transcripts")) or request.url.path == "/mcp":
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 def _json_safe_validation_value(value: Any) -> Any:
@@ -137,7 +160,7 @@ async def login_page(request: Request, next: str = "/"):
     return templates.TemplateResponse(
         request,
         "login.html",
-        {"title": "Login", "next": next},
+        {"title": "Login", "next": safe_login_destination(next)},
     )
 
 
@@ -148,6 +171,7 @@ async def login_submit(
     password: str = Form(...),
     next: str = Form("/"),
 ):
+    next = safe_login_destination(next)
     if not check_credentials(username, password):
         return templates.TemplateResponse(
             request,
