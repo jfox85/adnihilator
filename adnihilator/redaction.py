@@ -19,12 +19,13 @@ _CREDENTIAL_NAMES = {
     "key", "api_key", "apikey", "access_key", "secret_key", "token",
     "password", "passwd", "secret", "authorization", "signature", "credential",
 }
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 _AUTH_SCHEMES = {"basic", "bearer", "token", "digest", "negotiate", "aws4-hmac-sha256"}
 
 
 def _credential_name(name: str) -> bool:
     """Recognize whole credential fields and namespaced suffixes, not counters."""
-    normalized = name.lower().replace("-", "_")
+    normalized = _CAMEL_BOUNDARY.sub("_", name).lower().replace("-", "_")
     return normalized in _CREDENTIAL_NAMES or any(
         normalized.endswith("_" + suffix) for suffix in _CREDENTIAL_NAMES
     )

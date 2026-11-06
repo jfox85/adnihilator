@@ -18,6 +18,9 @@ from web.services.feed_sync import FeedSyncError, sync_all_podcasts, sync_podcas
     "Error: --token={secret}",
     "error=OPENAI_API_KEY={secret}",
     "Authorization: {secret} rejected by upstream",
+    'stderr="secretKey={secret}"',
+    '{{"detail":"clientSecret={secret}"}}',
+    "Error: --sessionToken={secret}",
 ])
 def test_wrapped_credentials_survive_no_public_error_boundary(
     wrapper: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
