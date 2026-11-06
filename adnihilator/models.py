@@ -5,6 +5,16 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
+class ProviderFailureInfo(BaseModel):
+    """Safe provider failure details and the existing throttle retry policy."""
+
+    category: Literal["billing", "authentication", "model", "rate_limit", "transient", "unknown"]
+    status_code: int | None = None
+    global_failure: bool = False
+    retryable: bool = False
+    message: str
+
+
 class GeminiAdDetection(BaseModel):
     """A structurally valid provider detection before timestamp localization."""
 

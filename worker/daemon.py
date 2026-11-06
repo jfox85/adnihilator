@@ -19,6 +19,7 @@ from adnihilator.audio import get_duration
 from adnihilator.config import load_config
 from adnihilator.external_transcript import fetch_external_transcript
 from adnihilator.models import AdSpan, DetectionResult, FinalAdReview
+from adnihilator.provider_errors import redact_secrets
 from adnihilator.splice import splice_audio
 from adnihilator.sponsors import extract_sponsors
 from adnihilator.transcribe import transcribe_audio, transcribe_audio_parakeet
@@ -116,8 +117,8 @@ class WorkerDaemon:
                 OpenAI(api_key=self.config.llm.api_key)
             except Exception as e:
                 raise DetectionSafetyError(
-                    f"OpenAI runtime is unavailable; refusing to start worker: {e}"
-                ) from e
+                    f"OpenAI runtime is unavailable; refusing to start worker: {redact_secrets(str(e))}"
+                ) from None
 
         if self.config.gemini.enabled:
             if not self.config.gemini.api_key:
@@ -131,8 +132,8 @@ class WorkerDaemon:
                     from google import genai  # noqa: F401
             except Exception as e:
                 raise DetectionSafetyError(
-                    f"Gemini runtime is unavailable; refusing to start worker: {e}"
-                ) from e
+                    f"Gemini runtime is unavailable; refusing to start worker: {redact_secrets(str(e))}"
+                ) from None
 
     @staticmethod
     def _ensure_parallel_detection_succeeded(
@@ -1321,7 +1322,7 @@ Return JSON:
             return [], usage
 
         except Exception as e:
-            print(f"    Hunt LLM failed: {e}")
+            print(f"    Hunt LLM failed: {redact_secrets(str(e))}")
             return [], None
 
     def _final_llm_review(
@@ -1504,8 +1505,8 @@ content cannot be recovered from the processed file."""
 
         except Exception as e:
             raise DetectionSafetyError(
-                f"Required final LLM review failed; refusing to splice episode: {e}"
-            ) from e
+                f"Required final LLM review failed; refusing to splice episode: {redact_secrets(str(e))}"
+            ) from None
 
     def _llm_merge_candidates(
         self,
@@ -1549,8 +1550,8 @@ content cannot be recovered from the processed file."""
                 return spans, usage
             except Exception as e:
                 raise DetectionSafetyError(
-                    f"Required LLM merge failed; refusing to splice episode: {e}"
-                ) from e
+                    f"Required LLM merge failed; refusing to splice episode: {redact_secrets(str(e))}"
+                ) from None
 
         # No LLM client available - use simple merge
         return self._simple_merge_candidates(gemini_candidates, keyword_candidates), None
@@ -1870,7 +1871,7 @@ range. If you cannot find any clear ad copy, return an empty list."""
                     usage_total["output_tokens"] += response.usage.completion_tokens
                 result = json.loads(response.choices[0].message.content or "{}")
             except Exception as e:
-                print(f"    Mega-span refine failed ({e}), keeping original span")
+                print(f"    Mega-span refine failed ({redact_secrets(str(e))}), keeping original span")
                 refined.append(span)
                 continue
 
@@ -2065,7 +2066,7 @@ range. If you cannot find any clear ad copy, return an empty list."""
                                 ]
                                 gemini_usage = usage
                         except Exception as e:
-                            gemini_error = str(e)
+                            gemini_error = redact_secrets(str(e))
 
                     def run_transcript_keywords():
                         nonlocal keyword_candidates, segments, whisper_error, transcript_source, candidates
@@ -2111,7 +2112,7 @@ range. If you cannot find any clear ad copy, return an empty list."""
                             # Store original candidates for artifact
                             candidates = cands
                         except Exception as e:
-                            whisper_error = str(e)
+                            whisper_error = redact_secrets(str(e))
 
                     print("  Running parallel detection (Gemini + Transcript/Keywords)...")
                     # Start with "transcribing" since that's the slow part - progress updates will follow
@@ -2369,8 +2370,8 @@ range. If you cannot find any clear ad copy, return an empty list."""
 
                         except Exception as e:
                             raise DetectionSafetyError(
-                                f"Required Gemini detection failed; refusing to splice episode: {e}"
-                            ) from e
+                                f"Required Gemini detection failed; refusing to splice episode: {redact_secrets(str(e))}"
+                            ) from None
                     elif self.config.gemini.enabled:
                         raise DetectionSafetyError(
                             "Required Gemini detection is unavailable; refusing to splice episode"
@@ -2657,8 +2658,17 @@ range. If you cannot find any clear ad copy, return an empty list."""
             self.process_job(job)
             return True
         except Exception as e:
-            print(f"  Error: {e}")
-            self.api_client.fail(job.id, str(e)[:500])
+            config = getattr(self, "config", None)
+            error = redact_secrets(
+                str(e),
+                (
+                    getattr(getattr(config, "llm", None), "api_key", None),
+                    getattr(getattr(config, "gemini", None), "api_key", None),
+                    getattr(self.api_client, "api_key", None),
+                ),
+            )
+            print(f"  Error: {error}")
+            self.api_client.fail(job.id, error[:500])
             return True
 
     def run_daemon(self, interval: int = 300, watchdog_hours: int = 12) -> None:
@@ -2702,5 +2712,5 @@ range. If you cannot find any clear ad copy, return an empty list."""
                 self.api_client.close()
                 break
             except Exception as e:
-                print(f"Unexpected error: {e}")
+                print(f"Unexpected error: {redact_secrets(str(e))}")
                 time.sleep(60)  # Back off on errors

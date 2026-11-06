@@ -6,6 +6,8 @@ from typing import Optional
 
 import httpx
 
+from adnihilator.provider_errors import redact_secrets
+
 logger = logging.getLogger(__name__)
 
 
@@ -83,28 +85,28 @@ class WorkerClient:
                 source_url=data.get("source_url"),
             )
         except httpx.TimeoutException as e:
-            logger.error(f"⚠️  API TIMEOUT - Network issue or API is slow: {e}")
+            logger.error(redact_secrets(f"⚠️  API TIMEOUT - Network issue or API is slow: {e}", (self.api_key,)))
             logger.error("   This may indicate the API is down or unreachable")
             return None
         except httpx.ConnectError as e:
-            logger.error(f"⚠️  API CONNECTION FAILED - Cannot reach {self.api_url}: {e}")
+            logger.error(redact_secrets(f"⚠️  API CONNECTION FAILED - Cannot reach {self.api_url}: {e}", (self.api_key,)))
             logger.error("   Check network connectivity and API URL configuration")
             return None
         except httpx.HTTPStatusError as e:
             status = e.response.status_code
             if status == 401 or status == 403:
-                logger.error(f"⚠️  API AUTHENTICATION FAILED - Check WORKER_API_KEY: {e}")
+                logger.error(redact_secrets(f"⚠️  API AUTHENTICATION FAILED - Check WORKER_API_KEY: {e}", (self.api_key,)))
             elif status >= 500:
-                logger.error(f"⚠️  API SERVER ERROR ({status}) - API may be down: {e}")
+                logger.error(redact_secrets(f"⚠️  API SERVER ERROR ({status}) - API may be down: {e}", (self.api_key,)))
             else:
-                logger.error(f"⚠️  API REQUEST FAILED ({status}): {e}")
+                logger.error(redact_secrets(f"⚠️  API REQUEST FAILED ({status}): {e}", (self.api_key,)))
             logger.error("   Worker will retry but this indicates an API problem")
             return None
         except httpx.HTTPError as e:
-            logger.error(f"⚠️  API REQUEST FAILED - Unknown HTTP error: {e}")
+            logger.error(redact_secrets(f"⚠️  API REQUEST FAILED - Unknown HTTP error: {e}", (self.api_key,)))
             return None
         except Exception as e:
-            logger.error(f"⚠️  UNEXPECTED ERROR claiming episode: {e}", exc_info=True)
+            logger.error(redact_secrets(f"⚠️  UNEXPECTED ERROR claiming episode: {e}", (self.api_key,)))
             return None
 
     def complete(
@@ -171,7 +173,7 @@ class WorkerClient:
             response.raise_for_status()
             logger.info(f"Marked episode {episode_id} as complete")
         except httpx.HTTPError as e:
-            logger.error(f"Failed to mark episode {episode_id} as complete: {e}")
+            logger.error(redact_secrets(f"Failed to mark episode {episode_id} as complete: {e}", (self.api_key,)))
             raise
 
     def fail(self, episode_id: str, error: str) -> None:
@@ -181,6 +183,7 @@ class WorkerClient:
             episode_id: ID of the episode
             error: Error message describing the failure
         """
+        error = redact_secrets(error, (self.api_key,))
         try:
             response = self.client.post(
                 f"{self.api_url}/api/queue/{episode_id}/fail",
@@ -190,7 +193,7 @@ class WorkerClient:
             response.raise_for_status()
             logger.info(f"Marked episode {episode_id} as failed: {error[:100]}")
         except httpx.HTTPError as e:
-            logger.error(f"Failed to mark episode {episode_id} as failed: {e}")
+            logger.error(redact_secrets(f"Failed to mark episode {episode_id} as failed: {e}", (self.api_key,)))
             # Don't re-raise - we tried to report the failure
 
     def update_progress(
@@ -217,4 +220,4 @@ class WorkerClient:
             response.raise_for_status()
         except httpx.HTTPError as e:
             # Progress updates are non-critical, don't fail the job
-            logger.debug(f"Failed to update progress for {episode_id}: {e}")
+            logger.debug(redact_secrets(f"Failed to update progress for {episode_id}: {e}", (self.api_key,)))

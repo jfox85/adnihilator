@@ -21,6 +21,7 @@ from .gemini_common import (
     validate_detections,
 )
 from .models import AdSpan, SponsorInfo
+from .provider_errors import classify_provider_error, describe_provider_failure, redact_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +83,7 @@ class GeminiAudioClient:
             # Upload audio to Gemini Files API
             audio_file = client.files.upload(file=str(audio_path))
             upload_time = time.time() - upload_start
-            logger.info(f"Upload complete in {upload_time:.2f}s, URI: {audio_file.uri}")
+            logger.info(f"Upload complete in {upload_time:.2f}s")
 
             # Wait for file to be processed
             max_wait = 120  # seconds
@@ -172,7 +173,8 @@ class GeminiAudioClient:
 
         except Exception as e:
             # Re-raise with context
-            raise ValueError(f"Gemini detection failed: {e}") from e
+            failure = classify_provider_error(e, (self.api_key,))
+            raise ValueError(f"Gemini detection failed: {describe_provider_failure(failure)}") from None
 
     def _build_detection_prompt(
         self,
@@ -302,7 +304,7 @@ If no ads found: {{"ads": [], "reason": "<explanation>"}}"""
             return json.loads(content)
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse Gemini response as JSON: {e}")
-            logger.error(f"Response text: {text[:500]}...")
+            logger.error(f"Response text: {redact_secrets(text, (self.api_key,))[:500]}...")
             raise ValueError(f"Failed to parse Gemini response as JSON: {e}")
 
 
