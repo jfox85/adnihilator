@@ -29,7 +29,7 @@ def pages(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[tuple[Tes
 
 @pytest.mark.skipif(not shutil.which('node'), reason='Node is required for rendered-script verification')
 class TestExplicitAttemptFeedback:
-    @pytest.mark.parametrize('mode', ['action', 'opml', 'offscreen'])
+    @pytest.mark.parametrize('mode', ['action', 'opml', 'offscreen', 'refresh-all-partial'])
     def test_new_failures_are_visible_and_dismissed_background_fault_stays_muted(
         self, pages: tuple, mode: str
     ) -> None:

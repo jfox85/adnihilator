@@ -133,6 +133,7 @@ async function refreshPodcast(id, btn) {
 async function refreshAll() {
     const btn = document.getElementById('refreshAllBtn');
     await runUIAction(btn, async () => {
+        clearRequestNotice('refresh-all');
         btn.textContent = 'Refreshing...';
         try {
             const data = await requestJSON('/podcasts/sync-all', {method: 'POST'});
