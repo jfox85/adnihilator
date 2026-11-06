@@ -204,8 +204,6 @@ def _sync_podcast_entries(db: Session, podcast: Podcast) -> int:
         raise FeedSyncError(f"Feed server returned HTTP {parse_error.code}") from None
     if isinstance(parse_error, URLError):
         raise FeedSyncError("Could not connect to the feed server") from None
-    if isinstance(parse_error, SAXParseException):
-        raise FeedSyncError("Response is not a complete RSS or Atom feed") from None
     if not feed.get("version"):
         raise FeedSyncError("Response is not a recognized RSS or Atom feed")
 
@@ -214,15 +212,17 @@ def _sync_podcast_entries(db: Session, podcast: Podcast) -> int:
     base_url = feed.get("href")
     if not isinstance(base_url, str) or not is_usable_audio_url(base_url):
         base_url = document.url or podcast.source_rss_url
-    omitted_types = None
-    version = feed.get("version")
-    if isinstance(version, str) and version.startswith("atom") and document.url:
+    source_enclosures = None
+    if document.url:
         try:
-            omitted_types = document.atom_omitted_types()
+            source_enclosures = document.validate_structure()
         except Exception:
-            raise FeedSyncError("Response is not a complete Atom feed") from None
-        if len(omitted_types) != len(feed.entries):
+            raise FeedSyncError("Response is not a complete RSS or Atom feed") from None
+        if source_enclosures is not None and len(source_enclosures) != len(feed.entries):
             raise FeedSyncError("Atom enclosure metadata could not be read reliably")
+    elif isinstance(parse_error, SAXParseException):
+        # No captured document can establish that an incomplete parse recovered.
+        raise FeedSyncError("Response is not a complete RSS or Atom feed") from None
 
     # Update podcast metadata
     if hasattr(feed.feed, "title"):
@@ -253,12 +253,26 @@ def _sync_podcast_entries(db: Session, podcast: Podcast) -> int:
     added = 0
     for index, entry in enumerate(feed.entries):
         enclosures = [dict(enclosure) for enclosure in getattr(entry, "enclosures", [])]
-        if omitted_types is not None:
-            if len(omitted_types[index]) != len(enclosures):
+        if source_enclosures is not None:
+            if len(source_enclosures[index]) != len(enclosures):
                 raise FeedSyncError("Atom enclosure metadata could not be read reliably")
-            for enclosure, omitted in zip(enclosures, omitted_types[index]):
-                if omitted:
+            for enclosure, original in zip(enclosures, source_enclosures[index]):
+                if "type" not in original:
                     enclosure.pop("type", None)
+                raw_href = original.get("href")
+                try:
+                    # Validate the original reference before feedparser repairs
+                    # malformed absolute URLs or resolves empty hrefs to the feed.
+                    raw_valid = (
+                        isinstance(raw_href, str) and bool(raw_href)
+                        and not any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in raw_href)
+                        and is_usable_audio_url(urljoin(base_url, raw_href))
+                        and (not urlsplit(raw_href).scheme or is_usable_audio_url(raw_href))
+                    )
+                except ValueError:
+                    raw_valid = False
+                if not raw_valid:
+                    enclosure["href"] = None
         for enclosure in enclosures:
             href = enclosure.get("href")
             if isinstance(href, str):

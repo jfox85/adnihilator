@@ -42,15 +42,24 @@ there is no title/date heuristic. Existing GUIDs, URLs and output state are not
 backfilled or rewritten. Missing/expired saved audio still needs a separate
 explicit recovery policy.
 
-Fatal XML syntax errors, including truncated RSS, are rejected before changing
-metadata or importing partial entries. Unrecognized XML does not count as a feed
-merely because the parser exposes an entry. Recoverable MIME/encoding warnings on
-otherwise complete recognized feeds remain supported.
+Incomplete or incorrectly nested XML, including truncated RSS, is rejected before
+changing metadata or importing partial entries. Unrecognized XML does not count as
+a feed merely because the parser exposes an entry. Complete recognized feeds
+recovered by feedparser from bare ampersands, HTML entities such as `&nbsp;`, or
+undeclared namespace prefixes remain usable, as do MIME/encoding warnings. A
+validation-only parse escapes entity tokens and checks structure without namespace
+expansion; it never invents closing tags or changes the imported feedparser data.
+This is bounded compatibility support, not a promise to recover arbitrary malformed
+XML or preserve every malformed title byte-for-byte.
 
 Relative RSS enclosures are resolved against the final fetched HTTP(S) feed URL,
 including after redirects. Explicit malformed or unsupported absolute URLs are
-not repaired. For Atom, the original enclosure type attribute is retained for
-admission: a missing type is distinct from an explicitly declared `text/html`,
+not repaired. For Atom, original href/type/rel attributes are retained before
+feedparser normalization. Empty, whitespace-containing, malformed or unsupported
+raw URLs remain unusable even if the parser repairs them into valid-looking URLs;
+valid relative references retain their XML-base/final-response resolution.
+Enclosure relations are compared case-insensitively to align with feedparser. A
+missing type is distinct from an explicitly declared `text/html`,
 even though feedparser defaults both to that label. The same HTTP response is
 used for this metadata; there is no second fetch. Gzip/deflate and XML encodings
 are handled before reading the source attributes.
