@@ -29,8 +29,11 @@ function dismissRequestNotice() {
     document.getElementById('requestNotice').hidden = true;
     if (requestNoticePreviousFocus?.isConnected) requestNoticePreviousFocus.focus();
 }
-function clearRequestNotice(owner = null) {
+function resetRequestNoticeDismissal(owner = null) {
     dismissedRequestNotices.delete(owner);
+}
+function clearRequestNotice(owner = null) {
+    resetRequestNoticeDismissal(owner);
     if (requestNoticeOwner === owner) {
         document.getElementById('requestNotice').hidden = true;
         requestNoticeKey = null;

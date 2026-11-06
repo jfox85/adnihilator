@@ -133,13 +133,13 @@ async function refreshPodcast(id, btn) {
 async function refreshAll() {
     const btn = document.getElementById('refreshAllBtn');
     await runUIAction(btn, async () => {
-        clearRequestNotice('refresh-all');
+        resetRequestNoticeDismissal('refresh-all');
         btn.textContent = 'Refreshing...';
         try {
             const data = await requestJSON('/podcasts/sync-all', {method: 'POST'});
             if (Object.values(data.results).some(result => result.error)) {
                 showRequestNotice('Some feeds could not be refreshed. Try again shortly.', {retry: refreshAll, owner: 'refresh-all'});
-            } else { window.location.reload(); }
+            } else { clearRequestNotice('refresh-all'); window.location.reload(); }
         } finally { btn.textContent = 'Refresh All'; }
     }, 'The feeds could not be refreshed. Try again shortly.');
 }
