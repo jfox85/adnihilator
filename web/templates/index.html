@@ -4,7 +4,8 @@
 <div class="card">
     <h2>Add Podcast</h2>
     <form action="/podcasts" method="post">
-        <input type="url" name="source_rss_url" placeholder="https://example.com/feed.xml" required>
+        <label for="feedSource">Podcast feed URL</label>
+        <input type="url" id="feedSource" name="source_rss_url" placeholder="https://example.com/feed.xml" required>
         <button type="submit">Add Podcast</button>
     </form>
 </div>
@@ -18,13 +19,13 @@
     </div>
     {% if podcasts %}
     <div class="search-box">
-        <input type="text" id="podcastSearch" placeholder="Filter podcasts..." oninput="filterPodcasts()">
+        <input type="text" id="podcastSearch" aria-label="Filter podcasts" placeholder="Filter podcasts..." oninput="filterPodcasts()">
         <span class="search-count" id="searchCount">{{ podcasts|length }} podcasts</span>
     </div>
     <div class="podcast-list">
         {% for podcast in podcasts %}
         <div class="podcast-item" data-podcast-id="{{ podcast.id }}">
-            <a href="/podcasts/{{ podcast.id }}/episodes" class="podcast-artwork-link">
+            <a href="/podcasts/{{ podcast.id }}/episodes" class="podcast-artwork-link" aria-label="Episodes for {{ podcast.title or 'Untitled Podcast' }}">
                 {% if podcast.artwork_url %}
                 <img src="{{ podcast.artwork_url }}" alt="{{ podcast.title }}" class="podcast-item-artwork">
                 {% else %}
@@ -203,7 +204,8 @@ setInterval(() => {
     color: var(--text-primary);
 }
 .search-box input:focus {
-    outline: none;
+    outline: 2px solid var(--text-link);
+    outline-offset: 2px;
     border-color: var(--text-link);
     box-shadow: 0 0 0 2px rgba(102, 179, 255, 0.2);
 }
@@ -316,7 +318,7 @@ setInterval(() => {
     align-items: center;
 }
 .btn-refresh {
-    background: #28a745;
+    background: var(--action-success);
 }
 .btn-refresh:hover {
     background: #218838;
@@ -327,7 +329,7 @@ setInterval(() => {
     white-space: nowrap;
 }
 .btn-danger {
-    background: #dc3545;
+    background: var(--action-danger);
 }
 .btn-danger:hover {
     background: #c82333;
