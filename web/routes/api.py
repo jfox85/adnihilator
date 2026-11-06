@@ -224,8 +224,7 @@ async def claim_episode(
         return None
     candidates = db.query(Episode).filter(Episode.status == EpisodeStatus.PENDING.value)
     if recovery:
-        held = candidates.filter(Episode.id.in_(db.query(EpisodeProviderHold.episode_id))).order_by(Episode.created_at, Episode.id).first()
-        episode = held or candidates.order_by(Episode.created_at, Episode.id).first()
+        episode = outages.select_recovery_episode(db)
     else:
         episode = candidates.filter(~Episode.id.in_(db.query(EpisodeProviderHold.episode_id))).order_by(Episode.created_at, Episode.id).first()
     if episode is None:

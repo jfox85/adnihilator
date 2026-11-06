@@ -185,3 +185,24 @@ def test_actual_mixed_provider_worker_completes_a_gemini_only_lease(outage_clien
             assert db.execute('SELECT provider,active FROM provider_outages').fetchall()==[('gemini',0)]
         assert client.post('/api/queue/claim',headers=HEADERS).json()['id']=='job1'
     finally:sdk.close()
+
+
+@pytest.mark.parametrize('rep',[1,2])
+def test_poisoned_download_cannot_starve_another_ordinary_recovery_episode(outage_client,monkeypatch,rep):
+    """The exact worker path eventually reaches the recovered provider again."""
+    client,path=outage_client;worker=configured_worker(monkeypatch,client)
+    sdk=google_sdk(google_response({'ads':[]}));sdk.models.generate_content.side_effect=errors.ClientError(402,{'error':{'message':'credits depleted'}})
+    detector=GeminiAudioClient('synthetic',model='gemini-2.5-flash');detector._client=sdk;worker._get_gemini_client.return_value=detector
+    def download(url,*args,**kwargs):
+        if url.endswith('/0.mp3'):raise RuntimeError('Synthetic download404 before provider')
+    with pipeline(worker,'whisper',transcript(ad=False)):
+        assert worker.run_once() is True
+        sdk.models.generate_content.side_effect=None;worker._download_audio.side_effect=download
+        expire_cooldown(path);assert worker.run_once() is True
+        assert sdk.models.generate_content.call_count==1
+        expire_cooldown(path);assert worker.run_once() is True
+    assert sdk.models.generate_content.call_count==2
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT status,retry_count FROM episodes WHERE id='job0'").fetchone()==('pending',1)
+        assert db.execute("SELECT status,retry_count FROM episodes WHERE id='job1'").fetchone()==('complete',1)
+        assert db.execute('SELECT active FROM provider_outages').fetchone()[0]==0

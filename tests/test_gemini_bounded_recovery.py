@@ -179,3 +179,48 @@ class TestActualSDKAttemptBudget:
         assert not isinstance(caught.value,ProviderOutageError)
         assert sdk.files.upload.call_count==1 and sdk.models.generate_content.call_count==0
         sleep.assert_not_called()
+
+
+@pytest.mark.parametrize('rep',[1,2])
+@pytest.mark.parametrize('mode',['single','chunk'])
+@pytest.mark.parametrize('kind',['ConnectError','RemoteProtocolError'])
+@pytest.mark.parametrize('exhaust',[False,True])
+def test_actual_httpx2_transport_obeys_the_same_attempt_budget(rep,mode,kind,exhaust):
+    """Use the SDK's installed backend rather than a substituted httpx backend."""
+    httpx2=pytest.importorskip('httpx2')
+    from adnihilator.gemini_common import create_genai_client
+    sdk=create_genai_client('synthetic');calls=[]
+    def respond(request):
+        calls.append(request.url.path)
+        if exhaust or len(calls)==1:raise getattr(httpx2,kind)('Connection interrupted',request=request)
+        return httpx2.Response(200,json={'candidates':[{'finishReason':'STOP','content':{'role':'model','parts':[{'text':'{"ads":[]}'}]}}]})
+    hooks=sdk._api_client._httpx_client.event_hooks;sdk._api_client._httpx_client.close()
+    sdk._api_client._httpx_client=httpx2.Client(transport=httpx2.MockTransport(respond),event_hooks=hooks)
+    sdk.files.upload=Mock(return_value=types.File(name='files/synthetic',uri='https://generativelanguage.googleapis.com/files/synthetic',mime_type='audio/mpeg',state=types.FileState.ACTIVE))
+    def detect():
+        if mode=='chunk':return detect_ads_in_chunk(sdk,Path('synthetic.mp3'),0,120,'gemini-2.5-flash')
+        detector=GeminiAudioClient('synthetic',model='gemini-2.5-flash');detector._client=sdk
+        return detector.detect_ads(Path('synthetic.mp3'),duration=120)[0]
+    try:
+        with patch('time.sleep') as sleep:
+            if exhaust:
+                with pytest.raises(Exception):detect()
+            else:assert detect()==[]
+        assert len(calls)==(3 if exhaust else 2)
+        assert [call.args[0] for call in sleep.call_args_list]==([30,60] if exhaust else [30])
+    finally:sdk.close()
+
+
+@pytest.mark.parametrize('rep',[1,2])
+@pytest.mark.parametrize('mode',['single','chunk'])
+def test_explicit_file_generation_404_does_not_pause_the_provider(rep,mode):
+    """A missing uploaded resource is not an unsupported account model."""
+    from adnihilator.provider_errors import ProviderOutageError
+    sdk=google_sdk(google_response({'ads':[]}));sdk.models.generate_content.side_effect=sdk_error(404,'File files/synthetic is not found or has expired')
+    detector=GeminiAudioClient('synthetic',model='gemini-2.5-flash');detector._client=sdk
+    with patch('time.sleep') as sleep,pytest.raises(Exception) as caught:
+        if mode=='chunk':detect_ads_in_chunk(sdk,Path('synthetic.mp3'),0,120,'gemini-2.5-flash')
+        else:detector.detect_ads(Path('synthetic.mp3'),duration=120)
+    assert not isinstance(caught.value,ProviderOutageError)
+    assert sdk.models.generate_content.call_count==1
+    sleep.assert_not_called()

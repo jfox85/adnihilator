@@ -7,6 +7,13 @@ from collections.abc import Iterable
 import httpx
 from pydantic import ValidationError
 
+try:
+    import httpx2
+except ImportError:  # Older google-genai releases use only httpx.
+    _TRANSPORT_ERRORS = (httpx.TransportError, TimeoutError, ConnectionError)
+else:
+    _TRANSPORT_ERRORS = (httpx.TransportError, httpx2.TransportError, TimeoutError, ConnectionError)
+
 from .models import ProviderFailureInfo
 from .redaction import redact_secrets
 
@@ -55,7 +62,7 @@ def classify_provider_error(error: BaseException | str, extra_secrets: Iterable[
         category = "model"
     elif status == 429:
         category = "rate_limit"
-    elif status in (500, 502, 503, 504) or isinstance(error, (httpx.TransportError, TimeoutError, ConnectionError)) or any(word in text for word in ("timed out", "timeout", "deadline exceeded", "overloaded")):
+    elif status in (500, 502, 503, 504) or isinstance(error, _TRANSPORT_ERRORS) or any(word in text for word in ("timed out", "timeout", "deadline exceeded", "overloaded")):
         category = "transient"
     return ProviderFailureInfo(
         category=category, status_code=status,

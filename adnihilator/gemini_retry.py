@@ -1,6 +1,7 @@
 """Bounded Gemini operation and decision retries authorized by the owner."""
 
 import concurrent.futures
+import re
 import time
 from collections.abc import Callable
 from threading import Event
@@ -64,7 +65,11 @@ def retry_decision(operation: Callable[[bool], Any], parse: Callable[[Any], T], 
             response = operation(reasked)
         except Exception as error:
             failure = classify_provider_error(error)
-            if failure.status_code == 404:
+            detail = str(getattr(error, "message", error)).lower()
+            missing_file = re.search(r"\bfile\s+[\"']?files/", detail) and any(
+                word in detail for word in ("not found", "not_found", "expired")
+            )
+            if failure.status_code == 404 and not missing_file:
                 failure = failure.model_copy(update={"category": "model", "global_failure": True, "retryable": False})
                 raise ProviderOutageError("gemini", failure) from None
             if not failure.retryable or attempt + 1 == limit:

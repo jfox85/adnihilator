@@ -73,7 +73,7 @@ class TestDurableOutageContract:
     def test_repeated_probe_failure_has_bounded_cooldown_and_no_episode_cost(self,outage_client):
         client,path=outage_client;client.post('/api/queue/claim',headers=HEADERS);hold(client)
         for _ in range(5):
-            expire_cooldown(path);probe=client.post('/api/queue/claim',headers=HEADERS).json();hold(client,proofs=probe['provider_recovery'])
+            expire_cooldown(path);probe=client.post('/api/queue/claim',headers=HEADERS).json();hold(client,episode=probe['id'],proofs=probe['provider_recovery'])
             with sqlite3.connect(path) as db:
                 retry_at=datetime.fromisoformat(db.execute('SELECT retry_after FROM provider_outages').fetchone()[0]);delay=(retry_at-datetime.utcnow()).total_seconds()
                 assert 290<=delay<=1800
@@ -183,11 +183,11 @@ class TestDurableOutageContract:
         with sqlite3.connect(path) as db:db.execute("UPDATE episodes SET claimed_at='2000-01-01 00:00:00' WHERE id='job0'")
         client.post('/api/queue/claim',headers=HEADERS);expire_cooldown(path)
         current=client.post('/api/queue/claim',headers=HEADERS).json()
-        with sqlite3.connect(path) as db:before=db.execute("SELECT claimed_at FROM episodes WHERE id='job0'").fetchone()[0]
+        with sqlite3.connect(path) as db:before=db.execute("SELECT claimed_at FROM episodes WHERE id=?",(current["id"],)).fetchone()[0]
         for proofs in [[],stale['provider_recovery']]:
-            assert client.post('/api/queue/job0/progress',headers=HEADERS,json={'step':'transcribing','percent':10,'recovery_tokens':proofs}).status_code==409
-        with sqlite3.connect(path) as db:assert db.execute("SELECT claimed_at FROM episodes WHERE id='job0'").fetchone()[0]==before
-        assert client.post('/api/queue/job0/progress',headers=HEADERS,json={'step':'transcribing','percent':50,'recovery_tokens':current['provider_recovery']}).status_code==200
+            assert client.post(f"/api/queue/{current['id']}/progress",headers=HEADERS,json={'step':'transcribing','percent':10,'recovery_tokens':proofs}).status_code==409
+        with sqlite3.connect(path) as db:assert db.execute("SELECT claimed_at FROM episodes WHERE id=?",(current["id"],)).fetchone()[0]==before
+        assert client.post(f"/api/queue/{current['id']}/progress",headers=HEADERS,json={'step':'transcribing','percent':50,'recovery_tokens':current['provider_recovery']}).status_code==200
         assert client.post('/api/queue/claim',headers=HEADERS).json() is None
         with sqlite3.connect(path) as db:assert db.execute("SELECT retry_count FROM episodes WHERE id='job0'").fetchone()[0]==1
 
@@ -208,3 +208,35 @@ def test_mixed_success_receipts_clear_only_the_actually_leased_provider(outage_c
         assert db.execute("SELECT status,retry_count FROM episodes WHERE id='job0'").fetchone()==('complete',1)
         assert db.execute('SELECT provider,active FROM provider_outages').fetchall()==[('gemini',0)]
     assert client.post('/api/queue/claim',headers=HEADERS).json()['id']=='job1'
+
+
+@pytest.mark.parametrize('rep',[1,2])
+def test_failed_probe_rotates_to_other_pending_episodes_without_retry_cost(outage_client,rep):
+    """Two broken sources cannot starve a third eligible recovery episode."""
+    client,path=outage_client
+    client.post('/api/queue/claim',headers=HEADERS);hold(client)
+    picks=[]
+    for expected in ['job0','job1','job2','job0']:
+        expire_cooldown(path);probe=client.post('/api/queue/claim',headers=HEADERS).json();picks.append(probe['id'])
+        assert probe['id']==expected,picks
+        assert client.post('/api/queue/claim',headers=HEADERS).json() is None
+        assert client.post(f"/api/queue/{probe['id']}/fail",headers=HEADERS,json={'error':'synthetic download404 before provider','recovery_tokens':probe['provider_recovery']}).status_code==200
+    with sqlite3.connect(path) as db:
+        assert db.execute('SELECT retry_count FROM episodes ORDER BY id').fetchall()==[(1,),(1,),(1,)]
+        assert db.execute('SELECT active,probe_token FROM provider_outages').fetchone()==(1,None)
+
+
+@pytest.mark.parametrize('rep',[1,2])
+def test_other_episode_can_verify_provider_after_poisoned_held_source(outage_client,rep):
+    """The provider can recover even while its original episode stays held."""
+    client,path=outage_client
+    client.post('/api/queue/claim',headers=HEADERS);hold(client);expire_cooldown(path)
+    bad=client.post('/api/queue/claim',headers=HEADERS).json()
+    client.post('/api/queue/job0/fail',headers=HEADERS,json={'error':'synthetic audio404','recovery_tokens':bad['provider_recovery']})
+    expire_cooldown(path);healthy=client.post('/api/queue/claim',headers=HEADERS).json()
+    assert healthy['id']=='job1'
+    assert complete(client,healthy).status_code==200
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT status,retry_count FROM episodes WHERE id='job0'").fetchone()==('pending',1)
+        assert db.execute('SELECT active FROM provider_outages').fetchone()[0]==0
+    assert client.post('/api/queue/claim',headers=HEADERS).json()['id']=='job0'

@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from uuid import uuid4
 
 from fastapi import HTTPException
-from sqlalchemy import text
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from adnihilator.redaction import redact_secrets
@@ -107,16 +107,34 @@ def prepare_claim(db: Session, protocol: str | None, timeout: int) -> tuple[bool
     return True, rows
 
 
+def select_recovery_episode(db: Session) -> Episode | None:
+    """Rotate pending probes fairly; prefer held work among untried episodes."""
+    recent = db.query(
+        EpisodeProviderHold.episode_id.label("episode_id"),
+        func.max(EpisodeProviderHold.last_probe_at).label("last_probe_at"),
+    ).group_by(EpisodeProviderHold.episode_id).subquery()
+    return db.query(Episode).outerjoin(recent, recent.c.episode_id == Episode.id).filter(
+        Episode.status == EpisodeStatus.PENDING.value,
+    ).order_by(
+        recent.c.last_probe_at.is_not(None), recent.c.last_probe_at,
+        recent.c.episode_id.is_(None), Episode.created_at, Episode.id,
+    ).first()
+
+
 def reserve_probe(db: Session, episode: Episode, rows: list[ProviderOutage]) -> list[dict[str, str]]:
     """All active provider pauses share the same single recovery episode."""
     proofs = []
+    now = datetime.utcnow()
     for row in rows:
         row.probe_episode_id = episode.id
         row.probe_token = uuid4().hex
         row.last_probe_error = None
         row.updated_at = datetime.utcnow()
-        if db.get(EpisodeProviderHold, (episode.id, row.provider)) is None:
-            db.add(EpisodeProviderHold(episode_id=episode.id, provider=row.provider))
+        hold = db.get(EpisodeProviderHold, (episode.id, row.provider))
+        if hold is None:
+            hold = EpisodeProviderHold(episode_id=episode.id, provider=row.provider)
+            db.add(hold)
+        hold.last_probe_at = now
         proofs.append({"provider": row.provider, "token": row.probe_token})
     return proofs
 
