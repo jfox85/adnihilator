@@ -22,6 +22,7 @@ from .gemini_common import (
     validate_detections,
 )
 from .models import AdSpan, SponsorInfo
+from .provider_responses import completed_gemini_text
 from .provider_errors import classify_provider_error, describe_provider_failure
 
 logger = logging.getLogger(__name__)
@@ -222,9 +223,7 @@ If no ads found: {{"ads": []}}"""
             else:
                 raise
 
-    response_text = getattr(response, "text", None) if response else None
-    if not response_text:
-        raise ValueError(f"Empty Gemini response for chunk {chunk_path}")
+    response_text = completed_gemini_text(response)
 
     if usage_totals is not None:
         for key, value in extract_usage(response).items():
@@ -423,6 +422,7 @@ class GeminiChunkedClient:
             # Process chunks in parallel
             all_detections = []
             errors = []
+            cancelled_chunks: list[str] = []
             global_error: str | None = None
             usage_totals: dict[str, int] = {}
             cancel_event = Event()
@@ -458,7 +458,9 @@ class GeminiChunkedClient:
                             usage_totals[key] = usage_totals.get(key, 0) + value
                         logger.info(f"Chunk {chunk_info[1]:.0f}-{chunk_info[2]:.0f}s: {len(detections)} ads")
                     except concurrent.futures.CancelledError:
-                        continue
+                        cancelled_chunks.append(
+                            f"Chunk {chunk_info[1]:.0f}-{chunk_info[2]:.0f}s cancelled without a detection result"
+                        )
                     except Exception as e:
                         failure = classify_provider_error(e, (self.api_key,))
                         safe_error = describe_provider_failure(failure)
@@ -469,6 +471,11 @@ class GeminiChunkedClient:
                             cancel_event.set()
                             for pending in futures:
                                 pending.cancel()
+
+            # Internally cancelled work is ignorable only after a recorded
+            # permanent failure already guarantees failure of the whole job.
+            if global_error is None:
+                errors.extend(cancelled_chunks)
 
         total_time = time.time() - start_time
         logger.info(f"Chunked detection complete in {total_time:.1f}s, found {len(all_detections)} raw detections")

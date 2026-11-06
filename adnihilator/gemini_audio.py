@@ -22,6 +22,7 @@ from .gemini_common import (
 )
 from .models import AdSpan, SponsorInfo
 from .provider_errors import classify_provider_error, describe_provider_failure, redact_secrets
+from .provider_responses import completed_gemini_text
 
 logger = logging.getLogger(__name__)
 
@@ -125,15 +126,7 @@ class GeminiAudioClient:
             if not response:
                 raise ValueError("Empty response from Gemini API")
 
-            response_text = getattr(response, "text", None)
-            if not response_text:
-                # Check for safety block / non-STOP finish
-                candidates = getattr(response, "candidates", None)
-                if candidates:
-                    finish_reason = getattr(candidates[0], "finish_reason", None)
-                    if finish_reason is not None:
-                        raise ValueError(f"Gemini response blocked: {finish_reason}")
-                raise ValueError("Empty text in Gemini response")
+            response_text = completed_gemini_text(response)
 
             # Parse JSON response
             result = self._parse_response(response_text)
@@ -151,8 +144,10 @@ class GeminiAudioClient:
             # Convert to AdSpan objects
             ad_spans = []
             for ad in validate_detections(result):
-                start_time = ad.start_time
-                end_time = ad.end_time
+                start_time = max(0, ad.start_time)
+                end_time = min(ad.end_time, duration) if duration is not None else ad.end_time
+                if start_time >= end_time:
+                    raise ValueError("Gemini detection does not overlap the episode")
                 sponsor = ad.sponsor
                 ad_type = ad.ad_type
                 reason = ad.reason

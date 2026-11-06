@@ -6,6 +6,7 @@ from typing import Any
 
 from .config import Config
 from .models import AdCandidate, AdSpan, MergedDetectionResponse, SponsorInfo, TranscriptSegment
+from .provider_responses import completed_openai_text
 from .redaction import redact_secrets
 
 # Context window: how many seconds before/after candidate to include
@@ -599,7 +600,6 @@ If no ads found: {{"ads": [], "reason": "no sponsor mentions found"}}'''
         except ImportError:
             raise ImportError("openai is required. Run: pip install openai")
 
-        client = OpenAI(api_key=self.api_key, base_url=self.base_url)
         duration = prompt_data.get("duration", 0)
 
         system_prompt = """You are refining ad detection candidates from two sources:
@@ -683,6 +683,7 @@ KNOWN SPONSORS: {prompt_data.get("sponsors", [])}
 Analyze the candidates and transcript to produce refined ad boundaries."""
 
         try:
+            client = OpenAI(api_key=self.api_key, base_url=self.base_url)
             response = client.chat.completions.create(
                 model=config.llm.model,
                 messages=[
@@ -694,7 +695,7 @@ Analyze the candidates and transcript to produce refined ad boundaries."""
             )
 
             result = MergedDetectionResponse.model_validate_json(
-                response.choices[0].message.content or "{}"
+                completed_openai_text(response)
             )
 
             # Extract usage for cost tracking
@@ -715,7 +716,7 @@ Analyze the candidates and transcript to produce refined ad boundaries."""
 
                 # Skip invalid spans
                 if start >= end:
-                    continue
+                    raise ValueError("Merged detection does not overlap the episode")
 
                 # Default sources to ["llm_new"] if LLM omitted them
                 sources = ad.sources

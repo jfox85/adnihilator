@@ -43,7 +43,7 @@ def sdk(content: str | None) -> Mock:
     """Construct a response without creating a real SDK transport."""
     client = Mock()
     client.chat.completions.create.return_value = SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content=content))], usage=None,
+        choices=[SimpleNamespace(finish_reason="stop", message=SimpleNamespace(content=content))], usage=None,
     )
     return client
 

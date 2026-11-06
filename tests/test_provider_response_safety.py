@@ -30,7 +30,7 @@ def sdk_response(payload: object) -> Mock:
     """Create a mocked upload and model response without an SDK client."""
     sdk = Mock()
     sdk.files.upload.return_value = SimpleNamespace(name="files/synthetic", uri="synthetic", state="ACTIVE")
-    sdk.models.generate_content.return_value = SimpleNamespace(text=json.dumps(payload), usage_metadata=None)
+    sdk.models.generate_content.return_value = SimpleNamespace(text=json.dumps(payload), usage_metadata=None, candidates=[SimpleNamespace(finish_reason="STOP")])
     return sdk
 
 
@@ -111,7 +111,7 @@ def review(worker: WorkerDaemon, content: str | None, spans: list[AdSpan] | None
     """Call the real review gate with only the OpenAI transport mocked."""
     sdk = Mock()
     sdk.chat.completions.create.return_value = SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content=content))], usage=None
+        choices=[SimpleNamespace(finish_reason="stop", message=SimpleNamespace(content=content))], usage=None
     )
     spans = spans if spans is not None else [AdSpan(start=10, end=100, confidence=0.9, reason="Questionable", sources=["gemini"])]
     with patch("openai.OpenAI", return_value=sdk):

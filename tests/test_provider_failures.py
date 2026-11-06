@@ -43,7 +43,7 @@ def sdk() -> Mock:
     """Return only a mocked upload/generate surface, without a real client."""
     client = Mock()
     client.files.upload.return_value = SimpleNamespace(name="files/synthetic", uri="synthetic", state="ACTIVE")
-    client.models.generate_content.return_value = SimpleNamespace(text='{"ads":[]}', usage_metadata=None)
+    client.models.generate_content.return_value = SimpleNamespace(text='{"ads":[]}', usage_metadata=None, candidates=[SimpleNamespace(finish_reason="STOP")])
     return client
 
 

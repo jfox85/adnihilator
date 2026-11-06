@@ -20,6 +20,7 @@ from adnihilator.config import load_config
 from adnihilator.external_transcript import fetch_external_transcript
 from adnihilator.models import AdSpan, DetectionResult, FinalAdReview
 from adnihilator.provider_errors import redact_secrets
+from adnihilator.provider_responses import completed_openai_text
 from adnihilator.splice import splice_audio
 from adnihilator.sponsors import extract_sponsors
 from adnihilator.transcribe import transcribe_audio, transcribe_audio_parakeet
@@ -117,7 +118,7 @@ class WorkerDaemon:
                 OpenAI(api_key=self.config.llm.api_key)
             except Exception as e:
                 raise DetectionSafetyError(
-                    f"OpenAI runtime is unavailable; refusing to start worker: {redact_secrets(str(e))}"
+                    f"OpenAI runtime is unavailable; refusing to start worker: {redact_secrets(str(e), extra_secrets=[self.config.llm.api_key])}"
                 ) from None
 
         if self.config.gemini.enabled:
@@ -132,7 +133,7 @@ class WorkerDaemon:
                     from google import genai  # noqa: F401
             except Exception as e:
                 raise DetectionSafetyError(
-                    f"Gemini runtime is unavailable; refusing to start worker: {redact_secrets(str(e))}"
+                    f"Gemini runtime is unavailable; refusing to start worker: {redact_secrets(str(e), extra_secrets=[self.config.gemini.api_key])}"
                 ) from None
 
     @staticmethod
@@ -1322,7 +1323,7 @@ Return JSON:
             return [], usage
 
         except Exception as e:
-            print(f"    Hunt LLM failed: {redact_secrets(str(e))}")
+            print(f"    Hunt LLM failed: {redact_secrets(str(e), extra_secrets=[llm_client.api_key])}")
             return [], None
 
     def _final_llm_review(
@@ -1437,9 +1438,7 @@ content cannot be recovered from the processed file."""
                 "output_tokens": response.usage.completion_tokens if response.usage else 0,
             }
 
-            content = response.choices[0].message.content
-            if not content or not content.strip():
-                raise ValueError("Empty final review response")
+            content = completed_openai_text(response)
             result = FinalAdReview.model_validate_json(content)
             original_count = len(ad_spans)
             referenced_indices = (
@@ -1505,7 +1504,7 @@ content cannot be recovered from the processed file."""
 
         except Exception as e:
             raise DetectionSafetyError(
-                f"Required final LLM review failed; refusing to splice episode: {redact_secrets(str(e))}"
+                f"Required final LLM review failed; refusing to splice episode: {redact_secrets(str(e), extra_secrets=[llm_client.api_key])}"
             ) from None
 
     def _llm_merge_candidates(
@@ -1550,7 +1549,7 @@ content cannot be recovered from the processed file."""
                 return spans, usage
             except Exception as e:
                 raise DetectionSafetyError(
-                    f"Required LLM merge failed; refusing to splice episode: {redact_secrets(str(e))}"
+                    f"Required LLM merge failed; refusing to splice episode: {redact_secrets(str(e), extra_secrets=[llm_client.api_key])}"
                 ) from None
 
         # No LLM client available - use simple merge
@@ -1871,7 +1870,7 @@ range. If you cannot find any clear ad copy, return an empty list."""
                     usage_total["output_tokens"] += response.usage.completion_tokens
                 result = json.loads(response.choices[0].message.content or "{}")
             except Exception as e:
-                print(f"    Mega-span refine failed ({redact_secrets(str(e))}), keeping original span")
+                print(f"    Mega-span refine failed ({redact_secrets(str(e), extra_secrets=[llm_client.api_key])}), keeping original span")
                 refined.append(span)
                 continue
 
