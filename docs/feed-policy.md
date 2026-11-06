@@ -83,5 +83,5 @@ the same origin. A change of scheme, hostname or port removes the complete
 Authorization header before the redirected request is opened. HTTP(S) redirects
 to private or public destinations remain allowed. Same-origin authenticated
 feeds keep working. A publisher that requires authentication at another origin
-must provide an appropriate endpoint; the source origin's credential is scoped
-to that source, including when a redirect chain later returns there.
+must provide an appropriate endpoint. Once a chain crosses an origin, the old
+Authorization header remains removed on subsequent hops.
