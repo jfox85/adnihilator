@@ -252,14 +252,19 @@ async def skip_episode(
     if not episode:
         raise HTTPException(status_code=404, detail="Episode not found")
 
+    if episode.status == EpisodeStatus.PROCESSING.value:
+        raise HTTPException(status_code=409, detail="Episode is processing")
+    if episode.status == EpisodeStatus.COMPLETE.value:
+        raise HTTPException(status_code=409, detail="Completed episodes cannot be skipped")
+
     updated = db.query(Episode).filter(
         Episode.id == episode_id,
         Episode.podcast_id == podcast_id,
-        Episode.status != EpisodeStatus.PROCESSING.value,
+        Episode.status.notin_([EpisodeStatus.PROCESSING.value, EpisodeStatus.COMPLETE.value]),
     ).update({Episode.status: EpisodeStatus.SKIPPED.value}, synchronize_session=False)
     db.commit()
     if not updated:
-        raise HTTPException(status_code=409, detail="Episode is processing")
+        raise HTTPException(status_code=409, detail="Episode changed while skipping; refresh and try again")
     return {"status": "skipped"}
 
 

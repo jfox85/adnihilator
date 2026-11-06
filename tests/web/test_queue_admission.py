@@ -111,6 +111,8 @@ sandbox.updateEpisodeUI=(id,data)=>updates.push([id,data.status]);
         ('<enclosure url="ftp://127.0.0.1/show.mp3" type="audio/mpeg"/>', None),
         ('<enclosure url="http:///show.mp3" type="audio/mpeg"/>', None),
         ('<enclosure type="audio/mpeg"/>', None),
+        ('<enclosure url="" type="audio/mpeg"/>', None),
+        ('<enclosure url=" audio.mp3" type="audio/mpeg"/>', None),
         ('<enclosure url="http://127.0.0.1/image.jpg"/>', None),
         ('', None),
     ])

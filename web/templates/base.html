@@ -227,7 +227,10 @@
             if (response.ok) {
                 let msg = `Imported ${data.imported} podcast(s)`;
                 if (data.skipped > 0) {
-                    msg += `, ${data.skipped} skipped (already exist)`;
+                    const reasons = [];
+                    if (data.skipped_existing) reasons.push(`${data.skipped_existing} already exist`);
+                    if (data.skipped_invalid) reasons.push(`${data.skipped_invalid} unsupported source URL(s)`);
+                    msg += `, ${data.skipped} skipped` + (reasons.length ? ` (${reasons.join(', ')})` : '');
                 }
                 alert(msg);
                 if (data.imported > 0) {

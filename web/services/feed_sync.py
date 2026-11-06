@@ -6,9 +6,10 @@ from email.message import Message
 from hashlib import sha256
 import re
 from time import mktime
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request
+from xml.sax import SAXParseException
 
 import feedparser
 from sqlalchemy.exc import IntegrityError
@@ -19,6 +20,7 @@ from adnihilator.redaction import redact_secrets
 
 from ..models import Episode, EpisodeStatus, Podcast
 from .audio import is_usable_audio_url, select_audio_enclosure
+from .feed_document import FeedDocumentCapture
 
 
 class FeedSyncError(RuntimeError):
@@ -57,11 +59,12 @@ class _HTTPOnlyRedirect(HTTPRedirectHandler):
 
 
 def episode_identity(entry: dict, audio_url: str | None) -> str | None:
-    """Prefer GUID, then entry link, then a query-independent enclosure identity.
+    """Prefer GUID, then entry link, then a query-preserving enclosure identity.
 
-    The enclosure fallback hashes scheme/host/port/path, excluding userinfo,
-    query and fragment. Query-token rotation stays one episode; different
-    paths remain distinct. Existing rows are never backfilled or rewritten.
+    The enclosure fallback hashes scheme/host/port/path and the full opaque
+    query, excluding userinfo and fragment. Unknown query values may select
+    different episodes, so they must not be discarded. Existing rows are never
+    backfilled or rewritten; rotating unknown tokens may create new entries.
     """
     for field in ("id", "link"):
         value = entry.get(field) if isinstance(entry, Mapping) else getattr(entry, field, None)
@@ -75,7 +78,7 @@ def episode_identity(entry: dict, audio_url: str | None) -> str | None:
     port = parsed.port
     if port is not None and (parsed.scheme.lower(), port) not in {("http", 80), ("https", 443)}:
         host += f":{port}"
-    canonical = urlunsplit((parsed.scheme.lower(), host, parsed.path or "/", "", ""))
+    canonical = urlunsplit((parsed.scheme.lower(), host, parsed.path or "/", parsed.query, ""))
     return "enclosure-sha256:" + sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -111,6 +114,8 @@ def feed_error_message(diagnostic: str | None) -> str | None:
         message = "Could not connect to the feed server."
     elif reason.startswith("Response is not a recognized RSS or Atom feed"):
         message = "The server response is not an RSS or Atom feed."
+    elif reason.startswith("Response is not a complete"):
+        message = "The feed response is incomplete or malformed."
     elif reason.startswith("Feed redirect must use"):
         message = "The feed redirected to an unsupported address. Only HTTP and HTTPS are allowed."
     elif reason.startswith("Feed URL must use"):
@@ -187,17 +192,37 @@ def _sync_podcast_entries(db: Session, podcast: Podcast) -> int:
     """Apply one feed, leaving rollback on failure to the public sync boundary."""
     if not is_usable_audio_url(podcast.source_rss_url):
         raise FeedSyncError("Feed URL must use HTTP(S) with a host")
-    feed = feedparser.parse(podcast.source_rss_url, handlers=[_HTTPOnlyRedirect()])
+    document = FeedDocumentCapture()
+    feed = feedparser.parse(podcast.source_rss_url, handlers=[_HTTPOnlyRedirect(), document])
     response_status = feed.get("status")
     if isinstance(response_status, int) and response_status >= 400:
         raise FeedSyncError(f"Feed server returned HTTP {response_status}")
     parse_error = feed.get("bozo_exception")
     if isinstance(parse_error, FeedSyncError):
         raise parse_error
+    if isinstance(parse_error, HTTPError):
+        raise FeedSyncError(f"Feed server returned HTTP {parse_error.code}") from None
     if isinstance(parse_error, URLError):
         raise FeedSyncError("Could not connect to the feed server") from None
-    if not feed.get("version") and not feed.entries:
+    if isinstance(parse_error, SAXParseException):
+        raise FeedSyncError("Response is not a complete RSS or Atom feed") from None
+    if not feed.get("version"):
         raise FeedSyncError("Response is not a recognized RSS or Atom feed")
+
+    # feedparser resolves page links but leaves RSS enclosure hrefs relative.
+    # Its response href contains the final URL after redirects.
+    base_url = feed.get("href")
+    if not isinstance(base_url, str) or not is_usable_audio_url(base_url):
+        base_url = document.url or podcast.source_rss_url
+    omitted_types = None
+    version = feed.get("version")
+    if isinstance(version, str) and version.startswith("atom") and document.url:
+        try:
+            omitted_types = document.atom_omitted_types()
+        except Exception:
+            raise FeedSyncError("Response is not a complete Atom feed") from None
+        if len(omitted_types) != len(feed.entries):
+            raise FeedSyncError("Atom enclosure metadata could not be read reliably")
 
     # Update podcast metadata
     if hasattr(feed.feed, "title"):
@@ -226,8 +251,28 @@ def _sync_podcast_entries(db: Session, podcast: Podcast) -> int:
     )
 
     added = 0
-    for entry in feed.entries:
-        audio_url = select_audio_enclosure(getattr(entry, "enclosures", []))
+    for index, entry in enumerate(feed.entries):
+        enclosures = [dict(enclosure) for enclosure in getattr(entry, "enclosures", [])]
+        if omitted_types is not None:
+            if len(omitted_types[index]) != len(enclosures):
+                raise FeedSyncError("Atom enclosure metadata could not be read reliably")
+            for enclosure, omitted in zip(enclosures, omitted_types[index]):
+                if omitted:
+                    enclosure.pop("type", None)
+        for enclosure in enclosures:
+            href = enclosure.get("href")
+            if isinstance(href, str):
+                # Resolve only actual relative references. An explicitly
+                # malformed absolute URL (e.g. http:///audio.mp3) must not be
+                # repaired into a usable URL on this feed's host.
+                try:
+                    relative = bool(href) and not urlsplit(href).scheme and not any(
+                        char.isspace() or ord(char) < 32 or ord(char) == 127 for char in href
+                    )
+                except ValueError:
+                    relative = False
+                enclosure["href"] = urljoin(base_url, href) if relative else href
+        audio_url = select_audio_enclosure(enclosures)
         guid = episode_identity(entry, audio_url)
         if not guid or guid in existing_guids:
             continue

@@ -114,12 +114,16 @@ class TestFeedPolicy:
                 episode = db.query(Episode).one()
                 pid, guid, eid = episode.podcast_id, episode.guid, episode.id
                 assert guid.startswith("enclosure-sha256:")
-            state["body"] = RSS.replace(b"sig=first", b"sig=rotated")
+            # The same complete URL is stable across requests/new Sessions.
             assert client.post(f"/podcasts/{pid}/sync", auth=AUTH).json()["episodes_added"] == 0
+            state["body"] = RSS.replace(b"sig=first", b"sig=rotated")
+            # Unknown query values may identify different content. Prefer an
+            # additional row over silently dropping it; no existing-row rewrite.
+            assert client.post(f"/podcasts/{pid}/sync", auth=AUTH).json()["episodes_added"] == 1
             with factory() as db:
-                episode = db.query(Episode).one()
-                assert (episode.id, episode.guid) == (eid, guid)
-                # Identity dedupe must not silently rewrite an existing URL.
+                assert db.query(Episode).count() == 2
+                episode = db.get(Episode, eid)
+                assert episode.guid == guid
                 assert episode.original_audio_url.endswith("sig=first")
 
     @pytest.mark.parametrize("target", ["file:///tmp/forbidden-policy-feed.xml", "ftp://127.0.0.1/forbidden.xml", "data:text/xml,private"])
@@ -227,13 +231,14 @@ class TestFeedPolicy:
             assert (e.status,e.processed_audio_key)==("complete","won.mp3")
 
     def test_identity_precedence_path_distinction_and_token_rotation(self) -> None:
-        """Fallback identity ignores expiring query credentials while distinguishing paths."""
+        """Fallback identity retains opaque query values while normalizing host and port."""
         from web.services.feed_sync import episode_identity
         audio="HTTPS://name:password@Example.INVALID:443/path.mp3?sig=first#part"
         assert episode_identity({"id":"explicit","link":"https://example.invalid/page"},audio)=="explicit"
         assert episode_identity({"link":"https://example.invalid/page"},audio)=="https://example.invalid/page"
         identity=episode_identity({},audio)
-        assert identity==episode_identity({},"https://example.invalid/path.mp3?sig=rotated")
+        assert identity==episode_identity({},"https://example.invalid/path.mp3?sig=first#other")
+        assert identity!=episode_identity({},"https://example.invalid/path.mp3?sig=rotated")
         assert identity!=episode_identity({},"https://example.invalid/other.mp3")
         assert identity!=episode_identity({},"http://example.invalid/path.mp3")
         assert episode_identity({},None) is None
