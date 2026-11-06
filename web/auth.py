@@ -20,6 +20,18 @@ SESSION_COOKIE = "adnihilator_session"
 SESSION_MAX_AGE = 30 * 24 * 3600  # 30 days
 
 
+def safe_login_destination(destination: str) -> str:
+    """Allow local absolute paths without browser URL-normalization escapes."""
+    if (
+        not destination.startswith("/")
+        or destination.startswith("//")
+        or "\\" in destination
+        or any(ord(character) < 32 or ord(character) == 127 for character in destination)
+    ):
+        return "/"
+    return destination
+
+
 def get_admin_username() -> str:
     return os.environ.get("ADMIN_USERNAME", "admin")
 
@@ -66,15 +78,15 @@ def verify_session_token(token: str) -> bool:
     expected = hmac.new(
         _session_secret().encode(), payload.encode(), hashlib.sha256
     ).hexdigest()
-    if not hmac.compare_digest(sig, expected):
+    if not hmac.compare_digest(sig.encode("utf-8"), expected.encode("utf-8")):
         return False
-    return secrets.compare_digest(username, get_admin_username())
+    return secrets.compare_digest(username.encode("utf-8"), get_admin_username().encode("utf-8"))
 
 
 def check_credentials(username: str, password: str) -> bool:
     return secrets.compare_digest(
-        username, get_admin_username()
-    ) and secrets.compare_digest(password, get_admin_password())
+        username.encode("utf-8"), get_admin_username().encode("utf-8")
+    ) and secrets.compare_digest(password.encode("utf-8"), get_admin_password().encode("utf-8"))
 
 
 def verify_admin(
@@ -105,7 +117,7 @@ def verify_admin(
 
 
 def verify_worker_api_key(api_key: str) -> None:
-    if not secrets.compare_digest(api_key, get_worker_api_key()):
+    if not secrets.compare_digest(api_key.encode("utf-8"), get_worker_api_key().encode("utf-8")):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid API key",
