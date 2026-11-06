@@ -17,6 +17,7 @@ from .auth import (
     SESSION_MAX_AGE,
     check_credentials,
     create_session_token,
+    safe_login_destination,
     verify_admin,
 )
 from .database import get_engine, init_db, get_session_factory
@@ -115,7 +116,7 @@ async def login_page(request: Request, next: str = "/"):
     return templates.TemplateResponse(
         request,
         "login.html",
-        {"title": "Login", "next": next},
+        {"title": "Login", "next": safe_login_destination(next)},
     )
 
 
@@ -126,6 +127,7 @@ async def login_submit(
     password: str = Form(...),
     next: str = Form("/"),
 ):
+    next = safe_login_destination(next)
     if not check_credentials(username, password):
         return templates.TemplateResponse(
             request,

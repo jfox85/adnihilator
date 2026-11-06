@@ -19,8 +19,8 @@ AdNihilator uses a three-tier detection strategy, choosing the cheapest effectiv
 - Supports formats: `(00:29-01:15)`, chapter markers, `1h02m` notation
 - Skips transcription entirely when high-confidence timestamps found
 
-**Tier 2 - Gemini Audio Detection (~$0.10/episode)**
-- Uses Google's Gemini 2.0 Flash for direct audio analysis
+**Tier 2 - Gemini Audio Detection**
+- Uses Google's Gemini 3.5 Flash-Lite (google-genai SDK) for direct audio analysis
 - ~60 seconds processing vs 5-12 minutes for Whisper
 - No transcription needed - analyzes audio directly
 - May make a rare, targeted OpenAI text-refinement call when keyword
@@ -63,7 +63,7 @@ AdNihilator specifically looks for ads in common placement zones:
 - Store processed audio on Cloudflare R2
 
 ### Detection Capabilities
-- **Gemini audio detection**: Direct audio analysis without transcription (fastest, ~$0.10/episode)
+- **Gemini audio detection**: Direct audio analysis without transcription (fastest)
 - **External transcripts**: Fast processing using podcast-provided transcripts (Substack, Lex Fridman)
 - **Description timestamps**: Extract ad markers from episode descriptions (free)
 - **Sponsor-aware**: Extracts sponsor names from episode descriptions for better accuracy
@@ -147,11 +147,13 @@ model = "gpt-4o-mini"  # or "gpt-4o"
 api_key_env = "OPENAI_API_KEY"
 
 [gemini]
-# Enable Gemini 2.0 Flash for audio-based ad detection
-# Faster (~60s) but more expensive (~$0.10/episode) than Whisper+LLM
+# Enable Gemini 3.5 Flash-Lite for audio-based ad detection
 enabled = true
 api_key_env = "GEMINI_API_KEY"
-model = "gemini-2.0-flash-exp"
+model = "gemini-3.5-flash-lite"
+# Gemini 3+ only: minimal (default), low, medium, high. Not sent for older
+# model overrides. temperature/top_p/top_k are deprecated and not used.
+thinking_level = "minimal"
 
 [detect]
 heuristic_threshold = 0.4    # Heuristic sensitivity (lower = more sensitive)
@@ -167,7 +169,14 @@ device = "cpu"   # or "cuda" for GPU
 1. Description timestamps (if high-confidence timestamps found)
 2. External transcript (if `source_url` available)
 3. Gemini audio detection (if enabled and API key set)
-4. Whisper + LLM refinement (fallback)
+4. Local transcription and refinement when no earlier detection path supplied coverage
+
+Required worker detection fails before splicing when an enabled provider fails,
+its decision is incomplete or invalid, or a required transcript is missing.
+Two-pass and parallel modes both require transcript evidence; valid explicit
+no-ad decisions remain successful. Optional external lookups may fall back to
+local transcription. Explicit `--llm-provider none` retains heuristic detection;
+optional CLI refinement retains its existing API-error heuristic fallback.
 
 ## Web Service Setup (Optional)
 
@@ -403,7 +412,8 @@ This is faster and free, but less accurate than LLM refinement.
 
 - **Description timestamps**: Free (parses episode descriptions)
 - **Whisper transcription**: Free (runs locally)
-- **Gemini audio detection**: ~$0.10 per episode (~60 seconds processing)
+- **Gemini audio detection**: Gemini 3.5 Flash-Lite bills audio as input tokens
+  ($0.30/1M input, $2.50/1M output incl. thinking); the web UI shows actual cost
 - **OpenAI LLM refinement**: ~$0.004 per episode with GPT-4o-mini
 - **Mega-span refinement**: rare extra GPT-4o-mini call on the few episodes
   whose keyword detection yields a >10 min merged span (capped per episode)
@@ -412,7 +422,7 @@ This is faster and free, but less accurate than LLM refinement.
 | Method | Cost/Episode | Processing Time | Accuracy |
 |--------|-------------|-----------------|----------|
 | Description timestamps | Free | Instant | High (when available) |
-| Gemini 2.0 Flash | ~$0.10 | ~60 seconds | High |
+| Gemini 3.5 Flash-Lite | Token-billed (see UI) | ~60 seconds | High |
 | Whisper + GPT-4o-mini | ~$0.004 | 5-12 minutes | High |
 | Whisper only (no LLM) | Free | 5-12 minutes | Medium |
 
