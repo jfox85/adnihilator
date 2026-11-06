@@ -46,7 +46,7 @@ def _mock_client(response_text: str, usage: SimpleNamespace | None = None) -> Mo
     client.models.generate_content.return_value = SimpleNamespace(
         text=response_text,
         usage_metadata=usage if usage is not None else _usage(),
-        candidates=[],
+        candidates=[SimpleNamespace(finish_reason=types.FinishReason.STOP)],
     )
     return client
 
@@ -293,8 +293,8 @@ class TestWorkerIntegration:
                             lambda *_a, **_k: chunks)
         client = _mock_client('{"ads": []}')
         client.models.generate_content.side_effect = [
-            SimpleNamespace(text='{"ads": []}', usage_metadata=_usage(), candidates=[]),
-            SimpleNamespace(text="not JSON", usage_metadata=_usage(), candidates=[]),
+            SimpleNamespace(text='{"ads": []}', usage_metadata=_usage(), candidates=[SimpleNamespace(finish_reason=types.FinishReason.STOP)]),
+            SimpleNamespace(text="not JSON", usage_metadata=_usage(), candidates=[SimpleNamespace(finish_reason=types.FinishReason.STOP)]),
         ]
         with patch.object(gemini_chunked, "create_genai_client", return_value=client):
             with pytest.raises(RuntimeError, match="refusing to return incomplete"):
