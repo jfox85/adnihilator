@@ -107,6 +107,9 @@
                 <button onclick="queueEpisode('{{ podcast.id }}', '{{ episode.id }}')" class="btn-primary mobile-queue-btn">Queue</button>
                 {% endif %}
             </div>
+            <div class="episode-transcript">
+                <a href="/transcripts/episodes/{{ episode.id }}" onclick="event.stopPropagation()">{{ {'available': 'Read transcript', 'missing': 'Transcript not saved', 'queued': 'Transcript queued', 'processing': 'Transcript processing', 'failed': 'Transcript unavailable'}.get(transcript_states.get(episode.id, 'missing'), 'Transcript availability') }}</a>
+            </div>
             <div class="episode-details" id="details-{{ episode.id }}" hidden>
                 {% if episode.description %}
                 <div class="episode-description">
@@ -691,6 +694,7 @@ function sortEpisodes() {
 .episode-toggle:hover {
     background: var(--bg-card-hover);
 }
+.episode-transcript { padding: 0 1rem 0.5rem; font-size: 0.8rem; }
 .episode-title-section {
     flex: 1;
     min-width: 0;

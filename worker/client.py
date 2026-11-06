@@ -7,6 +7,7 @@ from typing import Optional
 import httpx
 
 from adnihilator.provider_errors import redact_secrets
+from adnihilator.transcript_document import TranscriptDocument
 
 logger = logging.getLogger(__name__)
 
@@ -221,3 +222,39 @@ class WorkerClient:
         except httpx.HTTPError as e:
             # Progress updates are non-critical, don't fail the job
             logger.debug(redact_secrets(f"Failed to update progress for {episode_id}: {e}", (self.api_key,)))
+            logger.debug(f"Failed to update progress for {episode_id}: {e}")
+
+    def publish_transcript(self, document: TranscriptDocument, claim_id: str | None = None,
+                           downloaded_at: str | None = None) -> str:
+        """Publish private canonical content using existing worker write auth."""
+        response = self.client.put(
+            f"{self.api_url}/api/worker/transcripts/{document.episode_id}",
+            headers=self._headers(), json=dict(document=document.model_dump(), claim_id=claim_id,
+                                               downloaded_at=downloaded_at))
+        response.raise_for_status()
+        return response.json()["checksum"]
+
+    def claim_transcript(self) -> dict | None:
+        """Claim only explicit requests; old servers safely return no transcript work."""
+        try:
+            response = self.client.post(f"{self.api_url}/api/worker/transcript-jobs/claim", headers=self._headers())
+            if response.status_code == 404:
+                return None
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPError:
+            logger.warning("Transcript job polling failed")
+            return None
+
+    def fail_transcript(self, episode_id: str, claim_id: str) -> None:
+        """Report a failed transcript attempt without leaking provider errors."""
+        response = self.client.post(f"{self.api_url}/api/worker/transcript-jobs/{episode_id}/fail",
+                                    headers=self._headers(), json=dict(claim_id=claim_id))
+        response.raise_for_status()
+
+
+    def heartbeat_transcript(self, episode_id: str, claim_id: str) -> None:
+        """Renew a transcript lease during long local transcription jobs."""
+        response = self.client.post(f"{self.api_url}/api/worker/transcript-jobs/{episode_id}/heartbeat",
+                                    headers=self._headers(), json=dict(claim_id=claim_id), timeout=5.0)
+        response.raise_for_status()

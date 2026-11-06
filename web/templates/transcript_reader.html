@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+<p><a href="/transcripts?podcast_id={{ episode.podcast_id }}">Transcript search</a></p>
+<h2>{{ episode.title }}</h2>
+<p>{{ episode.podcast }} · {{ episode.published_at|publication_date }} · Transcript {{ coverage.state }}</p>
+<p>{% if not passage or passage.timestamp_basis == 'original_audio' %}Original-audio timestamps.{% else %}External transcript timestamps; alignment to original audio is unverified.{% endif %} The transcript has no verified speaker labels. Detected ad passages remain in the canonical text.</p>
+{% if episode.source_url %}<p><a href="{{ episode.source_url }}" rel="noreferrer">Episode source</a></p>{% endif %}
+{% if episode.original_audio_url %}<p><a href="{{ episode.original_audio_url }}" rel="noreferrer">Original audio</a> · These seconds do not point into the ad-free audio.</p>{% endif %}
+{% if passage %}
+<p>Source: {{ passage.source }}{% if passage.model %} · Model: {{ passage.model }}{% endif %} · Revision {{ passage.checksum[:12] }}</p>
+{% if passage.checksum != coverage.checksum %}<p>You are reading an older cited revision. <a href="/transcripts/episodes/{{ episode.episode_id }}">Current transcript</a></p>{% endif %}
+{% if ordinal > 0 %}<a href="?checksum={{ passage.checksum }}&ordinal={{ [0, ordinal - 40]|max }}&query={{ query|urlencode }}">Previous passages</a>{% endif %}
+<article class="card">{% for segment in passage.segments %}
+<p id="segment-{{ segment.ordinal }}"><a href="?checksum={{ passage.checksum }}&ordinal={{ segment.ordinal }}#segment-{{ segment.ordinal }}">{{ segment.start|duration }}–{{ segment.end|duration }}</a>{% if segment.ad %} <strong>Ad passage</strong>{% endif %} {{ segment.text|highlight(query) }}{% if segment.text_truncated %} … [preview truncated; full text retained in canonical storage]{% endif %}</p>
+{% endfor %}</article>
+{% if passage.next_ordinal is not none %}<a href="?checksum={{ passage.checksum }}&ordinal={{ passage.next_ordinal }}&query={{ query|urlencode }}">Next passages</a>{% endif %}
+{% else %}
+<div class="card"><p>No complete transcript is available. Request status: {{ coverage.request_state or 'Not requested' }}{% if coverage.error %} · {{ coverage.error }}{% endif %}.</p>
+{% if coverage.state not in ['queued','processing'] %}<p>Request transcription of this episode only. The worker will use its existing local transcription engine; this does not reprocess ad-free audio.</p><form method="post" action="/transcripts/episodes/{{ episode.episode_id }}/request"><button type="submit">Request this transcript</button></form>{% endif %}</div>
+{% endif %}
+{% endblock %}

@@ -135,12 +135,12 @@
             align-items: center;
             margin-bottom: 10px;
             flex-wrap: wrap;
-            gap: 0.5rem;
+            gap: 0.75rem;
         }
         .header-left {
             display: flex;
             align-items: center;
-            gap: 1.5rem;
+            gap: 0.75rem;
             flex-wrap: wrap;
             min-width: 0;
         }
@@ -158,6 +158,17 @@
             font-size: 0.95rem;
             padding: 0.4rem 0.8rem;
             border-radius: 4px;
+        }
+        @media (max-width: 600px) {
+            .header-left { flex: 1 1 0; }
+            .header h1 { flex-basis: 100%; }
+            .header .nav-link {
+                display: inline-flex;
+                align-items: center;
+                box-sizing: border-box;
+                min-height: 44px;
+                padding: 0.4rem 0.5rem;
+            }
         }
         .nav-link:hover {
             background: var(--bg-hover);
@@ -242,6 +253,7 @@
         <div class="header-left">
             <h1><a href="/">AdNihilator</a></h1>
             <a href="/queue" class="nav-link">Queue</a>
+            <a href="/transcripts" class="nav-link">Transcripts</a>
             <a href="/logout" class="nav-link" style="color: var(--text-muted); font-size: 0.85rem;">Logout</a>
         </div>
         <div class="tools-menu">
