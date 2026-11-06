@@ -12,6 +12,9 @@ class TestCamelCaseCredentials:
         "accessKey", "secretKey", "clientSecret", "privateKey", "sessionToken",
         "idToken", "accessToken", "refreshToken", "apiKey", "APIKey",
         "customClientSecret", "r2AccessKey", "awsSecretAccessKey",
+        "pASSWORD", "PaSsWoRd", "tOKEN", "sECRET", "cREDENTIAL",
+        "aUTHORIZATION", "AuThOrIzAtIoN", "PREFIX_pASSWORD",
+        "PrEfIx-PaSsWoRd", "aPi_KeY", "x_CrEdEnTiAl",
     ])
     @pytest.mark.parametrize("wrapper", [
         "{name}={secret}",

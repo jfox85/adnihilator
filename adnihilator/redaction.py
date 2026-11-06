@@ -25,9 +25,16 @@ _AUTH_SCHEMES = {"basic", "bearer", "token", "digest", "negotiate", "aws4-hmac-s
 
 def _credential_name(name: str) -> bool:
     """Recognize whole credential fields and namespaced suffixes, not counters."""
-    normalized = _CAMEL_BOUNDARY.sub("_", name).lower().replace("-", "_")
-    return normalized in _CREDENTIAL_NAMES or any(
-        normalized.endswith("_" + suffix) for suffix in _CREDENTIAL_NAMES
+    # Camel-case splitting adds SDK spellings without replacing the original
+    # case-insensitive field recognition (for example, pASSWORD).
+    variants = (
+        name.lower().replace("-", "_"),
+        _CAMEL_BOUNDARY.sub("_", name).lower().replace("-", "_"),
+    )
+    return any(
+        normalized in _CREDENTIAL_NAMES
+        or any(normalized.endswith("_" + suffix) for suffix in _CREDENTIAL_NAMES)
+        for normalized in variants
     )
 
 
