@@ -1,14 +1,18 @@
 """FastAPI application for AdNihilator web service."""
 
 import logging
+import math
 import os
 import re
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from fastapi import Depends, FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from .auth import (
@@ -97,6 +101,24 @@ app.include_router(podcasts.router)
 app.include_router(api.router)
 app.include_router(feeds.router)
 app.include_router(opml.router)
+
+
+def _json_safe_validation_value(value: Any) -> Any:
+    """Keep nonfinite rejected input from breaking the JSON error response."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _json_safe_validation_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe_validation_value(item) for item in value]
+    return value
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    """Return the standard 422 detail shape even for invalid numeric input."""
+    detail = _json_safe_validation_value(jsonable_encoder(exc.errors()))
+    return JSONResponse(status_code=422, content={"detail": detail})
 
 
 @app.exception_handler(LoginRequiredError)

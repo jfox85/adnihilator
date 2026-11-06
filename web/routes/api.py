@@ -6,7 +6,8 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import case
 from sqlalchemy.orm import Session
 
 from ..app import get_db
@@ -109,18 +110,26 @@ class CompleteRequest(BaseModel):
     """Request body for completing an episode."""
 
     processed_audio_key: str
-    processed_duration: float
-    ads_removed_seconds: float
+    processed_duration: float = Field(ge=0, allow_inf_nan=False)
+    ads_removed_seconds: float = Field(ge=0, allow_inf_nan=False)
     detection_result_path: Optional[str] = None
 
     # LLM tracking fields
     llm_provider: Optional[str] = None
     llm_model: Optional[str] = None
-    llm_input_tokens: Optional[int] = None
-    llm_output_tokens: Optional[int] = None
-    llm_total_tokens: Optional[int] = None
-    llm_cost_usd: Optional[float] = None
+    llm_input_tokens: Optional[int] = Field(default=None, ge=0, le=2**63 - 1)
+    llm_output_tokens: Optional[int] = Field(default=None, ge=0, le=2**63 - 1)
+    llm_total_tokens: Optional[int] = Field(default=None, ge=0, le=2**63 - 1)
+    llm_cost_usd: Optional[float] = Field(default=None, ge=0, le=9999.999999, allow_inf_nan=False)
     detection_source: Optional[str] = None
+
+    @field_validator("processed_audio_key")
+    @classmethod
+    def require_audio_key(cls, value: str) -> str:
+        """Reject empty keys without normalizing valid object names."""
+        if not value.strip():
+            raise ValueError("processed_audio_key must not be blank")
+        return value
 
 
 class FailRequest(BaseModel):
@@ -132,8 +141,8 @@ class FailRequest(BaseModel):
 class ProgressRequest(BaseModel):
     """Request body for updating progress."""
 
-    step: str
-    percent: Optional[int] = None
+    step: str = Field(max_length=50)
+    percent: Optional[int] = Field(default=None, ge=0, le=100)
 
 
 @router.post("/queue/claim")
@@ -149,21 +158,31 @@ async def claim_episode(
     # become claimable again instead of blocking the queue indefinitely.
     requeue_stuck_episodes(db)
 
-    # Atomic update: find and claim in one query
-    episode = (
-        db.query(Episode)
-        .filter(Episode.status == EpisodeStatus.PENDING.value)
-        .order_by(Episode.created_at.asc())
-        .with_for_update(skip_locked=True)
-        .first()
-    )
-
-    if not episode:
+    # SQLite ignores SELECT FOR UPDATE. A conditional write is the ownership
+    # check; a losing claimant rolls back its snapshot before trying again.
+    for _ in range(10):
+        episode = (
+            db.query(Episode)
+            .filter(Episode.status == EpisodeStatus.PENDING.value)
+            .order_by(Episode.created_at.asc(), Episode.id.asc())
+            .first()
+        )
+        if episode is None:
+            return None
+        episode_id = episode.id
+        claimed = db.query(Episode).filter(
+            Episode.id == episode_id,
+            Episode.status == EpisodeStatus.PENDING.value,
+        ).update({Episode.status: EpisodeStatus.PROCESSING.value,
+                  Episode.claimed_at: datetime.utcnow()}, synchronize_session=False)
+        if claimed:
+            db.commit()
+            db.refresh(episode)
+            break
+        db.rollback()
+    else:
+        # Contention may temporarily look empty; never return an unowned job.
         return None
-
-    episode.status = EpisodeStatus.PROCESSING.value
-    episode.claimed_at = datetime.utcnow()
-    db.commit()
 
     return {
         "id": episode.id,
@@ -234,22 +253,29 @@ async def fail_episode(
     if episode.status == EpisodeStatus.FAILED.value:
         return {"status": "already_failed"}
 
-    episode.error_message = request.error
-    episode.claimed_at = None
-    episode.progress_step = None
-    episode.progress_percent = None
-
-    if episode.retry_count < MAX_RETRIES:
-        # Retry: back to pending
-        episode.retry_count += 1
-        episode.status = EpisodeStatus.PENDING.value
-        db.commit()
+    # The status predicate also protects concurrent duplicate deliveries and a
+    # completion committed after the read above. Attempt fencing is separate.
+    retry_available = Episode.retry_count < MAX_RETRIES
+    changed = db.query(Episode).filter(
+        Episode.id == episode_id,
+        Episode.status == EpisodeStatus.PROCESSING.value,
+    ).update({
+        Episode.error_message: request.error,
+        Episode.claimed_at: None,
+        Episode.progress_step: None,
+        Episode.progress_percent: None,
+        Episode.retry_count: case((retry_available, Episode.retry_count + 1), else_=Episode.retry_count),
+        Episode.status: case((retry_available, EpisodeStatus.PENDING.value), else_=EpisodeStatus.FAILED.value),
+    }, synchronize_session=False)
+    db.commit()
+    db.refresh(episode)
+    if not changed:
+        if episode.status == EpisodeStatus.FAILED.value:
+            return {"status": "already_failed"}
+        return {"status": "ignored", "reason": "not_processing"}
+    if episode.status == EpisodeStatus.PENDING.value:
         return {"status": "retrying", "retry_count": episode.retry_count}
-    else:
-        # Max retries reached: permanent failure
-        episode.status = EpisodeStatus.FAILED.value
-        db.commit()
-        return {"status": "failed"}
+    return {"status": "failed"}
 
 
 @router.post("/queue/{episode_id}/progress")
