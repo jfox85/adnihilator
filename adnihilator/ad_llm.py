@@ -16,6 +16,7 @@ from .models import (
     TranscriptSegment,
 )
 from .provider_responses import completed_openai_text
+from .provider_errors import InvalidProviderDecision, ProviderOutageError, classify_provider_error
 from .redaction import redact_secrets
 
 # Context window: how many seconds before/after candidate to include
@@ -67,7 +68,7 @@ BOUNDARY RULES:
 4. Be CONSERVATIVE - when in doubt, it's probably content, not an ad"""
 
 
-class InvalidRefinementResponse(ValueError):
+class InvalidRefinementResponse(InvalidProviderDecision):
     """A required refinement did not produce a complete authoritative decision."""
 
 
@@ -196,6 +197,7 @@ class OpenAIClient(AdLLMClient):
         self.model = model
         self.base_url = base_url
         self.require_success = require_success
+        self.completed_decisions = 0
 
     def refine_candidates(
         self,
@@ -279,6 +281,7 @@ class OpenAIClient(AdLLMClient):
                             start=ad_start, end=ad_end, confidence=ad.confidence,
                             reason=ad.reason, candidate_indices=candidate_indices,
                         ))
+                    self.completed_decisions += 1
                 except Exception as error:
                     safe_error = redact_secrets(str(error), extra_secrets=[self.api_key])
                     raise InvalidRefinementResponse(f"Invalid OpenAI transcript decision: {safe_error}") from None
@@ -288,6 +291,9 @@ class OpenAIClient(AdLLMClient):
             except Exception as e:
                 safe_error = redact_secrets(str(e), extra_secrets=[self.api_key])
                 if self.require_success:
+                    failure = classify_provider_error(e, (self.api_key,))
+                    if failure.global_failure:
+                        raise ProviderOutageError("openai", failure) from None
                     raise InvalidRefinementResponse(f"Required OpenAI refinement failed: {safe_error}") from None
                 # Fall back to heuristic for this candidate
                 spans.append(
@@ -748,6 +754,9 @@ Analyze the candidates and transcript to produce refined ad boundaries."""
             return validated_ads, usage
 
         except Exception as e:
+            failure = classify_provider_error(e, (self.api_key,))
+            if failure.global_failure:
+                raise ProviderOutageError("openai", failure) from None
             message = redact_secrets(str(e), extra_secrets=[self.api_key])
             print(f"LLM merge failed: {message}")
             # The required worker stage fails closed; suppress raw SDK/schema

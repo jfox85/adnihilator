@@ -21,9 +21,10 @@ from .gemini_common import (
     file_state_name,
     validate_detections,
 )
+from .gemini_retry import InvalidGeminiDecision, retry_decision, retry_operation
 from .models import AdSpan, SponsorInfo
 from .provider_responses import completed_gemini_text
-from .provider_errors import classify_provider_error, describe_provider_failure
+from .provider_errors import ProviderOutageError, classify_provider_error, describe_provider_failure
 
 logger = logging.getLogger(__name__)
 
@@ -126,20 +127,10 @@ def detect_ads_in_chunk(
     import json
     import time
 
-    # Upload chunk with retry
-    for attempt in range(max_retries):
-        if cancel_event is not None and cancel_event.is_set():
-            raise concurrent.futures.CancelledError()
-        try:
-            audio_file = client.files.upload(file=str(chunk_path))
-            break
-        except Exception as e:
-            if classify_provider_error(e).retryable and attempt < max_retries - 1:
-                wait_time = 30 * (attempt + 1)
-                logger.warning(f"Rate limited on upload, waiting {wait_time}s...")
-                time.sleep(wait_time)
-            else:
-                raise
+    audio_file = retry_operation(
+        lambda: client.files.upload(file=str(chunk_path)),
+        max_attempts=max_retries, cancel_event=cancel_event,
+    )
 
     # Wait for processing
     max_wait = 60
@@ -150,7 +141,8 @@ def detect_ads_in_chunk(
         if time.time() - start_wait > max_wait:
             raise ValueError(f"Chunk upload timeout: {chunk_path}")
         time.sleep(2)
-        audio_file = client.files.get(name=audio_file.name)
+        audio_file = retry_operation(lambda: client.files.get(name=audio_file.name),
+                                     max_attempts=max_retries, cancel_event=cancel_event)
 
     if file_state_name(audio_file) == "FAILED":
         raise ValueError(f"Chunk upload failed: {chunk_path}")
@@ -201,49 +193,40 @@ Return JSON with start_time and end_time in SECONDS from clip start:
 
 If no ads found: {{"ads": []}}"""
 
-    # Call Gemini with retry on rate limit. Single user turn (prompt + audio);
-    # no prefilled model turn and no deprecated sampling parameters.
     config = build_generate_config(model_name, thinking_level)
-    response = None
-    for attempt in range(max_retries):
-        if cancel_event is not None and cancel_event.is_set():
-            raise concurrent.futures.CancelledError()
+
+    def parse_decision(response: Any) -> list:
+        text = completed_gemini_text(response, allow_empty_text=True).strip()
         try:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=[prompt, audio_file],
-                config=config,
-            )
-            break
-        except Exception as e:
-            if classify_provider_error(e).retryable and attempt < max_retries - 1:
-                wait_time = 30 * (attempt + 1)
-                logger.warning(f"Rate limited on generate, waiting {wait_time}s...")
-                time.sleep(wait_time)
-            else:
-                raise
+            if not text:
+                raise InvalidGeminiDecision("Empty response from Gemini chunk")
+            if "```json" in text:
+                text = text.split("```json")[1].split("```")[0].strip()
+            elif "```" in text:
+                text = text.split("```")[1].split("```")[0].strip()
+            detections = validate_detections(json.loads(text))
+            if any(ad.start_time >= chunk_duration or ad.end_time <= 0 for ad in detections):
+                raise ValueError("Gemini detection does not overlap its audio chunk")
+            return detections
+        except InvalidGeminiDecision:
+            raise
+        except json.JSONDecodeError as error:
+            raise InvalidGeminiDecision(f"Failed to parse Gemini chunk response: {error}") from error
+        except (ValueError, TypeError) as error:
+            raise InvalidGeminiDecision(f"Invalid Gemini chunk decision: {error}") from error
 
-    response_text = completed_gemini_text(response)
-
-    if usage_totals is not None:
-        for key, value in extract_usage(response).items():
-            usage_totals[key] = usage_totals.get(key, 0) + value
-
-    # Parse response
-    text = response_text.strip()
-    if "```json" in text:
-        text = text.split("```json")[1].split("```")[0].strip()
-    elif "```" in text:
-        text = text.split("```")[1].split("```")[0].strip()
-
-    try:
-        result = json.loads(text)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Failed to parse Gemini chunk response: {e}") from e
+    detections = retry_decision(
+        lambda reask: client.models.generate_content(
+            model=model_name,
+            contents=[prompt + ("\nReturn corrected JSON only, with an explicit ads list and valid clip-relative seconds." if reask else ""), audio_file],
+            config=config,
+        ), parse_decision, max_attempts=max_retries,
+        cancel_event=cancel_event, usage_totals=usage_totals,
+    )
 
     # Convert to absolute timestamps
     ads = []
-    for ad in validate_detections(result):
+    for ad in detections:
         start_time = ad.start_time
         end_time = ad.end_time
 
@@ -424,6 +407,7 @@ class GeminiChunkedClient:
             errors = []
             cancelled_chunks: list[str] = []
             global_error: str | None = None
+            global_failure = None
             usage_totals: dict[str, int] = {}
             cancel_event = Event()
 
@@ -468,6 +452,7 @@ class GeminiChunkedClient:
                         errors.append(safe_error)
                         if failure.global_failure:
                             global_error = global_error or safe_error
+                            global_failure = global_failure or failure
                             cancel_event.set()
                             for pending in futures:
                                 pending.cancel()
@@ -481,6 +466,9 @@ class GeminiChunkedClient:
         logger.info(f"Chunked detection complete in {total_time:.1f}s, found {len(all_detections)} raw detections")
 
         if errors:
+            if global_failure is not None:
+                raise ProviderOutageError("gemini", global_failure,
+                    f"Gemini chunked detection failed for {len(errors)} chunk(s); refusing to return incomplete ad coverage. Cause: {global_error}") from None
             raise RuntimeError(
                 f"Gemini chunked detection failed for {len(errors)} chunk(s); "
                 f"refusing to return incomplete ad coverage. Cause: {global_error or errors[0]}"

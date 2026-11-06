@@ -9,6 +9,7 @@ import tempfile
 import time
 import warnings
 from pathlib import Path
+from threading import Lock
 from typing import Optional
 
 import httpx
@@ -20,7 +21,7 @@ from adnihilator.audio import get_duration
 from adnihilator.config import load_config
 from adnihilator.external_transcript import fetch_external_transcript
 from adnihilator.models import AdSpan, DetectionResult, FinalAdReview, TranscriptAdDetection, TranscriptSegment
-from adnihilator.provider_errors import redact_secrets
+from adnihilator.provider_errors import DetectionSafetyError, ProviderOutageError, classify_provider_error, redact_secrets
 from adnihilator.provider_responses import completed_openai_text
 from adnihilator.splice import splice_audio
 from adnihilator.sponsors import extract_sponsors
@@ -61,10 +62,6 @@ GEMINI_MAX_BOUNDARY_DRIFT_SECONDS = 15.0
 # Reported and transcript-localized durations may differ slightly because the
 # transcript omits silence/music. Larger ratios indicate unreliable boundaries.
 GEMINI_MAX_DURATION_RATIO = 2.5
-
-
-class DetectionSafetyError(RuntimeError):
-    """Raised when required ad-detection safety checks cannot run."""
 
 
 class WorkerDaemon:
@@ -136,6 +133,13 @@ class WorkerDaemon:
                 raise DetectionSafetyError(
                     f"Gemini runtime is unavailable; refusing to start worker: {redact_secrets(str(e), extra_secrets=[self.config.gemini.api_key])}"
                 ) from None
+
+    def _record_provider_success(self, provider: str) -> None:
+        """A successful real decision may verify a leased provider recovery."""
+        lock = getattr(self, "_provider_success_lock", None)
+        if lock is not None:
+            with lock:
+                self._provider_successes.add(provider)
 
     @staticmethod
     def _ensure_required_transcript(segments: list[TranscriptSegment] | None) -> None:
@@ -1510,9 +1514,13 @@ content cannot be recovered from the processed file."""
             else:
                 print(f"    Final review confidence: {overall_confidence:.0%}")
 
+            self._record_provider_success("openai")
             return final_spans, usage
 
         except Exception as e:
+            failure = classify_provider_error(e, (llm_client.api_key,))
+            if failure.global_failure:
+                raise ProviderOutageError("openai", failure) from None
             raise DetectionSafetyError(
                 f"Required final LLM review failed; refusing to splice episode: {redact_secrets(str(e), extra_secrets=[llm_client.api_key])}"
             ) from None
@@ -1554,10 +1562,13 @@ content cannot be recovered from the processed file."""
         if isinstance(llm_client, OpenAIClient):
             try:
                 spans, usage = llm_client.merge_and_refine(prompt_data, self.config)
+                self._record_provider_success("openai")
                 # Empty result = LLM says "no ads" - this is valid, NOT a failure
                 # Only fallback on actual exception (parse error, API error, etc.)
                 return spans, usage
             except Exception as e:
+                if isinstance(e, ProviderOutageError):
+                    raise
                 raise DetectionSafetyError(
                     f"Required LLM merge failed; refusing to splice episode: {redact_secrets(str(e), extra_secrets=[llm_client.api_key])}"
                 ) from None
@@ -1955,6 +1966,9 @@ range. If you cannot find any clear ad copy, return an empty list."""
         Args:
             job: The episode job to process
         """
+        self._provider_successes: set[str] = set()
+        self._provider_success_lock = Lock()
+
         print(f"Processing: {job.title or job.guid}")
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2058,11 +2072,12 @@ range. If you cannot find any clear ad copy, return an empty list."""
                     keyword_candidates = []
                     gemini_usage = None
                     gemini_error = None
+                    gemini_outage = None
                     whisper_error = None
                     gemini_attempted = False  # Track if Gemini ran (vs failed to run)
 
                     def run_gemini():
-                        nonlocal gemini_candidates, gemini_usage, gemini_error, gemini_attempted
+                        nonlocal gemini_candidates, gemini_usage, gemini_error, gemini_attempted, gemini_outage
                         try:
                             gemini_client = self._get_gemini_client(duration=duration)
                             if gemini_client:
@@ -2085,7 +2100,10 @@ range. If you cannot find any clear ad copy, return an empty list."""
                                     for s in spans
                                 ]
                                 gemini_usage = usage
+                                self._record_provider_success("gemini")
                         except Exception as e:
+                            if isinstance(e, ProviderOutageError):
+                                gemini_outage = e
                             gemini_error = redact_secrets(str(e))
 
                     def run_transcript_keywords():
@@ -2154,6 +2172,8 @@ range. If you cannot find any clear ad copy, return an empty list."""
                     # Update status after parallel work completes
                     self.api_client.update_progress(job.id, "detecting")
 
+                    if gemini_outage is not None:
+                        raise gemini_outage from None
                     self._ensure_parallel_detection_succeeded(
                         gemini_error,
                         whisper_error,
@@ -2373,6 +2393,7 @@ range. If you cannot find any clear ad copy, return an empty list."""
                                 duration=duration,
                                 sponsors=sponsor_info,
                             )
+                            self._record_provider_success("gemini")
                             detection_source = "gemini"
                             transcript_source = "gemini_audio"
                             segments = []  # No transcription segments from Gemini
@@ -2390,6 +2411,8 @@ range. If you cannot find any clear ad copy, return an empty list."""
                                 print(f"    Gemini cost: ${llm_usage['cost']:.4f}")
 
                         except Exception as e:
+                            if isinstance(e, ProviderOutageError):
+                                raise
                             raise DetectionSafetyError(
                                 f"Required Gemini detection failed; refusing to splice episode: {redact_secrets(str(e))}"
                             ) from None
@@ -2435,6 +2458,8 @@ range. If you cannot find any clear ad copy, return an empty list."""
                             engine=self.engine,
                         )
                         self._ensure_required_transcript(segments)
+                        if llm_client.completed_decisions:
+                            self._record_provider_success("openai")
                         print(f"    Two-pass complete: {len(segments)} segments, {len(ad_spans)} ads detected")
                     else:
                         transcript_detection_pending = True
@@ -2489,6 +2514,8 @@ range. If you cannot find any clear ad copy, return an empty list."""
                         segments, candidates, self.config,
                         sponsors=sponsor_info, podcast_title=job.podcast_title
                     )
+                    if getattr(llm_client, "completed_decisions", 0):
+                        self._record_provider_success("openai")
 
             # Final safety net for every detection path: keep spans in range so
             # the splicer never tries to cut audio outside [0, duration].
@@ -2591,6 +2618,8 @@ range. If you cannot find any clear ad copy, return an empty list."""
                     "llm_cost_usd": llm_usage.get("cost"),
                 })
 
+            if getattr(job, "provider_recovery", None):
+                completion_kwargs["provider_successes"] = sorted(self._provider_successes)
             self.api_client.complete(**completion_kwargs)
 
             print(f"  Done! Removed {stats['time_removed']:.0f}s of ads")
@@ -2669,6 +2698,13 @@ range. If you cannot find any clear ad copy, return an empty list."""
         Returns:
             True if a job was processed, False if queue was empty.
         """
+        pending_hold = getattr(self, "_pending_provider_hold", None)
+        if pending_hold is not None:
+            # Do not claim another paid job while the original global failure
+            # has not yet been durably acknowledged by the web service.
+            self.api_client.hold(**pending_hold)
+            self._pending_provider_hold = None
+            return True
         job = self.api_client.claim()
         if job is None:
             return False
@@ -2687,7 +2723,15 @@ range. If you cannot find any clear ad copy, return an empty list."""
                 ),
             )
             print(f"  Error: {error}")
-            self.api_client.fail(job.id, error[:500])
+            if isinstance(e, ProviderOutageError):
+                self._pending_provider_hold = {
+                    "episode_id": job.id, "provider": e.provider,
+                    "category": e.failure.category, "error": error[:500],
+                }
+                self.api_client.hold(**self._pending_provider_hold)
+                self._pending_provider_hold = None
+            else:
+                self.api_client.fail(job.id, error[:500])
             return True
 
     def run_daemon(self, interval: int = 300, watchdog_hours: int = 12) -> None:

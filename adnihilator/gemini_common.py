@@ -48,6 +48,20 @@ def validate_thinking_level(level: str) -> str:
     return normalized
 
 
+def _raise_gemini_http_error(response: Any) -> None:
+    """Surface HTTP errors before SDK resumable-upload implicit retries.
+
+    google-genai's upload data loop retries responses missing an upload-status
+    header independently of HttpRetryOptions. Raising its normal APIError at
+    the HTTPX boundary keeps permanent failures at one attempt and lets our
+    single bounded policy own transient retries. Successful uploads are intact.
+    """
+    if response.status_code >= 400:
+        from google.genai import errors
+        response.read()
+        errors.APIError.raise_for_response(response)
+
+
 def create_genai_client(api_key: str) -> Any:
     """Create a google-genai client for the Gemini Developer API."""
     try:
@@ -57,7 +71,13 @@ def create_genai_client(api_key: str) -> Any:
             "google-genai is required for Gemini detection. "
             "Run: pip install google-genai"
         ) from e
-    return genai.Client(api_key=api_key)
+    from google.genai import types
+    # The application owns the complete D3 budget; SDK retries must not
+    # multiply three application attempts into additional model requests.
+    return genai.Client(api_key=api_key, http_options=types.HttpOptions(
+        retry_options=types.HttpRetryOptions(attempts=1),
+        client_args={"event_hooks": {"response": [_raise_gemini_http_error]}},
+    ))
 
 
 def build_generate_config(model: str, thinking_level: str = DEFAULT_THINKING_LEVEL) -> Any:

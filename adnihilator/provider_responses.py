@@ -26,7 +26,7 @@ def _status_name(value: Any) -> str:
     return str(getattr(value, "value", value) or "")
 
 
-def completed_gemini_text(response: Any) -> str:
+def completed_gemini_text(response: Any, *, allow_empty_text: bool = False) -> str:
     """Accept one explicitly stopped candidate without prompt or safety blocks."""
     feedback = getattr(response, "prompt_feedback", None)
     block = _status_name(getattr(feedback, "block_reason", None))
@@ -42,6 +42,8 @@ def completed_gemini_text(response: Any) -> str:
     if any(getattr(rating, "blocked", False) for rating in ratings):
         raise ValueError("Gemini response blocked by safety feedback")
     text = getattr(response, "text", None)
+    if allow_empty_text and (text is None or isinstance(text, str) and not text.strip()):
+        return ""
     if not isinstance(text, str) or not text.strip():
         raise ValueError("Empty text in Gemini response")
     return text

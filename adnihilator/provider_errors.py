@@ -1,7 +1,11 @@
 """Classify provider outages and redact secrets before crossing error boundaries."""
 
 import re
+from json import JSONDecodeError
 from collections.abc import Iterable
+
+import httpx
+from pydantic import ValidationError
 
 from .models import ProviderFailureInfo
 from .redaction import redact_secrets
@@ -9,8 +13,17 @@ from .redaction import redact_secrets
 _STATUS = re.compile(r"(?:^\s*|Error code:\s*|HttpError\s+)([45]\d{2})(?=\s|[.:])", re.IGNORECASE)
 
 
+class InvalidProviderDecision(ValueError):
+    """Provider data failed validation; its text is not an SDK outage signal."""
+
+
 def classify_provider_error(error: BaseException | str, extra_secrets: Iterable[str | None] = ()) -> ProviderFailureInfo:
     """Prefer SDK status fields, with a fallback for historical exception text."""
+    structured = getattr(error, "failure", None)
+    if isinstance(structured, ProviderFailureInfo):
+        return structured.model_copy(update={"message": redact_secrets(structured.message, extra_secrets)})
+    if isinstance(error, (InvalidProviderDecision, ValidationError, JSONDecodeError)):
+        return ProviderFailureInfo(category="unknown", message=redact_secrets(str(error), extra_secrets))
     raw = str(error)
     status = None
     response = getattr(error, "response", None)
@@ -32,13 +45,13 @@ def classify_provider_error(error: BaseException | str, extra_secrets: Iterable[
         category = "model"
     elif status == 429:
         category = "rate_limit"
-    elif status in (500, 502, 503, 504) or any(word in text for word in ("timed out", "timeout", "deadline exceeded", "overloaded")):
+    elif status in (500, 502, 503, 504) or isinstance(error, (httpx.TransportError, TimeoutError, ConnectionError)) or any(word in text for word in ("timed out", "timeout", "deadline exceeded", "overloaded")):
         category = "transient"
     return ProviderFailureInfo(
         category=category, status_code=status,
         global_failure=category in ("billing", "authentication", "model"),
-        # Broader transient/JSON retries are a separate owner policy decision.
-        retryable=category == "rate_limit", message=redact_secrets(raw, extra_secrets),
+        # Owner D3: permanent failures remain excluded before this branch.
+        retryable=category in ("rate_limit", "transient"), message=redact_secrets(raw, extra_secrets),
     )
 
 
@@ -54,3 +67,16 @@ def describe_provider_failure(failure: ProviderFailureInfo) -> str:
         return failure.message
     status = f" (HTTP {failure.status_code})" if failure.status_code is not None else ""
     return f"{action}{status} {failure.message}"
+
+
+class DetectionSafetyError(RuntimeError):
+    """Required detection could not be safely completed."""
+
+
+class ProviderOutageError(DetectionSafetyError):
+    """A required provider decision failed for a global credit/auth/model reason."""
+
+    def __init__(self, provider: str, failure: ProviderFailureInfo, message: str | None = None) -> None:
+        self.provider = provider
+        self.failure = failure
+        super().__init__(message or describe_provider_failure(failure).replace("Gemini", "OpenAI" if provider == "openai" else "Gemini"))

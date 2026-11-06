@@ -20,8 +20,9 @@ from .gemini_common import (
     file_state_name,
     validate_detections,
 )
+from .gemini_retry import InvalidGeminiDecision, retry_decision, retry_operation
 from .models import AdSpan, SponsorInfo
-from .provider_errors import classify_provider_error, describe_provider_failure, redact_secrets
+from .provider_errors import ProviderOutageError, classify_provider_error, describe_provider_failure, redact_secrets
 from .provider_responses import completed_gemini_text
 
 logger = logging.getLogger(__name__)
@@ -82,7 +83,7 @@ class GeminiAudioClient:
             client = self._get_client()
 
             # Upload audio to Gemini Files API
-            audio_file = client.files.upload(file=str(audio_path))
+            audio_file = retry_operation(lambda: client.files.upload(file=str(audio_path)))
             upload_time = time.time() - upload_start
             logger.info(f"Upload complete in {upload_time:.2f}s")
 
@@ -93,7 +94,7 @@ class GeminiAudioClient:
                 if time.time() - start > max_wait:
                     raise ValueError("Gemini file upload timeout after 120s")
                 time.sleep(2)
-                audio_file = client.files.get(name=audio_file.name)
+                audio_file = retry_operation(lambda: client.files.get(name=audio_file.name))
                 logger.debug(f"File state: {file_state_name(audio_file)}")
 
             if file_state_name(audio_file) == "FAILED":
@@ -114,36 +115,35 @@ class GeminiAudioClient:
             analysis_start = time.time()
             # Single user turn (prompt + audio); no prefilled model turn and
             # no deprecated sampling parameters.
-            response = client.models.generate_content(
-                model=self.model,
-                contents=[prompt, audio_file],
-                config=build_generate_config(self.model, self.thinking_level),
+            usage_totals: dict[str, int] = {}
+
+            def parse_decision(response: Any) -> list:
+                text = completed_gemini_text(response, allow_empty_text=True)
+                try:
+                    detections = validate_detections(self._parse_response(text))
+                    if duration is not None and any(ad.start_time >= duration or ad.end_time <= 0 for ad in detections):
+                        raise ValueError("Gemini detection does not overlap the episode")
+                    return detections
+                except (ValueError, TypeError) as error:
+                    raise InvalidGeminiDecision(f"Invalid Gemini decision: {error}") from error
+
+            detections = retry_decision(
+                lambda reask: client.models.generate_content(
+                    model=self.model,
+                    contents=[prompt + ("\nReturn corrected JSON only, with an explicit ads list and valid episode-relative seconds." if reask else ""), audio_file],
+                    config=build_generate_config(self.model, self.thinking_level),
+                ), parse_decision, usage_totals=usage_totals,
             )
             analysis_time = time.time() - analysis_start
             logger.info(f"Analysis complete in {analysis_time:.2f}s")
-
-            # Validate response
-            if not response:
-                raise ValueError("Empty response from Gemini API")
-
-            response_text = completed_gemini_text(response)
-
-            # Parse JSON response
-            result = self._parse_response(response_text)
-
-            # Extract usage stats
-            if getattr(response, "usage_metadata", None) is None:
-                logger.warning("Missing usage_metadata in Gemini response")
             usage = {
-                "provider": "gemini",
-                "model": self.model,
-                **extract_usage(response),
-                "audio_duration_seconds": duration or 0,
+                "provider": "gemini", "model": self.model,
+                **usage_totals, "audio_duration_seconds": duration or 0,
             }
 
             # Convert to AdSpan objects
             ad_spans = []
-            for ad in validate_detections(result):
+            for ad in detections:
                 start_time = max(0, ad.start_time)
                 end_time = min(ad.end_time, duration) if duration is not None else ad.end_time
                 if start_time >= end_time:
@@ -166,9 +166,13 @@ class GeminiAudioClient:
             logger.info(f"Detected {len(ad_spans)} ads via Gemini")
             return ad_spans, usage
 
+        except InvalidGeminiDecision as error:
+            raise InvalidGeminiDecision(f"Gemini detection failed: {redact_secrets(str(error), (self.api_key,))}") from None
         except Exception as e:
             # Re-raise with context
             failure = classify_provider_error(e, (self.api_key,))
+            if failure.global_failure:
+                raise ProviderOutageError("gemini", failure) from None
             raise ValueError(f"Gemini detection failed: {describe_provider_failure(failure)}") from None
 
     def _build_detection_prompt(

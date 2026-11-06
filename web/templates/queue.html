@@ -18,7 +18,8 @@
                 <span class="queue-item-podcast">{{ podcast.title or "Untitled Podcast" }}</span>
                 <span class="queue-item-title">{{ episode.title or "Untitled Episode" }}</span>
                 <div class="queue-item-status">
-                    <span class="status-badge status-{{ episode.status }}">{{ episode.status }}</span>
+                    {% set provider_held = episode.id in (provider_held_ids|default([])) %}
+                    <span class="status-badge status-{% if provider_held and episode.status == 'pending' %}held{% else %}{{ episode.status }}{% endif %}">{% if provider_held %}{% if episode.status == 'processing' %}recovering{% else %}held{% endif %}{% else %}{{ episode.status }}{% endif %}</span>
                     {% if episode.progress_step %}
                     <span class="progress-step">{{ episode.progress_step }}</span>
                     {% endif %}

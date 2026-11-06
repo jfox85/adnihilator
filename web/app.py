@@ -7,7 +7,8 @@ import re
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, Form, Request
 from fastapi.encoders import jsonable_encoder
@@ -27,6 +28,7 @@ from .database import get_engine, init_db, get_session_factory
 from .dependencies import get_db
 from .routes import podcasts, api, feeds, opml
 from .services.scheduler import create_scheduler
+from .services import provider_outages as outages
 from . import dependencies
 
 # Configure logging
@@ -188,6 +190,7 @@ async def index(
         "index.html",
         {
             "title": "Dashboard",
+            **outages.banner_context(db),
             "podcasts": podcasts,
         },
     )
@@ -244,7 +247,40 @@ async def queue_page(
             "title": "Queue",
             "episodes": episodes,
             "recent_completed": recent_completed,
+            **outages.banner_context(db),
             "recent_failed": recent_failed,
             "audio_eligible": {episode.id: is_usable_audio_url(episode.original_audio_url) for episode, _ in recent_failed},
         },
     )
+
+
+@app.post("/provider-outages/{provider}/retry")
+async def retry_provider(
+    provider: Literal["gemini", "openai"], request: Request, db=Depends(get_db),
+    _: None = Depends(verify_admin),
+):
+    """Let the owner advance recovery after checking provider readiness."""
+    # This action can authorize billable recovery. Browser forms always send
+    # Origin; require the same origin rather than ambient Basic/cookie auth alone.
+    def origin_key(value: str) -> tuple:
+        parsed = urlsplit(value)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in ("", "/"):
+            raise ValueError("Invalid origin")
+        return parsed.scheme, parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        same_origin = origin_key(request.headers.get("origin", "")) == origin_key(str(request.base_url))
+    except ValueError:
+        same_origin = False
+    if not same_origin or request.headers.get("sec-fetch-site") == "cross-site":
+        from fastapi import HTTPException
+        raise HTTPException(403, "A same-origin recovery form is required")
+    outages.begin_write(db)
+    outages.retry_now(db, provider, api._stuck_timeout_seconds())
+    db.commit()
+    return RedirectResponse("/queue", status_code=303)
+
+
+@app.get("/provider-outages/banner", response_class=HTMLResponse)
+async def provider_outage_banner(request: Request, db=Depends(get_db), _: None = Depends(verify_admin)):
+    """Refresh safe pause status without provider or worker health calls."""
+    return templates.TemplateResponse(request, "provider_outage_banner.html", outages.banner_context(db))

@@ -86,15 +86,15 @@ class TestPermanentProviderFailures:
         assert client.models.generate_content.call_count == 2
         sleep.assert_called_once_with(30)
 
-    def test_transient_retry_policy_is_not_silently_changed(self) -> None:
-        """The separate owner decision still controls adding 503 retries."""
+    def test_owner_authorized_transient_retry_budget(self) -> None:
+        """Owner D3 authorizes three total transient attempts, not more."""
         client = sdk()
         client.models.generate_content.side_effect = ValueError("503 The service is currently unavailable.")
         with patch("time.sleep") as sleep:
             with pytest.raises(Exception):
                 detect_ads_in_chunk(client, Path("chunk.mp3"), 0, 300, "gemini-2.5-flash")
-        assert client.models.generate_content.call_count == 1
-        sleep.assert_not_called()
+        assert client.models.generate_content.call_count == 3
+        assert [call.args[0] for call in sleep.call_args_list] == [30, 60]
 
     def test_parallel_outage_only_allows_already_inflight_work(self, tmp_path: Path) -> None:
         """Queued chunks cannot start provider work after a global failure."""
@@ -119,6 +119,7 @@ class TestPermanentProviderFailures:
         with (
             patch("adnihilator.gemini_chunked.split_audio_into_chunks", return_value=chunks),
             patch("concurrent.futures.as_completed", side_effect=lambda futures: list(futures)),
+            patch("time.sleep"),
         ):
             with pytest.raises(RuntimeError) as failure:
                 detector.detect_ads(tmp_path / "episode.mp3", max_parallel=1)
@@ -180,7 +181,8 @@ class TestErrorRedaction:
         client.files.upload.side_effect = ValueError(INVALID_KEY)
         detector = GeminiAudioClient("synthetic-key", model="gemini-2.5-flash")
         detector._client = client
-        with pytest.raises(ValueError) as error:
+        from adnihilator.provider_errors import ProviderOutageError
+        with pytest.raises(ProviderOutageError) as error:
             detector.detect_ads(Path("synthetic.mp3"))
         assert "FAKE-CANARY-unit-secret" not in str(error.value)
         assert "API_KEY_INVALID" in str(error.value)

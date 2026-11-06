@@ -149,3 +149,29 @@ class Episode(Base):
     def status_enum(self, value: EpisodeStatus):
         """Set status from enum."""
         self.status = value.value
+
+
+class ProviderOutage(Base):
+    """Durable provider pause and the sole leased recovery episode."""
+
+    __tablename__ = "provider_outages"
+    provider: Mapped[str] = mapped_column(String(20), primary_key=True)
+    category: Mapped[str] = mapped_column(String(30), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    manual_pause: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    failure_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    retry_after: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    probe_episode_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    probe_token: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    last_probe_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class EpisodeProviderHold(Base):
+    """Provider holds leave the existing episode status and retry schema intact."""
+
+    __tablename__ = "episode_provider_holds"
+    episode_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(20), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)

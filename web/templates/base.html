@@ -176,6 +176,21 @@
         .tools-dropdown input[type="file"] {
             display: none;
         }
+
+        .provider-outage { padding: 16px; margin-bottom: 20px; border: 1px solid #b68d24; border-radius: 8px; background: #fff3cd; color: #664d03; }
+        .provider-outage h2 { margin: 0 0 10px; font-size: 1.15rem; }
+        .provider-outage p { margin: 8px 0; }
+        .provider-outage ul { padding-left: 22px; }
+        .provider-outage li { margin: 12px 0; overflow-wrap: anywhere; }
+        .provider-outage form { margin-top: 8px; }
+        .provider-outage button { min-height: 44px; min-width: 44px; padding: 10px 16px; border: 0; border-radius: 4px; background: #0056b3; color: #fff; cursor: pointer; }
+        .provider-outage button:focus-visible { outline: 3px solid #0056b3; outline-offset: 3px; }
+        .provider-outage button:disabled { cursor: default; opacity: 0.7; }
+        .status-held { background: #fff3cd; color: #664d03; }
+        @media (prefers-color-scheme: dark) {
+            .provider-outage, .status-held { background: #3d3217; color: #ffe69c; border-color: #b68d24; }
+            .provider-outage button:focus-visible { outline-color: #9ec5fe; }
+        }
     </style>
 </head>
 <body>
@@ -245,6 +260,44 @@
         document.getElementById('toolsDropdown').classList.remove('open');
     }
     </script>
+    {% if provider_status_enabled|default(false) %}
+    <div id="provider-outage-region">{% include "provider_outage_banner.html" %}</div>
+    <p id="provider-status-refresh-error" role="status" hidden>Provider status could not refresh. The last known state is shown.</p>
+    <script>
+    (() => {
+        const region = document.getElementById('provider-outage-region');
+        const warning = document.getElementById('provider-status-refresh-error');
+        let refreshing = false;
+        async function refreshProviderBanner() {
+            if (refreshing || document.hidden) return;
+            refreshing = true;
+            try {
+                const response = await fetch('/provider-outages/banner', {
+                    headers: {'Accept': 'application/json'}, credentials: 'same-origin', redirect: 'error'
+                });
+                if (response.status === 401 || response.status === 403) {
+                    region.replaceChildren(); warning.hidden = true; return;
+                }
+                if (!response.ok) throw new Error('Provider status unavailable');
+                const template = document.createElement('template');
+                template.innerHTML = await response.text();
+                if (region.innerHTML.trim() !== template.innerHTML.trim()) {
+                    const focused = region.contains(document.activeElement) ? document.activeElement.id : null;
+                    region.replaceChildren(template.content.cloneNode(true));
+                    if (focused) {
+                        const replacement = document.getElementById(focused);
+                        if (replacement && !replacement.disabled) replacement.focus();
+                    }
+                }
+                warning.hidden = true;
+            } catch (_) { warning.hidden = false; }
+            finally { refreshing = false; }
+        }
+        setInterval(refreshProviderBanner, 10000);
+        refreshProviderBanner();
+    })();
+    </script>
+    {% endif %}
     {% block content %}{% endblock %}
 </body>
 </html>

@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ProviderFailureInfo(BaseModel):
-    """Safe provider failure details and the existing throttle retry policy."""
+    """Safe provider failure details for bounded retry and durable outage policy."""
 
     category: Literal["billing", "authentication", "model", "rate_limit", "transient", "unknown"]
     status_code: int | None = None
