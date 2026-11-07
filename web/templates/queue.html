@@ -28,7 +28,9 @@
                 </div>
             </div>
             <div class="queue-item-actions">
+                {% if episode.status != 'processing' %}
                 <button onclick="skipEpisode('{{ podcast.id }}', '{{ episode.id }}')" class="btn-skip">Skip</button>
+                {% endif %}
             </div>
         </div>
         {% endfor %}
@@ -65,7 +67,11 @@
                 </div>
             </div>
             <div class="failed-item-actions">
+                {% if audio_eligible[episode.id] %}
                 <button onclick="retryEpisode('{{ podcast.id }}', '{{ episode.id }}')" class="btn-retry">Retry</button>
+                {% else %}
+                <span>No usable audio enclosure</span>
+                {% endif %}
             </div>
         </div>
         {% endfor %}
@@ -186,6 +192,11 @@ async function updateStatuses() {
                 if (badge) {
                     badge.className = `status-badge status-${status.status}`;
                     badge.textContent = status.status;
+                }
+                const actions = item.querySelector('.queue-item-actions');
+                if (actions) {
+                    actions.innerHTML = status.status === 'pending'
+                        ? `<button onclick="skipEpisode('${podcastId}', '${episodeId}')" class="btn-skip">Skip</button>` : '';
                 }
 
                 // Update progress

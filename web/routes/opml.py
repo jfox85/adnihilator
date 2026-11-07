@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from ..auth import verify_admin
 from ..dependencies import get_db
 from ..models import Podcast
+from ..services.audio import is_usable_audio_url
 
 
 router = APIRouter(prefix="/opml", tags=["opml"])
@@ -134,11 +135,18 @@ async def import_opml(
 
     imported = []
     skipped = []
+    skipped_invalid = 0
+    skipped_existing = 0
 
     for feed in feeds:
         url = feed["url"]
+        if not is_usable_audio_url(url):
+            skipped.append({"url": url, "title": feed["title"], "reason": "unsupported source URL"})
+            skipped_invalid += 1
+            continue
         if url in existing_urls:
             skipped.append({"url": url, "title": feed["title"], "reason": "already exists"})
+            skipped_existing += 1
             continue
 
         # Add new podcast with title from OPML (will be updated on sync)
@@ -157,6 +165,8 @@ async def import_opml(
     return {
         "imported": len(imported),
         "skipped": len(skipped),
+        "skipped_invalid": skipped_invalid,
+        "skipped_existing": skipped_existing,
         "feeds": {
             "imported": imported,
             "skipped": skipped,

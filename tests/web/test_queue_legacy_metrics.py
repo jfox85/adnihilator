@@ -38,8 +38,8 @@ def queue_client(monkeypatch: pytest.MonkeyPatch, tmp_path) -> Iterator[tuple[Te
             db.add(Podcast(id="podcast", source_rss_url="https://example.invalid/feed", title="Synthetic Podcast"))
             db.flush()
             db.add(Episode(id="completed", podcast_id="podcast", guid="completed", title="Completed metric", status="complete", llm_cost_usd=Decimal("0.123")))
-            db.add(Episode(id="pending", podcast_id="podcast", guid="pending", title="Healthy pending", status="pending"))
-            db.add(Episode(id="failed", podcast_id="podcast", guid="failed", title="Healthy failed", status="failed"))
+            db.add(Episode(id="pending", podcast_id="podcast", guid="pending", title="Healthy pending", status="pending", original_audio_url="http://127.0.0.1/synthetic.mp3"))
+            db.add(Episode(id="failed", podcast_id="podcast", guid="failed", title="Healthy failed", status="failed", original_audio_url="http://127.0.0.1/synthetic.mp3"))
             db.commit()
         yield client, database
 

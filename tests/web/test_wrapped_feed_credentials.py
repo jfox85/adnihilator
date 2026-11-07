@@ -29,10 +29,10 @@ def test_wrapped_credentials_survive_no_public_error_boundary(
     canary = "SYNTHETIC-WRAPPED-UNKNOWN-CREDENTIAL"
     payload = "feed refused\n" + wrapper.format(secret=canary)
 
-    def parse(url: str) -> feedparser.FeedParserDict:
+    def parse(url: str, **options: object) -> feedparser.FeedParserDict:
         if url.endswith("/bad"):
             raise RuntimeError(payload)
-        return feedparser.FeedParserDict(feed={}, entries=[])
+        return feedparser.FeedParserDict(feed={}, entries=[], version="rss20")
 
     monkeypatch.setattr("web.services.feed_sync.feedparser.parse", parse)
     engine = create_engine(f"sqlite:///{tmp_path / 'feeds.db'}")

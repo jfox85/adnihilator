@@ -63,6 +63,7 @@ class Podcast(Base):
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     artwork_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     auto_process: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_sync_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow

@@ -84,7 +84,7 @@ class TestHistoricalNamedCredentials:
             ["access_token", "client_secret", "OPENAI_API_KEY"], canaries,
         )))
 
-        def fail_parse(url: str) -> None:
+        def fail_parse(url: str, **options: object) -> None:
             raise RuntimeError(payload)
 
         monkeypatch.setattr("web.services.feed_sync.feedparser.parse", fail_parse)
