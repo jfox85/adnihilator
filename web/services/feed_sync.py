@@ -232,7 +232,7 @@ def _sync_podcast_entries(db: Session, podcast: Podcast) -> int:
     source_enclosures = None
     if document.url:
         try:
-            source_enclosures = document.validate_structure(feed.entries)
+            source_enclosures = document.validate_structure(feed.entries, feed_result=feed)
         except Exception:
             raise FeedSyncError("Response is not a complete RSS or Atom feed") from None
         if source_enclosures is not None and len(source_enclosures) != len(feed.entries):
@@ -271,8 +271,8 @@ def _sync_podcast_entries(db: Session, podcast: Podcast) -> int:
     for index, entry in enumerate(feed.entries):
         enclosures = [dict(enclosure) for enclosure in getattr(entry, "enclosures", [])]
         if source_enclosures is not None:
-            # The observer reproduces and verifies the exact original entries;
-            # its indices identify parser events, not guessed link positions.
+            # The local adapter consumes the exact entry/reference objects;
+            # these indices identify parser events, not guessed link positions.
             source_entry = source_enclosures[index]
             if not source_entry.actual_namespace:
                 continue

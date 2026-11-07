@@ -16,6 +16,7 @@ import zlib
 import feedparser
 from feedparser import api
 from feedparser.encodings import convert_to_utf8
+from feedparser.html import _BaseHTMLProcessor
 from feedparser.mixin import _FeedParserMixin
 from feedparser.sanitizer import replace_doctype
 from feedparser.urls import make_safe_absolute_uri
@@ -25,6 +26,24 @@ _RECOVERABLE_AMPERSAND = re.compile(
     r"&(?!(?:amp|lt|gt|apos|quot);|#(?:[0-9]+|x[0-9a-fA-F]+);)"
     r"(?:([A-Za-z][A-Za-z0-9]*);)?"
 )
+_XML_NAMESPACE = "http://www.w3.org/XML/1998/namespace"
+_XML_ATTRIBUTE_ENTITY = re.compile(r"&(?:amp|lt|gt|apos|quot|#[0-9]+|#x[0-9a-fA-F]+);")
+
+
+def _xml_attribute_value(value: str) -> str:
+    """Decode standard XML references once, only after attribute tokenization."""
+    named = {"amp": "&", "lt": "<", "gt": ">", "apos": "'", "quot": '"'}
+
+    def decode(match: re.Match[str]) -> str:
+        entity = match.group()[1:-1]
+        if not entity.startswith("#"):
+            return named[entity]
+        number = int(entity[2:], 16) if entity.startswith("#x") else int(entity[1:])
+        return chr(number)
+
+    return _XML_ATTRIBUTE_ENTITY.sub(decode, value)
+
+
 _BASE_NAMESPACES = {uri.lower() for uri, prefix in _FeedParserMixin.namespaces.items() if not prefix}
 
 
@@ -77,7 +96,7 @@ class SourceEntry:
 
 
 class _SourceObserver:
-    """Observe feedparser's own entry/context decisions, without changing its data."""
+    """Bind source fields to the local adapter's exact entry/context objects."""
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         super().__init__(*args, **kwargs)
@@ -141,7 +160,18 @@ class _SourceStrict(_SourceObserver, api.StrictFeedParser):
         }
         if self.source_root_namespace is None:
             self.source_root_namespace = self.source_namespace
-        super().startElementNS(name, qname, attrs)
+        # The same qualified source fields must reach the library consumer.
+        # Unknown namespaces otherwise flatten x:url into a real URL attribute.
+        reference = self.source_element in {"link", "enclosure"} and _feed_namespace(self.source_namespace)
+        kept = {
+            key: value for key, value in attrs.items()
+            if not (key[0] and (
+                (reference and key[1].lower() in {"href", "url", "uri", "type", "rel"})
+                or (key[1].lower() == "base" and key[0] != _XML_NAMESPACE)
+            ))
+        }
+        qualified = {key: attrs.getQNameByName(key) for key in kept}
+        super().startElementNS(name, qname, xml.sax.xmlreader.AttributesNSImpl(kept, qualified))
 
     def _original_attributes(self, attributes: dict[str, str]) -> dict[str, str]:
         return dict(self._source_attributes)
@@ -160,7 +190,6 @@ class _LooseSourceText:
         self.stages: list[tuple[list[int], list[tuple[int, int, int, int]]]] = []
         self._rewrite(re.compile(r"<!((?!DOCTYPE|--|\[))", re.IGNORECASE), lambda match: "&lt;!" + match.group(1))
         self._rewrite(re.compile(r"<([^<>\s]+?)\s*/>"), shorttag)
-        self._rewrite(re.compile(r"&#(?:39|34);"), lambda match: "'" if match.group() == "&#39;" else '"')
 
     def _rewrite(self, pattern: re.Pattern[str], replacement: Callable[[re.Match[str]], str]) -> None:
         boundaries: list[tuple[int, int, int, int]] = []
@@ -209,7 +238,20 @@ class _SourceLoose(_SourceObserver, api.LooseFeedParser):
     def feed(self, data: str) -> None:
         """Retain original tags before the library rewrites decimal quote refs."""
         self._source_text = _LooseSourceText(data, self._shorttag_replace)
-        super().feed(data)
+        # Reuse the installed SGML engine, but do not turn character references
+        # into lexical quote delimiters before it has read the attributes.
+        super(_BaseHTMLProcessor, self).feed(self._source_text.transformed)
+        super(_BaseHTMLProcessor, self).close()
+
+    @staticmethod
+    def _normalize_attributes(kv: tuple[str, str]) -> tuple[str, str]:
+        key, value = kv
+        key = key.lower()
+        source_field = key.rsplit(":", 1)[-1] in {"href", "url", "uri", "type", "rel", "base"}
+        if source_field or key == "xmlns" or key.startswith("xmlns:"):
+            value = _xml_attribute_value(value)
+            return key, value.lower() if key in {"rel", "type"} else value
+        return api.LooseFeedParser._normalize_attributes(kv)
 
     def parse_starttag(self, i: int) -> int:
         """Bind the callback to its actual original tag, without positional pairing."""
@@ -226,9 +268,9 @@ class _SourceLoose(_SourceObserver, api.LooseFeedParser):
             scope = dict(self._source_scopes[-1])
             for key, value in attrs:
                 if key.lower() == "xmlns":
-                    scope[""] = value
+                    scope[""] = _xml_attribute_value(value)
                 elif key.lower().startswith("xmlns:"):
-                    scope[key[6:].lower()] = value
+                    scope[key[6:].lower()] = _xml_attribute_value(value)
             prefix = tag.split(":", 1)[0].lower() if ":" in tag else ""
             self.source_element = tag.rsplit(":", 1)[-1].lower()
             self.source_namespace = scope.get(prefix, "" if not prefix else "urn:unbound:" + prefix)
@@ -281,8 +323,8 @@ def _observe_sources(body: bytes, base: str, language: str | None, strict: bool)
     """Replay only captured bytes through per-call observers; never fetch again.
 
     These are the same strict/loose engines and doctype preprocessing used by
-    feedparser.api.parse. No parser globals are patched. Their normalized entry
-    data must equal the original parse before any observed index is trusted.
+    feedparser.api.parse, with local source-attribute authority and safe lexical
+    quote handling. No parser globals are patched or response bytes fetched again.
     """
     _, body, entities = replace_doctype(body)
     if strict and api._XML_AVAILABLE:
@@ -347,13 +389,17 @@ class FeedDocumentCapture(BaseHandler):
 
     https_response = http_response
 
-    def validate_structure(self, entries: list[dict[str, object]]) -> list[SourceEntry] | None:
+    def validate_structure(
+        self, entries: list[dict[str, object]], *, feed_result: dict[str, object] | None = None,
+    ) -> list[SourceEntry] | None:
         """Keep D17 completeness checks, then observe exact namespace/context origin.
 
-        Validation-only escaping is never used as imported enclosure data. Atom
+        Validation-only escaping is never used as imported enclosure data. Source
         metadata comes from the original bytes before URL/MIME defaults, including
         RSS-style enclosures and author contexts. Foreign entry/link events are
         distinguished by their actual namespace, not local names or list lengths.
+        When supplied, feed_result receives the adapter's normalized feed/entries
+        so validation and downstream admission consume the same source fields.
         """
         body = b"".join(self._chunks)
         if "gzip" in self._content_encoding:
@@ -378,10 +424,17 @@ class FeedDocumentCapture(BaseHandler):
         parser.Parse(_RECOVERABLE_AMPERSAND.sub(_validation_entity, body.decode("utf-8")), True)
         if root not in {"rss", "rdf", "feed"}:
             raise ValueError("Not a recognized feed root")
-        if root != "feed":
+        if root != "feed" and feed_result is None:
             return None
         base = make_safe_absolute_uri(self.url or "", self._content_location) or make_safe_absolute_uri(self._content_location) or self.url or ""
         observer = _observe_sources(body, base, self._content_language, bool(conversion.get("encoding")))
+        if feed_result is not None:
+            # This local adapter consumes the same captured response. Its exact
+            # entry/context objects are authoritative for both data and guards.
+            feed_result["feed"] = observer.feeddata
+            feed_result["entries"] = observer.entries
+            feed_result["version"] = observer.version
+            entries = observer.entries
         if observer.entries != entries or len(observer.source_entries) != len(entries):
             raise ValueError("Original entries and source provenance do not agree")
         if not _feed_namespace(observer.source_root_namespace or ""):
