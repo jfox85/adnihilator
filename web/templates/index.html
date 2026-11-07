@@ -139,6 +139,7 @@ async function refreshAll() {
             const data = await requestJSON('/podcasts/sync-all', {method: 'POST'});
             if (Object.values(data.results).some(result => result.error)) {
                 showRequestNotice('Some feeds could not be refreshed. Try again shortly.', {retry: refreshAll, owner: 'refresh-all'});
+                if (document.activeElement === document.body) revealRequestNotice(btn);
             } else { clearRequestNotice('refresh-all'); window.location.reload(); }
         } finally { btn.textContent = 'Refresh All'; }
     }, 'The feeds could not be refreshed. Try again shortly.');
