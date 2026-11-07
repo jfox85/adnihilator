@@ -52,23 +52,26 @@ expansion; it never invents closing tags or changes the imported feedparser data
 This is bounded compatibility support, not a promise to recover arbitrary malformed
 XML or preserve every malformed title byte-for-byte.
 
-Relative RSS enclosures are resolved against the final fetched HTTP(S) feed URL,
-including after redirects. Explicit malformed or unsupported absolute URLs are
-not repaired. For Atom, original href/type/rel attributes are retained before
+Relative RSS/Atom enclosures retain their genuine XML base, falling back to the
+final fetched HTTP(S) feed URL after redirects. Explicit malformed or unsupported
+absolute URLs are not repaired. Original unqualified URL/type/rel attributes are retained before
 feedparser normalization. Empty, whitespace-containing, malformed or unsupported
 raw URLs remain unusable even if the parser repairs them into valid-looking URLs;
 valid relative references retain their XML-base/final-response resolution.
-A per-call observer replays only the captured bytes through the same strict/loose
+A per-call adapter consumes only the captured bytes through the same strict/loose
 parser engines. It records actual namespace and entry context before URI repair
 or MIME defaults, retaining the exact reference object through normalization.
-The replay's complete normalized entry data must equal the original parse before
-an entry index is trusted. Foreign vocabulary is excluded by namespace, including
-reused prefixes; real RSS-style enclosures and author contexts keep their own
+Its normalized data and source guards share those same entry/reference objects;
+qualified foreign attributes cannot replace genuine source fields. Foreign
+vocabulary is excluded by namespace, including reused prefixes; real RSS-style enclosures and author contexts keep their own
 attributes. Enclosures are never paired by list position or matching counts.
 Validation-rewritten attribute values never become imported MIME or URLs; recovered
 attribute syntax still passes the D17 entity-aware raw-URL guard. No parser globals
-are patched. This adds an in-memory parse, not another HTTP fetch, and uses the
-existing feedparser engine interfaces (verified with feedparser 6.0.14).
+are patched. Standard XML character references are decoded once, after attribute
+tokenization, so a quoted value cannot manufacture a MIME attribute, truncate a
+URL, or swallow a later entry. Unknown HTML entity names are not promoted into
+source MIME. This adds an in-memory parse, not another HTTP fetch, and uses the
+existing feedparser engine interfaces (verified with feedparser 6.0.12 and 6.0.14).
 Enclosure relations are compared case-insensitively to align with feedparser. A
 missing type is distinct from an explicitly declared `text/html`,
 even though feedparser defaults both to that label. The same HTTP response is
