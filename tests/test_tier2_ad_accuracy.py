@@ -76,7 +76,7 @@ def _install_fake_llm(monkeypatch, response_payload, capture=None):
 
     class _Resp:
         def __init__(self, content):
-            self.choices = [types.SimpleNamespace(message=types.SimpleNamespace(content=content))]
+            self.choices = [types.SimpleNamespace(finish_reason="stop", message=types.SimpleNamespace(content=content))]
             self.usage = types.SimpleNamespace(prompt_tokens=10, completion_tokens=5)
 
     class _Completions:
@@ -340,7 +340,7 @@ def test_mega_span_refine_call_cap(monkeypatch) -> None:
 
     class _Resp:
         def __init__(self, content):
-            self.choices = [types.SimpleNamespace(message=types.SimpleNamespace(content=content))]
+            self.choices = [types.SimpleNamespace(finish_reason="stop", message=types.SimpleNamespace(content=content))]
             self.usage = types.SimpleNamespace(prompt_tokens=10, completion_tokens=5)
 
     class _Completions:

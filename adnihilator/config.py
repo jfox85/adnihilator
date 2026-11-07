@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .gemini_common import DEFAULT_GEMINI_MODEL, DEFAULT_THINKING_LEVEL, validate_thinking_level
+
 
 @dataclass
 class LLMConfig:
@@ -27,7 +29,9 @@ class GeminiConfig:
 
     enabled: bool = False  # Feature flag
     api_key_env: str = "GEMINI_API_KEY"
-    model: str = "gemini-2.5-flash"
+    model: str = DEFAULT_GEMINI_MODEL
+    # Gemini 3+ thinking level (minimal/low/medium/high); ignored for older models
+    thinking_level: str = DEFAULT_THINKING_LEVEL
     chunked_threshold: int = 1800  # Use chunked detection for episodes > 30 min
 
     @property
@@ -113,7 +117,10 @@ def _parse_config(data: dict[str, Any]) -> Config:
     gemini_config = GeminiConfig(
         enabled=gemini_data.get("enabled", False),
         api_key_env=gemini_data.get("api_key_env", "GEMINI_API_KEY"),
-        model=gemini_data.get("model", "gemini-2.5-flash"),
+        model=gemini_data.get("model", DEFAULT_GEMINI_MODEL),
+        thinking_level=validate_thinking_level(
+            gemini_data.get("thinking_level", DEFAULT_THINKING_LEVEL)
+        ),
         chunked_threshold=gemini_data.get("chunked_threshold", 1800),
     )
 

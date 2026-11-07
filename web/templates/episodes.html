@@ -20,7 +20,7 @@
                 <strong>Feed URL:</strong>
                 <span class="feed-url-row">
                     <a href="/feed/{{ podcast.feed_token }}.xml" target="_blank" class="feed-url-link">/feed/{{ podcast.feed_token }}.xml</a>
-                    <button onclick="copyFeedUrl()" class="btn-copy" title="Copy feed URL">📋</button>
+                    <button onclick="copyFeedUrl()" class="btn-copy" title="Copy feed URL" aria-label="Copy feed URL">📋</button>
                 </span>
             </p>
             {% if podcast.last_sync_error %}
@@ -52,8 +52,8 @@
             </button>
         </div>
         <div class="search-filter">
-            <input type="text" id="searchInput" placeholder="Search episodes..." oninput="filterEpisodes()">
-            <select id="statusFilter" onchange="filterEpisodes()">
+            <input type="text" id="searchInput" aria-label="Search episodes" placeholder="Search episodes..." oninput="filterEpisodes()">
+            <select id="statusFilter" aria-label="Filter by status" onchange="filterEpisodes()">
                 <option value="">All Statuses</option>
                 <option value="pending">Pending</option>
                 <option value="processing">Processing</option>
@@ -61,7 +61,7 @@
                 <option value="failed">Failed</option>
                 <option value="skipped">Skipped</option>
             </select>
-            <select id="sortBy" onchange="sortEpisodes()">
+            <select id="sortBy" aria-label="Sort episodes" onchange="sortEpisodes()">
                 <option value="date-desc">Date (Newest)</option>
                 <option value="date-asc">Date (Oldest)</option>
                 <option value="title-asc">Title (A-Z)</option>
@@ -83,8 +83,9 @@
              data-status="{{ episode.status }}"
              data-audio-eligible="{{ 'true' if audio_eligible[episode.id] else 'false' }}"
              data-date="{{ episode.published_at.isoformat() if episode.published_at else '' }}">
-            <div class="episode-main" onclick="toggleDetails('{{ episode.id }}')">
-                <div class="episode-title-section">
+            <div class="episode-main">
+                <button type="button" class="episode-toggle" id="toggle-{{ episode.id }}" aria-expanded="false" aria-controls="details-{{ episode.id }}" onclick="toggleDetails('{{ episode.id }}')">
+                <span class="episode-title-section">
                     <span class="episode-title">{{ episode.title or episode.guid }}</span>
                     <span class="episode-meta">
                         {% if episode.published_at %}
@@ -95,13 +96,8 @@
                         {% endif %}
                         <span id="audio-{{ episode.id }}" {% if audio_eligible[episode.id] %}hidden{% endif %}>No usable audio enclosure</span>
                     </span>
-                </div>
-                <div class="episode-status-section">
-                    <span id="mobile-actions-{{ episode.id }}">
-                    {% if episode.status in ['skipped', 'failed'] and audio_eligible[episode.id] %}
-                    <button onclick="event.stopPropagation(); queueEpisode('{{ podcast.id }}', '{{ episode.id }}')" class="btn-primary mobile-queue-btn">Queue</button>
-                    {% endif %}
-                    </span>
+                </span>
+                <span class="episode-status-section">
                     <span class="status-badge status-{{ episode.status }}" id="badge-{{ episode.id }}">
                         {%- if episode.status == 'processing' and episode.progress_step -%}
                             {{ episode.progress_step }}{% if episode.progress_percent is not none %} {{ episode.progress_percent }}%{% endif %}
@@ -109,10 +105,19 @@
                             {{ episode.status }}
                         {%- endif -%}
                     </span>
-                    <span class="expand-icon" id="icon-{{ episode.id }}">&#9660;</span>
-                </div>
+                    <span class="expand-icon" id="icon-{{ episode.id }}" aria-hidden="true">&#9660;</span>
+                </span>
+                </button>
+                <span id="mobile-actions-{{ episode.id }}">
+                {% if episode.status in ['skipped', 'failed'] and audio_eligible[episode.id] %}
+                <button onclick="queueEpisode('{{ podcast.id }}', '{{ episode.id }}')" class="btn-primary mobile-queue-btn">Queue</button>
+                {% endif %}
+                </span>
             </div>
-            <div class="episode-details" id="details-{{ episode.id }}">
+            <div class="episode-transcript">
+                <a href="/transcripts/episodes/{{ episode.id }}" onclick="event.stopPropagation()">{{ {'available': 'Read transcript', 'missing': 'Transcript not saved', 'queued': 'Transcript queued', 'processing': 'Transcript processing', 'failed': 'Transcript unavailable'}.get(transcript_states.get(episode.id, 'missing'), 'Transcript availability') }}</a>
+            </div>
+            <div class="episode-details" id="details-{{ episode.id }}" hidden>
                 {% if episode.description %}
                 <div class="episode-description">
                     {{ episode.description|safe }}
@@ -177,13 +182,11 @@ function copyFeedUrl() {
 function toggleDetails(episodeId) {
     const details = document.getElementById('details-' + episodeId);
     const icon = document.getElementById('icon-' + episodeId);
-    if (details.classList.contains('open')) {
-        details.classList.remove('open');
-        icon.innerHTML = '&#9660;';
-    } else {
-        details.classList.add('open');
-        icon.innerHTML = '&#9650;';
-    }
+    const open = !details.classList.contains('open');
+    details.classList.toggle('open', open);
+    details.hidden = !open;
+    document.getElementById('toggle-' + episodeId).setAttribute('aria-expanded', String(open));
+    icon.innerHTML = open ? '&#9650;' : '&#9660;';
 }
 
 function updateEpisodeUI(episodeId, data) {
@@ -635,7 +638,7 @@ function sortEpisodes() {
     margin-top: 0.75rem;
 }
 .btn-refresh {
-    background: #28a745;
+    background: var(--action-success);
     padding: 0.4rem 0.75rem;
     font-size: 0.85rem;
 }
@@ -660,16 +663,28 @@ function sortEpisodes() {
 }
 .episode-main {
     display: flex;
+    gap: 0.5rem;
+    padding: 0.75rem 1rem;
+}
+.episode-toggle {
+    display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 0.75rem 1rem;
+    padding: 0;
+    width: 100%;
+    min-width: 0;
+    text-align: left;
+    font: inherit;
+    background: transparent;
+    color: var(--text-primary);
     cursor: pointer;
     transition: background 0.2s;
     gap: 1rem;
 }
-.episode-main:hover {
+.episode-toggle:hover {
     background: var(--bg-card-hover);
 }
+.episode-transcript { padding: 0 1rem 0.5rem; font-size: 0.8rem; }
 .episode-title-section {
     flex: 1;
     min-width: 0;
@@ -693,21 +708,6 @@ function sortEpisodes() {
     gap: 0.75rem;
     flex-shrink: 0;
 }
-.status-badge {
-    padding: 0.25rem 0.5rem;
-    border-radius: 4px;
-    font-size: 0.7rem;
-    text-transform: uppercase;
-    font-weight: 600;
-    letter-spacing: 0.5px;
-}
-.status-pending { background: #fff3cd; color: #856404; }
-.status-processing { background: #cce5ff; color: #004085; }
-.status-complete { background: #d4edda; color: #155724; }
-.status-failed { background: #f8d7da; color: #721c24; }
-.status-skipped { background: var(--bg-hover); color: var(--text-muted); }
-.status-expired { background: var(--bg-hover); color: var(--text-muted); }
-
 .episode-row.status-changed {
     animation: highlight 2s ease-out;
 }
@@ -749,25 +749,25 @@ function sortEpisodes() {
     color: var(--text-link);
 }
 .episode-error {
-    background: #f8d7da;
+    background: var(--status-failed-bg);
     padding: 0.75rem;
     border-radius: 4px;
     font-size: 0.85rem;
     margin-bottom: 0.75rem;
-    color: #721c24;
-    border: 1px solid #f5c6cb;
+    color: var(--status-failed-text);
+    border: 1px solid var(--status-failed-border);
 }
 .episode-stats {
-    color: #155724;
+    color: var(--status-complete-text);
     font-size: 0.85rem;
     margin-bottom: 0.75rem;
-    background: #d4edda;
+    background: var(--status-complete-bg);
     padding: 0.5rem 0.75rem;
     border-radius: 4px;
     display: inline-block;
 }
 .detection-source {
-    color: var(--text-secondary);
+    color: inherit;
     font-size: 0.8rem;
     font-style: italic;
 }
@@ -781,12 +781,12 @@ function sortEpisodes() {
     font-size: 0.85rem;
 }
 .complete-check {
-    color: #28a745;
+    color: var(--text-success);
     font-size: 0.85rem;
 }
 
 .btn-primary {
-    background: #007bff;
+    background: var(--action-primary);
 }
 .btn-primary:hover {
     background: #0056b3;
@@ -839,10 +839,17 @@ function sortEpisodes() {
 
     /* Taller Rows & Padding */
     .episode-main {
+        flex-direction: column;
         padding: 1rem;
-        min-height: 80px;
-        align-items: flex-start; /* Align to top for better multi-line title */
+        align-items: stretch;
     }
+    .episode-toggle {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 0.75rem;
+    }
+    .episode-title-section { width: 100%; }
+    .episode-title { overflow-wrap: anywhere; overflow: visible; }
 
     /* Larger, Readable Titles */
     .episode-title {
@@ -880,13 +887,10 @@ function sortEpisodes() {
 
     /* Status Section Adjustment */
     .episode-status-section {
-        flex-direction: column;
-        align-items: flex-end;
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: center;
         gap: 0.5rem;
-    }
-
-    .mobile-queue-btn {
-        order: -1; /* Put queue button first */
     }
 
     .status-badge {
@@ -902,16 +906,10 @@ function sortEpisodes() {
         display: flex;
         align-items: center;
         justify-content: center;
-        height: 40px;
+        min-height: 44px;
         padding: 0 1.2rem;
         font-size: 0.9rem;
         margin-bottom: 0.25rem;
-    }
-
-    /* Prominent Status Badges */
-    .status-badge {
-        font-size: 0.8rem;
-        padding: 0.3rem 0.6rem;
     }
 
     /* Taller Detail Buttons */
