@@ -215,7 +215,7 @@ def _sync_podcast_entries(db: Session, podcast: Podcast) -> int:
     source_enclosures = None
     if document.url:
         try:
-            source_enclosures = document.validate_structure()
+            source_enclosures = document.validate_structure(feed.entries)
         except Exception:
             raise FeedSyncError("Response is not a complete RSS or Atom feed") from None
         if source_enclosures is not None and len(source_enclosures) != len(feed.entries):
@@ -254,25 +254,37 @@ def _sync_podcast_entries(db: Session, podcast: Podcast) -> int:
     for index, entry in enumerate(feed.entries):
         enclosures = [dict(enclosure) for enclosure in getattr(entry, "enclosures", [])]
         if source_enclosures is not None:
-            if len(source_enclosures[index]) != len(enclosures):
-                raise FeedSyncError("Atom enclosure metadata could not be read reliably")
-            for enclosure, original in zip(enclosures, source_enclosures[index]):
-                if "type" not in original:
-                    enclosure.pop("type", None)
-                raw_href = original.get("href")
+            # The observer reproduces and verifies the exact original entries;
+            # its indices identify parser events, not guessed link positions.
+            source_entry = source_enclosures[index]
+            if not source_entry.actual_namespace:
+                continue
+            enclosures = []
+            for original in source_entry.enclosures:
+                raw_href = original.href
                 try:
-                    # Validate the original reference before feedparser repairs
-                    # malformed absolute URLs or resolves empty hrefs to the feed.
                     raw_valid = (
-                        isinstance(raw_href, str) and bool(raw_href)
-                        and not any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in raw_href)
-                        and is_usable_audio_url(urljoin(base_url, raw_href))
-                        and (not urlsplit(raw_href).scheme or is_usable_audio_url(raw_href))
+                        all(
+                            isinstance(href, str) and bool(href)
+                            and not any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in href)
+                            and is_usable_audio_url(urljoin(original.base_url, href))
+                            and (not urlsplit(href).scheme or is_usable_audio_url(href))
+                            for href in (raw_href, original.guard_href)
+                        )
                     )
                 except ValueError:
                     raw_valid = False
-                if not raw_valid:
-                    enclosure["href"] = None
+                href = original.reference.get("href") if raw_valid else None
+                if isinstance(href, str) and href:
+                    try:
+                        if not urlsplit(href).scheme:
+                            href = urljoin(original.base_url, href)
+                    except ValueError:
+                        href = None
+                candidate = {"href": href}
+                if "type" in original.attributes:
+                    candidate["type"] = original.attributes["type"]
+                enclosures.append(candidate)
         for enclosure in enclosures:
             href = enclosure.get("href")
             if isinstance(href, str):
