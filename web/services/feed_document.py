@@ -1,5 +1,6 @@
 """Validate captured feeds and retain source provenance before URL/MIME defaults."""
 
+from bisect import bisect_right
 from dataclasses import dataclass, field
 import gzip
 from html.entities import html5
@@ -82,6 +83,7 @@ class _SourceObserver:
         super().__init__(*args, **kwargs)
         self.source_entries: list[SourceEntry] = []
         self.source_namespace = ""
+        self.source_element = ""
         self.source_root_namespace: str | None = None
 
     def _start_item(self, attributes: dict[str, str]) -> None:
@@ -90,11 +92,17 @@ class _SourceObserver:
 
     _start_entry = _start_item
 
+    def _original_attributes(self, attributes: dict[str, str]) -> dict[str, str]:
+        return dict(attributes)
+
     def _guard_attributes(self, attributes: dict[str, str]) -> dict[str, str] | None:
         return None
 
     def _reference(self, attributes: dict[str, str], handler: Callable[[dict[str, str]], None]) -> None:
-        original = dict(attributes)
+        original = self._original_attributes(attributes)
+        source_enclosure = self.source_element == "enclosure" or (
+            self.source_element == "link" and original.get("rel", "alternate").lower() == "enclosure"
+        )
         namespace = self.source_namespace
         base = self.baseuri
         context = self._get_context()
@@ -102,7 +110,7 @@ class _SourceObserver:
         handler(attributes)
         # This uses the library's exact context object, not guessed XML depth.
         # Source/notes/image links therefore cannot borrow an entry's provenance.
-        if not self.entries or context is not self.entries[-1] or not _feed_namespace(namespace):
+        if not source_enclosure or not self.entries or context is not self.entries[-1] or not _feed_namespace(namespace):
             return
         appended = context.get("links", [])[before:]
         for link in appended:
@@ -121,12 +129,74 @@ class _SourceObserver:
 
 
 class _SourceStrict(_SourceObserver, api.StrictFeedParser):
-    def startElementNS(self, name: tuple[str | None, str], qname: str | None, attrs: object) -> None:
+    def startElementNS(self, name: tuple[str | None, str], qname: str | None, attrs: xml.sax.xmlreader.AttributesNSImpl) -> None:
         """Retain the actual SAX namespace before feedparser remaps prefixes."""
         self.source_namespace = name[0] or ""
+        self.source_element = name[1].lower()
+        # Capture qualified SAX keys before feedparser's adapter flattens an
+        # unknown attribute namespace into an apparently unqualified key.
+        self._source_attributes = {
+            key[1].lower(): value.lower() if key[1].lower() in ("rel", "type") else value
+            for key, value in attrs.items() if not key[0]
+        }
         if self.source_root_namespace is None:
             self.source_root_namespace = self.source_namespace
         super().startElementNS(name, qname, attrs)
+
+    def _original_attributes(self, attributes: dict[str, str]) -> dict[str, str]:
+        return dict(self._source_attributes)
+
+
+class _LooseSourceText:
+    """Map library preprocessing offsets to the same captured original text.
+
+    Keep only substitution boundaries, not a per-character map or guessed tag
+    counts. The parser's exact start-tag offset identifies the lexical source.
+    """
+
+    def __init__(self, original: str, shorttag: Callable[[re.Match[str]], str]) -> None:
+        self.original = original
+        self.transformed = original
+        self.stages: list[tuple[list[int], list[tuple[int, int, int, int]]]] = []
+        self._rewrite(re.compile(r"<!((?!DOCTYPE|--|\[))", re.IGNORECASE), lambda match: "&lt;!" + match.group(1))
+        self._rewrite(re.compile(r"<([^<>\s]+?)\s*/>"), shorttag)
+        self._rewrite(re.compile(r"&#(?:39|34);"), lambda match: "'" if match.group() == "&#39;" else '"')
+
+    def _rewrite(self, pattern: re.Pattern[str], replacement: Callable[[re.Match[str]], str]) -> None:
+        boundaries: list[tuple[int, int, int, int]] = []
+        delta = 0
+
+        def substitute(match: re.Match[str]) -> str:
+            nonlocal delta
+            value = replacement(match)
+            start = match.start() + delta
+            boundaries.append((start, start + len(value), match.start(), match.end()))
+            delta += len(value) - (match.end() - match.start())
+            return value
+
+        self.transformed = pattern.sub(substitute, self.transformed)
+        self.stages.append(([boundary[0] for boundary in boundaries], boundaries))
+
+    def original_tag(self, position: int) -> str:
+        """Return the quoted original tag at an actual transformed parser offset."""
+        for starts, boundaries in reversed(self.stages):
+            index = bisect_right(starts, position) - 1
+            if index >= 0:
+                out_start, out_end, in_start, in_end = boundaries[index]
+                position = in_start if position < out_end else position + in_end - out_end
+        if position < 0 or self.original[position:position + 1] != "<":
+            raise ValueError("Original enclosure offset unavailable")
+        quote = ""
+        for end in range(position + 1, len(self.original)):
+            char = self.original[end]
+            if quote:
+                if char == quote:
+                    quote = ""
+            elif char in ("'", '"'):
+                quote = char
+            elif char == ">":
+                return self.original[position:end + 1]
+        raise ValueError("Original enclosure tag unavailable")
 
 
 class _SourceLoose(_SourceObserver, api.LooseFeedParser):
@@ -135,6 +205,17 @@ class _SourceLoose(_SourceObserver, api.LooseFeedParser):
         self._source_scopes: list[dict[str, str]] = [{}]
         self._source_start_depth = 0
         self._source_end_depth = 0
+
+    def feed(self, data: str) -> None:
+        """Retain original tags before the library rewrites decimal quote refs."""
+        self._source_text = _LooseSourceText(data, self._shorttag_replace)
+        super().feed(data)
+
+    def parse_starttag(self, i: int) -> int:
+        """Bind the callback to its actual original tag, without positional pairing."""
+        position = len(self._source_text.transformed) - len(self.rawdata) + i
+        self._source_raw_tag = self._source_text.original_tag(position)
+        return super().parse_starttag(i)
 
     def unknown_starttag(self, tag: str, attrs: list[tuple[str, str]]) -> None:
         """Track lexical namespace scope during loose recovery."""
@@ -149,6 +230,7 @@ class _SourceLoose(_SourceObserver, api.LooseFeedParser):
                 elif key.lower().startswith("xmlns:"):
                     scope[key[6:].lower()] = value
             prefix = tag.split(":", 1)[0].lower() if ":" in tag else ""
+            self.source_element = tag.rsplit(":", 1)[-1].lower()
             self.source_namespace = scope.get(prefix, "" if not prefix else "urn:unbound:" + prefix)
             if self.source_root_namespace is None:
                 self.source_root_namespace = self.source_namespace
@@ -174,7 +256,7 @@ class _SourceLoose(_SourceObserver, api.LooseFeedParser):
         # A loose parser can retain numeric/named entities in an attribute.
         # Decode the exact original start tag with the unchanged D17 validator,
         # but never use those validation-rewritten values as imported MIME/URLs.
-        raw = self.get_starttag_text()
+        raw = self._source_raw_tag
         if not raw:
             raise ValueError("Original enclosure tag unavailable")
         raw = raw.rstrip()
