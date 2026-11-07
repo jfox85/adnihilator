@@ -5,13 +5,16 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
 from ..dependencies import get_db
 from ..auth import verify_admin
 from ..models import Podcast
+from ..services.audio import is_usable_audio_url
+from ..services.feed_sync import feed_error_message
+from ..values import finite_nonnegative_number
 
 router = APIRouter(prefix="/podcasts", tags=["podcasts"])
 
@@ -48,6 +51,7 @@ def relative_time(dt: datetime | None) -> str:
 # Register custom filters
 templates.env.filters["regex_replace"] = regex_replace
 templates.env.filters["relative_time"] = relative_time
+templates.env.filters["feed_error"] = feed_error_message
 
 
 @router.get("")
@@ -64,6 +68,7 @@ async def list_podcasts(
             "source_rss_url": p.source_rss_url,
             "feed_token": p.feed_token,
             "auto_process": p.auto_process,
+            "last_sync_error": p.last_sync_error,
             "created_at": p.created_at.isoformat(),
         }
         for p in podcasts
@@ -72,6 +77,7 @@ async def list_podcasts(
 
 @router.post("")
 async def add_podcast(
+    request: Request,
     source_rss_url: str = Form(...),
     db: Session = Depends(get_db),
     _: None = Depends(verify_admin),
@@ -79,6 +85,17 @@ async def add_podcast(
     """Add a new podcast subscription and sync its feed."""
     from ..services.feed_sync import sync_podcast
 
+    if not is_usable_audio_url(source_rss_url):
+        if "text/html" in request.headers.get("accept", ""):
+            return templates.TemplateResponse(
+                request, "index.html",
+                {"title": "Dashboard",
+                 "podcasts": db.query(Podcast).order_by(Podcast.created_at.desc()).all(),
+                 "source_rss_url": source_rss_url,
+                 "source_rss_error": "Use an HTTP or HTTPS feed URL."},
+                status_code=422,
+            )
+        raise HTTPException(status_code=422, detail="Feed URL must use HTTP(S) with a host")
     podcast = Podcast(source_rss_url=source_rss_url)
     db.add(podcast)
     db.commit()
@@ -87,7 +104,7 @@ async def add_podcast(
     try:
         sync_podcast(db, podcast)
     except Exception:
-        # If sync fails, the podcast is still added but without episodes
+        # sync_podcast durably records the safe error for the retained subscription.
         pass
 
     return RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)
@@ -106,7 +123,11 @@ async def sync_podcast_feed(
     if not podcast:
         raise HTTPException(status_code=404, detail="Podcast not found")
 
-    episodes_added = sync_podcast(db, podcast)
+    from ..services.feed_sync import FeedSyncError
+    try:
+        episodes_added = sync_podcast(db, podcast)
+    except FeedSyncError as error:
+        return JSONResponse(status_code=502, content={"status": "failed", "error": str(error)})
     return {
         "status": "synced",
         "episodes_added": episodes_added,
@@ -174,6 +195,7 @@ async def list_episodes_html(
             "title": podcast.title or "Episodes",
             "podcast": podcast,
             "episodes": episodes,
+            "audio_eligible": {episode.id: is_usable_audio_url(episode.original_audio_url) for episode in episodes},
             "transcript_states": {row.episode_id: row.state for row in db.query(EpisodeTranscript).join(Episode).filter(Episode.podcast_id == podcast_id)} if ready(db.get_bind()) else {},
         },
     )
@@ -193,11 +215,28 @@ async def queue_episode(
     if not episode:
         raise HTTPException(status_code=404, detail="Episode not found")
 
-    episode.status = EpisodeStatus.PENDING.value
-    episode.retry_count = 0
-    episode.error_message = None
-    db.commit()
+    if episode.status == EpisodeStatus.COMPLETE.value:
+        raise HTTPException(status_code=409, detail="Completed episodes cannot be queued again")
+    if episode.status == EpisodeStatus.PROCESSING.value:
+        raise HTTPException(status_code=409, detail="Episode is processing")
+    if not is_usable_audio_url(episode.original_audio_url):
+        raise HTTPException(status_code=409, detail="Episode has no usable audio")
+    if episode.status == EpisodeStatus.PENDING.value:
+        return {"status": "already_queued"}
 
+    updated = db.query(Episode).filter(
+        Episode.id == episode_id,
+        Episode.podcast_id == podcast_id,
+        Episode.status.notin_([EpisodeStatus.PROCESSING.value, EpisodeStatus.PENDING.value, EpisodeStatus.COMPLETE.value]),
+        Episode.original_audio_url == episode.original_audio_url,
+    ).update({Episode.status: EpisodeStatus.PENDING.value, Episode.retry_count: 0,
+              Episode.error_message: None}, synchronize_session=False)
+    db.commit()
+    if not updated:
+        db.refresh(episode)
+        if episode.status == EpisodeStatus.PENDING.value:
+            return {"status": "already_queued"}
+        raise HTTPException(status_code=409, detail="Episode changed while queueing; refresh and try again")
     return {"status": "queued"}
 
 
@@ -215,9 +254,19 @@ async def skip_episode(
     if not episode:
         raise HTTPException(status_code=404, detail="Episode not found")
 
-    episode.status = EpisodeStatus.SKIPPED.value
-    db.commit()
+    if episode.status == EpisodeStatus.PROCESSING.value:
+        raise HTTPException(status_code=409, detail="Episode is processing")
+    if episode.status == EpisodeStatus.COMPLETE.value:
+        raise HTTPException(status_code=409, detail="Completed episodes cannot be skipped")
 
+    updated = db.query(Episode).filter(
+        Episode.id == episode_id,
+        Episode.podcast_id == podcast_id,
+        Episode.status.notin_([EpisodeStatus.PROCESSING.value, EpisodeStatus.COMPLETE.value]),
+    ).update({Episode.status: EpisodeStatus.SKIPPED.value}, synchronize_session=False)
+    db.commit()
+    if not updated:
+        raise HTTPException(status_code=409, detail="Episode changed while skipping; refresh and try again")
     return {"status": "skipped"}
 
 
@@ -260,15 +309,28 @@ async def queue_all_episodes(
         raise HTTPException(status_code=404, detail="Podcast not found")
 
     # Queue all skipped/failed episodes
-    updated = (
-        db.query(Episode)
+    candidates = (
+        db.query(Episode.id, Episode.original_audio_url)
         .filter_by(podcast_id=podcast_id)
         .filter(Episode.status.in_([EpisodeStatus.SKIPPED.value, EpisodeStatus.FAILED.value]))
-        .update({Episode.status: EpisodeStatus.PENDING.value, Episode.retry_count: 0, Episode.error_message: None}, synchronize_session=False)
+        .all()
     )
+    queued_ids = []
+    for episode_id, audio_url in candidates:
+        if not is_usable_audio_url(audio_url):
+            continue
+        changed = db.query(Episode).filter(
+            Episode.id == episode_id,
+            Episode.podcast_id == podcast_id,
+            Episode.status.in_([EpisodeStatus.SKIPPED.value, EpisodeStatus.FAILED.value]),
+            Episode.original_audio_url == audio_url,
+        ).update({Episode.status: EpisodeStatus.PENDING.value, Episode.retry_count: 0,
+                  Episode.error_message: None}, synchronize_session=False)
+        if changed:
+            queued_ids.append(episode_id)
     db.commit()
 
-    return {"status": "queued", "count": updated}
+    return {"status": "queued", "count": len(queued_ids), "episode_ids": queued_ids}
 
 
 @router.post("/{podcast_id}/auto-process")
@@ -312,12 +374,13 @@ async def get_episode_statuses(
         "episodes": {
             ep.id: {
                 "status": ep.status,
+                "audio_eligible": is_usable_audio_url(ep.original_audio_url),
                 "error_message": ep.error_message,
-                "ads_removed_seconds": ep.ads_removed_seconds,
-                "processed_duration": ep.processed_duration,
+                "ads_removed_seconds": finite_nonnegative_number(ep.ads_removed_seconds),
+                "processed_duration": finite_nonnegative_number(ep.processed_duration),
                 "progress_step": ep.progress_step,
-                "progress_percent": ep.progress_percent,
-                "llm_cost_usd": float(ep.llm_cost_usd) if ep.llm_cost_usd is not None else None,
+                "progress_percent": finite_nonnegative_number(ep.progress_percent, maximum=100),
+                "llm_cost_usd": finite_nonnegative_number(ep.llm_cost_usd),
                 "llm_model": ep.llm_model,
                 "detection_source": ep.detection_source,
             }

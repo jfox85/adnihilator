@@ -29,7 +29,7 @@ class TestFeedDiagnosticCredentials:
             '<rss version="2.0"><channel><title>Healthy</title><item><guid>one</guid></item></channel></rss>'
         )
 
-        def parse(url: str) -> feedparser.FeedParserDict:
+        def parse(url: str, **options: object) -> feedparser.FeedParserDict:
             """Keep all feed I/O mocked while exercising real transactions."""
             if url.endswith("/bad"):
                 raise RuntimeError(f"feed fetch failed: {diagnostic}")

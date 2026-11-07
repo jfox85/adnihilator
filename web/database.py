@@ -3,7 +3,8 @@
 import os
 from pathlib import Path
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 Base = declarative_base()
@@ -55,13 +56,22 @@ def get_session_factory(engine=None):
     return sessionmaker(bind=engine)
 
 
-def init_db(engine=None):
+def init_db(engine: Engine | None = None) -> Engine:
     """Initialize the database, creating all tables."""
     if engine is None:
         engine = get_engine()
     from .transcript_migration import TABLES, upgrade
     owned = {table.name for table in TABLES}
     Base.metadata.create_all(engine, tables=[table for table in Base.metadata.sorted_tables if table.name not in owned])
+    # SQLite has no ALTER TABLE IF NOT EXISTS. Serialize startup upgrades so
+    # concurrent web processes cannot race while adding this nullable column.
+    with engine.connect() as connection:
+        if engine.dialect.name == "sqlite":
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+        columns = {column["name"] for column in inspect(connection).get_columns("podcasts")}
+        if "last_sync_error" not in columns:
+            connection.exec_driver_sql("ALTER TABLE podcasts ADD COLUMN last_sync_error TEXT")
+        connection.commit()
     # Existing reviewed schema stays usable. Normal startup never migrates it.
     if os.getenv("TRANSCRIPT_SCHEMA_OPT_IN", "false").lower() == "true":
         upgrade(engine)

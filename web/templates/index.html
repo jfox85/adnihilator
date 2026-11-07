@@ -4,8 +4,13 @@
 <div class="card">
     <h2>Add Podcast</h2>
     <form action="/podcasts" method="post">
+        {% if source_rss_error %}
+        <p id="source-rss-error" class="feed-sync-error" role="alert">{{ source_rss_error }}</p>
+        {% endif %}
         <label for="feedSource">Podcast feed URL</label>
-        <input type="url" id="feedSource" name="source_rss_url" placeholder="https://example.com/feed.xml" required>
+        <input type="url" id="feedSource" name="source_rss_url" aria-label="Podcast feed URL"
+               placeholder="https://example.com/feed.xml" value="{{ source_rss_url or '' }}"
+               {% if source_rss_error %}aria-invalid="true" aria-describedby="source-rss-error"{% endif %} required>
         <button type="submit">Add Podcast</button>
     </form>
 </div>
@@ -25,7 +30,7 @@
     <div class="podcast-list">
         {% for podcast in podcasts %}
         <div class="podcast-item" data-podcast-id="{{ podcast.id }}">
-            <a href="/podcasts/{{ podcast.id }}/episodes" class="podcast-artwork-link" aria-label="Episodes for {{ podcast.title or 'Untitled Podcast' }}">
+            <a href="/podcasts/{{ podcast.id }}/episodes" class="podcast-artwork-link" aria-label="Episodes for {{ podcast.title or ('Subscription needs attention' if podcast.last_sync_error else 'Untitled subscription') }}">
                 {% if podcast.artwork_url %}
                 <img src="{{ podcast.artwork_url }}" alt="{{ podcast.title }}" class="podcast-item-artwork">
                 {% else %}
@@ -34,12 +39,15 @@
             </a>
             <div class="podcast-item-info">
                 <a href="/podcasts/{{ podcast.id }}/episodes" class="podcast-item-title">
-                    {{ podcast.title or "Untitled" }}
+                    {{ podcast.title or ("Subscription needs attention" if podcast.last_sync_error else "Untitled subscription") }}
                 </a>
                 <span class="podcast-feed-row">
                     <a href="/feed/{{ podcast.feed_token }}.xml" target="_blank" class="podcast-item-feed">/feed/{{ podcast.feed_token }}.xml</a>
                     <button onclick="copyFeedUrl('{{ podcast.feed_token }}')" class="btn-copy" title="Copy feed URL" aria-label="Copy feed URL">📋</button>
                 </span>
+                {% if podcast.last_sync_error %}
+                <p class="feed-sync-error" role="alert">{{ podcast.last_sync_error|feed_error }}</p>
+                {% endif %}
             </div>
             <div class="podcast-item-actions">
                 <span class="last-refreshed" id="lastRefreshed-{{ podcast.id }}"
@@ -51,7 +59,7 @@
                     {{ podcast.last_synced_at|relative_time }}
                     {% endif %}
                 </span>
-                <button onclick="refreshPodcast('{{ podcast.id }}')" class="btn-refresh">Refresh</button>
+                <button onclick="refreshPodcast('{{ podcast.id }}')" class="btn-refresh">{{ "Retry" if podcast.last_sync_error else "Refresh" }}</button>
                 <button onclick="deletePodcast('{{ podcast.id }}')" class="btn-danger">Delete</button>
             </div>
         </div>
@@ -123,23 +131,17 @@ function updateLastRefreshed(podcastId, isoTimestamp) {
 }
 
 async function refreshPodcast(id) {
-    const btn = event.target;
+    const btn = event.currentTarget || event.target;
     btn.disabled = true;
     btn.textContent = 'Refreshing...';
-
-    const response = await fetch(`/podcasts/${id}/sync`, { method: 'POST' });
-    if (response.ok) {
-        const data = await response.json();
-        updateLastRefreshed(id, data.last_synced_at);
-        if (data.episodes_added > 0) {
-            alert(`Refreshed "${data.title}": ${data.episodes_added} new episodes`);
-        }
+    try {
+        await fetch(`/podcasts/${id}/sync`, { method: 'POST' });
+        // A fresh page shows the durable latest result, including safe errors.
+        window.location.reload();
+    } catch (error) {
         btn.disabled = false;
-        btn.textContent = 'Refresh';
-    } else {
-        alert('Failed to refresh podcast');
-        btn.disabled = false;
-        btn.textContent = 'Refresh';
+        btn.textContent = 'Retry';
+        alert('Could not reach the service. Retry the refresh.');
     }
 }
 
@@ -246,6 +248,7 @@ setInterval(() => {
     border: 1px solid var(--border-color);
     gap: 1rem;
 }
+.feed-sync-error { color: var(--text-primary); overflow-wrap: anywhere; max-width: 36rem; }
 .podcast-item:hover {
     background: var(--bg-card-hover);
 }
