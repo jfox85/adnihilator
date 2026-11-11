@@ -244,19 +244,22 @@ If no ads found: {{"ads": []}}"""
     # Convert to absolute timestamps
     ads = []
     for ad in validate_detections(result):
-        start_time = ad.start_time
-        end_time = ad.end_time
-
-        # Convert chunk-relative to absolute timestamps
-        abs_start = chunk_start + start_time
-        abs_end = chunk_start + end_time
-
-        # Clamp to chunk boundaries
-        abs_start = max(chunk_start, abs_start)
-        abs_end = min(chunk_end, abs_end)
-
-        if abs_start >= abs_end:
-            raise ValueError("Gemini detection does not overlap its audio chunk")
+        placed = _place_detection(ad.start_time, ad.end_time, chunk_start, chunk_end)
+        if placed is None:
+            logger.warning(
+                f"Dropping Gemini detection outside chunk {chunk_start:.0f}-{chunk_end:.0f}s "
+                f"({ad.sponsor}: {ad.start_time:.1f}-{ad.end_time:.1f}s). "
+                f"Raw response: {_truncate(text)}"
+            )
+            continue
+        abs_start, abs_end, interpretation = placed
+        if interpretation == "absolute":
+            logger.warning(
+                f"Gemini returned episode-absolute timestamps for chunk "
+                f"{chunk_start:.0f}-{chunk_end:.0f}s ({ad.sponsor}: "
+                f"{ad.start_time:.1f}-{ad.end_time:.1f}s); using them as-is. "
+                f"Raw response: {_truncate(text)}"
+            )
 
         ads.append({
             "start": abs_start,
@@ -269,6 +272,44 @@ If no ads found: {{"ads": []}}"""
         })
 
     return ads
+
+
+_RAW_RESPONSE_LOG_LIMIT = 2000
+
+
+def _truncate(text: str, limit: int = _RAW_RESPONSE_LOG_LIMIT) -> str:
+    """Bound raw provider output written to logs."""
+    return text if len(text) <= limit else f"{text[:limit]}... [truncated {len(text) - limit} chars]"
+
+
+def _place_detection(
+    start_time: float,
+    end_time: float,
+    chunk_start: float,
+    chunk_end: float,
+) -> tuple[float, float, str] | None:
+    """Map a Gemini detection onto absolute episode time.
+
+    Gemini is asked for chunk-relative seconds, so that interpretation wins
+    whenever it overlaps the chunk. On short trailing chunks Gemini sometimes
+    returns episode-absolute seconds instead; those are accepted only when the
+    relative reading lands entirely outside the chunk and the absolute reading
+    overlaps it.
+
+    Returns:
+        (start, end, "relative" | "absolute") clamped to the chunk, or None
+        when neither interpretation overlaps the chunk.
+    """
+    candidates = (
+        (chunk_start + start_time, chunk_start + end_time, "relative"),
+        (start_time, end_time, "absolute"),
+    )
+    for raw_start, raw_end, interpretation in candidates:
+        abs_start = max(chunk_start, raw_start)
+        abs_end = min(chunk_end, raw_end)
+        if abs_start < abs_end:
+            return abs_start, abs_end, interpretation
+    return None
 
 
 def merge_chunk_detections(
