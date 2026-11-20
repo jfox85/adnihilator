@@ -8,8 +8,11 @@ Handles various timestamp formats:
 - 0:30–1:10 (en-dash)
 - 00.30 (dots instead of colons)
 - 1h02m (hour/minute notation)
+- Chapter outlines, e.g. Lex Fridman's HTML "OUTLINE" list, where an explicit
+  sponsor chapter runs until the next chapter starts
 """
 
+import html
 import re
 from typing import Optional
 
@@ -35,6 +38,7 @@ def extract_ad_timestamps(description: str) -> list[AdTimestamp]:
     timestamps: list[AdTimestamp] = []
 
     # Try all patterns
+    timestamps.extend(_parse_sponsor_chapter_spans(description))
     timestamps.extend(_parse_time_range_pattern(description))
     timestamps.extend(_parse_chapter_markers(description))
     timestamps.extend(_parse_single_timestamp_ads(description))
@@ -81,6 +85,74 @@ def _parse_timestamp(time_str: str) -> Optional[float]:
             return None
 
     return None
+
+
+# A whole chapter is cut only when its label *is* a sponsor/ad-read marker.
+# Labels that merely discuss ads or sponsorship ("Paid ads tips", "Making
+# sponsorship deals win/win", "Industry-Sponsored Studies") must not match,
+# because a false positive here silently deletes real conversation.
+_SPONSOR_CHAPTER_LABEL = re.compile(
+    r"^(?:\d+\)\s*)?"  # tolerate list numbering such as "2) "
+    r"(?:"
+    r"sponsors?(?:\s*[:,&]|\s+(?:message|messages|break|read|reads)\b|\s*$)"
+    r"|(?:disclaimer|protocols book)\s*[&;,]\s*sponsors?\s*:"
+    r"|(?:thanking|thanks|thank you to|acknowledg\w*(?: of)?|expressing gratitude to) (?:the |our )?sponsors?\s*$"
+    r"|(?:ad|ads|commercial|sponsor) (?:break|breaks|read|reads)\s*$"
+    r"|advertisements?\s*$"
+    r")",
+    re.IGNORECASE,
+)
+_OUTLINE_LINE = re.compile(
+    r"^\s*[(\[]?\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*[)\]]?\s*[-–—:]?\s*(.+?)\s*$"
+)
+# Longer sponsor chapters are treated as mislabeled rather than cut wholesale.
+MAX_SPONSOR_CHAPTER_SECONDS = 20 * 60
+
+
+def _description_lines(description: str) -> list[str]:
+    """Convert HTML show notes into plain-text lines."""
+    text = re.sub(r"<br\s*/?>|</p>|</li>|</div>", "\n", description, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", "", text)
+    return html.unescape(text).splitlines()
+
+
+def _parse_sponsor_chapter_spans(description: str) -> list[AdTimestamp]:
+    """Pattern: a chapter outline where one chapter is the sponsor block.
+
+    The sponsor chapter spans from its timestamp to the next chapter's
+    timestamp. Requires a strictly increasing outline and a following chapter;
+    otherwise the end would be a guess and no span is emitted.
+    """
+    chapters: list[tuple[float, str]] = []
+    for line in _description_lines(description):
+        match = _OUTLINE_LINE.match(line)
+        if not match:
+            continue
+        start = _parse_timestamp(match.group(1))
+        if start is not None:
+            chapters.append((start, match.group(2)))
+
+    if len(chapters) < 2:
+        return []
+    if any(later[0] <= earlier[0] for earlier, later in zip(chapters, chapters[1:])):
+        return []  # Not a coherent outline; don't infer chapter ends from it.
+
+    timestamps = []
+    for (start, label), (next_start, _) in zip(chapters, chapters[1:]):
+        if not _SPONSOR_CHAPTER_LABEL.search(label):
+            continue
+        if next_start - start > MAX_SPONSOR_CHAPTER_SECONDS:
+            continue
+        timestamps.append(
+            AdTimestamp(
+                start=start,
+                end=next_start,
+                label=label,
+                confidence=0.95,
+                extraction_method="chapter_span",
+            )
+        )
+    return timestamps
 
 
 def _parse_time_range_pattern(description: str) -> list[AdTimestamp]:
@@ -240,12 +312,14 @@ def _merge_overlapping_timestamps(timestamps: list[AdTimestamp]) -> list[AdTimes
 
         # Merge if overlapping or within 5 seconds
         if current.start <= previous.end + 5:
+            # Describe the merged span by its most confident source.
+            best = current if current.confidence > previous.confidence else previous
             merged[-1] = AdTimestamp(
                 start=previous.start,
                 end=max(previous.end, current.end),
-                label=previous.label,  # Keep first label
-                confidence=max(previous.confidence, current.confidence),
-                extraction_method=previous.extraction_method,
+                label=best.label,
+                confidence=best.confidence,
+                extraction_method=best.extraction_method,
             )
         else:
             merged.append(current)
