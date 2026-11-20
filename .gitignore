@@ -112,3 +112,9 @@ whisper_models/
 # Adversarial hunt scratch and local agent configuration
 .pi/tmp/
 .pi/agents/
+
+# Local agent/tooling output
+.gstack/
+.artifacts/
+audit.log
+.codex-release-backups/

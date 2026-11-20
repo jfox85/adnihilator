@@ -1,6 +1,13 @@
 # Current Deployment
 
-This documents the live deployment as of December 2024.
+This documents the live deployment. It was written in December 2024 and
+has had only partial updates since then. Anything marked **(as of Dec 2024)**
+has not been checked against the live hosts recently. Confirm it before you
+rely on it.
+
+> **No secrets in this file.** This is a public repo. Credentials and account
+> identifiers stay on the machines that use them. See
+> [Where secrets live](#where-secrets-live) below.
 
 ## Infrastructure Overview
 
@@ -37,9 +44,28 @@ This documents the live deployment as of December 2024.
 ┌─────────────────────────────────────────────────────────────────┐
 │              Cloudflare R2 (adnihilator bucket)                 │
 │  - Processed audio files: {podcast_id}/{episode_id}.mp3        │
-│  - Public URL: pub-f19bf1c482d94b23bc7071f9e60c4a13.r2.dev     │
+│  - Public URL: value of R2_PUBLIC_URL (see below)              │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+## Where secrets live
+
+| Value | Used by | Where the real value lives |
+|-------|---------|----------------------------|
+| `ADMIN_USERNAME`, `ADMIN_PASSWORD` | web service | `/etc/adnihilator/env` on the VPS (systemd `EnvironmentFile`) |
+| `WORKER_API_KEY` | web service **and** worker (must match) | `/etc/adnihilator/env` on the VPS; `scripts/run-worker.sh` on the Mac |
+| `R2_PUBLIC_URL` | web service | `/etc/adnihilator/env` on the VPS |
+| `DATABASE_PATH` | web service | `/etc/adnihilator/env` on the VPS |
+| `API_URL` | worker | `scripts/run-worker.sh` on the Mac |
+| `R2_ACCESS_KEY`, `R2_SECRET_KEY` | worker | `scripts/run-worker.sh` on the Mac; issued in Cloudflare dashboard → R2 → Manage API tokens |
+| `R2_BUCKET`, `R2_ENDPOINT` | worker | `scripts/run-worker.sh` on the Mac |
+| `OPENAI_API_KEY` | worker | `scripts/run-worker.sh` on the Mac |
+| `GEMINI_API_KEY` | worker (only when Gemini detection is enabled in `adnihilator.toml`) | `scripts/run-worker.sh` on the Mac |
+
+`scripts/run-worker.sh` is gitignored. Start from
+`scripts/run-worker.sh.example`, which holds placeholders only. The launchd
+plist (`*.plist`) is gitignored too. Never commit real values, and never paste
+them into this file.
 
 ## Web Service (VPS)
 
@@ -56,7 +82,14 @@ systemctl restart adnihilator
 journalctl -u adnihilator -f
 ```
 
+**Environment file:** `/etc/adnihilator/env` (all web-service secrets; see table above)
+
 **nginx:** Reverse proxy on port 443, forwards to uvicorn on 127.0.0.1:8001
+
+> **(as of Dec 2024)** The live layout above (`.venv/`, port 8001, DB under
+> `/opt/adnihilator/data/`) differs from the templates in `deploy/`
+> (`venv/`, port 8000, DB under `/var/lib/adnihilator/`). Check
+> `systemctl cat adnihilator` on the VPS to see which one is live.
 
 ## Worker Daemon (Local Mac)
 
@@ -72,13 +105,22 @@ launchctl load ~/Library/LaunchAgents/com.adnihilator.worker.plist
 tail -f /Users/jfox/projects/adnihilator/data/worker.log
 ```
 
-The worker runs under Rosetta (`arch -x86_64`) because faster-whisper's pydantic_core is x86_64.
+**(as of Dec 2024)** The worker runs under Rosetta (`arch -x86_64`) because
+faster-whisper's pydantic_core is x86_64. The DevX dev environment runs native
+arm64 now (`.devx/python.sh`), so the production worker may be able to drop
+Rosetta. That hasn't been tested.
 
 ## Cloudflare R2
 
 **Bucket:** `adnihilator`
-**Endpoint:** `https://eac56d33df4b0f3eba62c14b7a0323a7.r2.cloudflarestorage.com`
-**Public URL:** `https://pub-f19bf1c482d94b23bc7071f9e60c4a13.r2.dev`
+**Endpoint:** `https://<CLOUDFLARE_ACCOUNT_ID>.r2.cloudflarestorage.com`.
+The real value is `R2_ENDPOINT` in `scripts/run-worker.sh` on the Mac. The
+account ID is also shown in Cloudflare dashboard → R2 → Overview.
+**Public URL:** `https://pub-<BUCKET_PUBLIC_ID>.r2.dev`. The real value is
+`R2_PUBLIC_URL` in `/etc/adnihilator/env` on the VPS. It's also shown in
+Cloudflare dashboard → R2 → `adnihilator` → Settings → Public access.
+**Credentials:** `R2_ACCESS_KEY` / `R2_SECRET_KEY` live only in
+`scripts/run-worker.sh` on the Mac.
 
 Processed audio stored as: `{podcast_id}/{episode_id}.mp3`
 
@@ -120,10 +162,22 @@ Processed audio stored as: `{podcast_id}/{episode_id}.mp3`
 | processed_duration | FLOAT | Duration after ad removal |
 | ads_removed_seconds | FLOAT | Total seconds of ads removed |
 | detection_result_path | TEXT | Local path to detection JSON |
+| llm_provider | VARCHAR(50) | LLM provider used for detection |
+| llm_model | VARCHAR(100) | LLM model used |
+| llm_input_tokens | INTEGER | Prompt tokens |
+| llm_output_tokens | INTEGER | Completion tokens |
+| llm_total_tokens | INTEGER | Total tokens |
+| llm_cost_usd | NUMERIC(10,6) | Estimated LLM cost |
+| detection_source | VARCHAR(50) | timestamps/external/gemini/whisper |
 | created_at | DATETIME | |
 | updated_at | DATETIME | |
 
 **Unique constraint:** (podcast_id, guid)
+**Check constraint:** status in the values listed above
+**Indexes:** (status, created_at), (status, claimed_at)
+
+The authoritative schema is `web/models.py`. If this table and that file
+disagree, the code is correct.
 
 ## Episode Status Flow
 
@@ -139,6 +193,8 @@ Processed audio stored as: `{podcast_id}/{episode_id}.mp3`
 
 ## Deploying Changes
 
+**(as of Dec 2024)** Deploys are a manual file copy. The VPS doesn't pull from git.
+
 ```bash
 # Deploy to VPS
 scp adnihilator/*.py root@jonefox.com:/opt/adnihilator/adnihilator/
@@ -146,6 +202,10 @@ scp worker/*.py root@jonefox.com:/opt/adnihilator/worker/
 scp web/*.py root@jonefox.com:/opt/adnihilator/web/
 scp web/routes/*.py root@jonefox.com:/opt/adnihilator/web/routes/
 scp web/services/*.py root@jonefox.com:/opt/adnihilator/web/services/
+scp web/templates/*.html root@jonefox.com:/opt/adnihilator/web/templates/
+# If pyproject.toml dependencies changed, also copy it and reinstall:
+#   scp pyproject.toml root@jonefox.com:/opt/adnihilator/
+#   ssh root@jonefox.com "/opt/adnihilator/.venv/bin/pip install -e /opt/adnihilator"
 
 # Restart web service
 ssh root@jonefox.com "systemctl restart adnihilator"
