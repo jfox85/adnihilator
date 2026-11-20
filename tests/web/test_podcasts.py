@@ -7,12 +7,16 @@ from web.models import Podcast
 
 
 @pytest.fixture
-def client(monkeypatch):
-    """Create test client with mocked dependencies."""
+def client(monkeypatch, tmp_path):
+    """Create test client with mocked dependencies.
+
+    Uses a file database: sync routes run in FastAPI's thread pool, and each
+    thread would otherwise get its own empty ``:memory:`` database.
+    """
     monkeypatch.setenv("ADMIN_USERNAME", "admin")
     monkeypatch.setenv("ADMIN_PASSWORD", "testpass")
     monkeypatch.setenv("WORKER_API_KEY", "test-key")
-    monkeypatch.setenv("DATABASE_PATH", ":memory:")
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "test.db"))
 
     from web.app import app
     with TestClient(app) as client:

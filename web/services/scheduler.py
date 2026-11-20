@@ -1,13 +1,65 @@
 """Background scheduler for periodic tasks."""
 
 import asyncio
+import fcntl
 import logging
 import os
 import random
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+
+def _lock_path() -> Path:
+    """Lock file shared by every web worker process on this host."""
+    explicit = os.getenv("FEED_SYNC_LOCK_PATH")
+    if explicit:
+        return Path(explicit)
+    database_path = os.getenv("DATABASE_PATH")
+    base = Path(database_path).parent if database_path and database_path != ":memory:" else Path("/tmp")
+    return base / "feed-sync.lock"
+
+
+def _run_sync_once(session_factory) -> bool:
+    """Run one full feed sync unless another process is already syncing.
+
+    Blocking (network + SQLite) work, so callers run it in a worker thread.
+    uvicorn runs several worker processes that each own a scheduler; an
+    exclusive non-blocking file lock makes only one of them sync at a time.
+
+    Returns:
+        True if this call ran the sync, False if it was skipped.
+    """
+    from .feed_sync import sync_all_podcasts
+
+    path = _lock_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as lock_file:
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            logger.info("Feed sync already running in another process; skipping")
+            return False
+        try:
+            db = session_factory()
+            try:
+                logger.info("Starting scheduled feed sync...")
+                results = sync_all_podcasts(db)
+                total_added = sum(r["added"] for r in results.values())
+                errors = sum(1 for r in results.values() if r["error"])
+                logger.info(
+                    f"Feed sync complete: {len(results)} podcasts, "
+                    f"{total_added} new episodes, {errors} errors"
+                )
+            except Exception as e:
+                logger.error(f"Feed sync failed: {e}")
+            finally:
+                db.close()
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+    return True
 
 
 class FeedSyncScheduler:
@@ -42,25 +94,12 @@ class FeedSyncScheduler:
         return self.interval_seconds + jitter
 
     async def _sync_all_feeds(self) -> None:
-        """Sync all podcast feeds."""
-        from .feed_sync import sync_all_podcasts
+        """Sync all podcast feeds in a worker thread.
 
-        db = self.session_factory()
-        try:
-            logger.info("Starting scheduled feed sync...")
-            results = sync_all_podcasts(db)
-
-            total_added = sum(r["added"] for r in results.values())
-            errors = sum(1 for r in results.values() if r["error"])
-
-            logger.info(
-                f"Feed sync complete: {len(results)} podcasts, "
-                f"{total_added} new episodes, {errors} errors"
-            )
-        except Exception as e:
-            logger.error(f"Feed sync failed: {e}")
-        finally:
-            db.close()
+        The sync is blocking; running it on the event loop froze every
+        request in this process for the full 2-5 minute sync.
+        """
+        await asyncio.to_thread(_run_sync_once, self.session_factory)
 
     async def _run_loop(self) -> None:
         """Main scheduler loop."""
