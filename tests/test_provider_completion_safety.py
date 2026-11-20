@@ -197,15 +197,28 @@ class TestRequiredCoverageBounds:
                 OpenAIClient("synthetic-provider").merge_and_refine({"duration": 120}, Config())
 
     @pytest.mark.parametrize("start,end", [(130, 150), (120, 150)])
-    @pytest.mark.parametrize("mode", ["single", "chunk"])
     @pytest.mark.parametrize("mixed", [False, True])
-    def test_google_rejects_wholly_outside_ranges(self, start: int, end: int, mode: str, mixed: bool) -> None:
-        """Single-shot and chunked detections enforce the same audio coverage."""
+    def test_google_single_rejects_wholly_outside_ranges(self, start: int, end: int, mixed: bool) -> None:
+        """Single-shot detections outside the episode fail the decision."""
         ads = [{"start_time": start, "end_time": end, "sponsor": "Synthetic"}]
         if mixed:
             ads.insert(0, {"start_time": 10, "end_time": 40, "sponsor": "Synthetic"})
         with pytest.raises(ValueError, match="overlap"):
-            google_detect(google_response({"ads": ads}), mode)
+            google_detect(google_response({"ads": ads}), "single")
+
+    @pytest.mark.parametrize("start,end", [(130, 150), (120, 150)])
+    @pytest.mark.parametrize("mixed", [False, True])
+    def test_google_chunk_drops_unplaceable_ranges(self, start: int, end: int, mixed: bool) -> None:
+        """Chunk detections outside the chunk under both the relative and the
+        episode-absolute reading are dropped (and logged), keeping valid ones.
+
+        One unplaceable timestamp used to fail the episode on every retry.
+        """
+        ads = [{"start_time": start, "end_time": end, "sponsor": "Synthetic"}]
+        if mixed:
+            ads.insert(0, {"start_time": 10, "end_time": 40, "sponsor": "Synthetic"})
+        result = google_detect(google_response({"ads": ads}), "chunk")
+        assert [(ad["start"], ad["end"]) for ad in result] == ([(10, 40)] if mixed else [])
 
     @pytest.mark.parametrize("mode", ["single", "chunk"])
     def test_google_partial_overlap_still_clamps(self, mode: str) -> None:
