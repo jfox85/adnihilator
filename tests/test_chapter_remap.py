@@ -69,6 +69,15 @@ class TestRemapDescription:
         out = remap_description_timestamps(description, [(0.0, 60.0), (300.0, 1000.0)])
         assert out == "<p>(00:00) Intro</p><p></p><p>(01:00) Topic</p>"
 
+    def test_tag_wrapped_times_are_remapped(self):
+        """Tim Ferriss-style <strong>MM:SS</strong> outlines are remapped."""
+        description = (
+            "<p><strong>18:33</strong> Toyota.</p><p><strong>19:57</strong> Sponsor: AG1.</p>"
+            "<p><strong>21:32</strong> Korea.</p>"
+        )
+        out = remap_description_timestamps(description, [(0.0, 1197.0), (1292.0, 3000.0)])
+        assert out == "<p><strong>18:33</strong> Toyota.</p><p><strong></strong></p><p><strong>19:57</strong> Korea.</p>"
+
     def test_no_cuts_returns_description_unchanged(self):
         assert remap_description_timestamps(LEX_OUTLINE, [(0.0, 12417.69)]) == LEX_OUTLINE
 

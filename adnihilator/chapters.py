@@ -62,7 +62,7 @@ _SOFT_SEPARATOR = re.compile(r"<br\s*/?>|\n", re.IGNORECASE)
 _TAG = re.compile(r"<[^>]+>")
 # An outline line: optional leading tags, optional bracket, then a time.
 _OUTLINE_LINE = re.compile(
-    r"^(?P<prefix>\s*(?:<[^>]+>\s*)*[(\[]?\s*)(?P<time>\d{1,2}:\d{2}(?::\d{2})?)(?=[)\]\s])"
+    r"^(?P<prefix>\s*(?:<[^>]+>\s*)*[(\[]?\s*)(?P<time>\d{1,2}:\d{2}(?::\d{2})?)(?=[)\]\s<])"
 )
 
 
