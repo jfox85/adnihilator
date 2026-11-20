@@ -1,5 +1,7 @@
 """Feed synchronization service."""
 
+import socket
+import threading
 from datetime import datetime
 from calendar import timegm
 
@@ -83,9 +85,27 @@ def sync_podcast(db: Session, podcast: Podcast) -> int:
         ) from None
 
 
+# feedparser has no timeout parameter and uses urllib, which honours the
+# process-wide default socket timeout. Bound each fetch so a stalled feed
+# server cannot hang a sync forever.
+FEED_FETCH_TIMEOUT_SECONDS = 30
+_SOCKET_TIMEOUT_LOCK = threading.Lock()
+
+
+def _parse_feed(url: str):
+    """Fetch and parse a feed with a bounded network timeout."""
+    with _SOCKET_TIMEOUT_LOCK:
+        previous = socket.getdefaulttimeout()
+        socket.setdefaulttimeout(FEED_FETCH_TIMEOUT_SECONDS)
+        try:
+            return feedparser.parse(url)
+        finally:
+            socket.setdefaulttimeout(previous)
+
+
 def _sync_podcast_entries(db: Session, podcast: Podcast) -> int:
     """Apply one feed, leaving rollback on failure to the public sync boundary."""
-    feed = feedparser.parse(podcast.source_rss_url)
+    feed = _parse_feed(podcast.source_rss_url)
 
     # Update podcast metadata
     if hasattr(feed.feed, "title"):

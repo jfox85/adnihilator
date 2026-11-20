@@ -70,8 +70,10 @@ async def list_podcasts(
     ]
 
 
+# Feed-sync routes are plain `def` so FastAPI runs their blocking network and
+# SQLite work in its thread pool instead of freezing the event loop.
 @router.post("")
-async def add_podcast(
+def add_podcast(
     source_rss_url: str = Form(...),
     db: Session = Depends(get_db),
     _: None = Depends(verify_admin),
@@ -94,7 +96,7 @@ async def add_podcast(
 
 
 @router.post("/{podcast_id}/sync")
-async def sync_podcast_feed(
+def sync_podcast_feed(
     podcast_id: str,
     db: Session = Depends(get_db),
     _: None = Depends(verify_admin),
@@ -116,7 +118,7 @@ async def sync_podcast_feed(
 
 
 @router.post("/sync-all")
-async def sync_all_podcasts(
+def sync_all_podcasts(
     db: Session = Depends(get_db),
     _: None = Depends(verify_admin),
 ):
