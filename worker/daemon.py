@@ -17,6 +17,7 @@ import httpx
 from adnihilator.ad_keywords import find_ad_candidates
 from adnihilator.ad_llm import create_llm_client, OpenAIClient
 from adnihilator.ad_timestamps import extract_ad_timestamps
+from adnihilator.chapters import remap_description_timestamps
 from adnihilator.audio import get_duration
 from adnihilator.config import load_config
 from adnihilator.external_transcript import fetch_external_transcript
@@ -2011,6 +2012,16 @@ range. If you cannot find any clear ad copy, return an empty list."""
                 duration = get_duration(str(audio_path))
                 print(f"  Duration: {duration:.0f}s")
 
+                # Description times describe a specific edit of the episode. If
+                # they reach past this audio, it isn't that edit (e.g. different
+                # dynamic ads), so cutting by them could remove real content.
+                latest = max(t.end for t in high_confidence_timestamps)
+                if latest > duration:
+                    raise DetectionSafetyError(
+                        f"Description timestamps reach {latest:.0f}s but audio is {duration:.0f}s; "
+                        "refusing to cut by mismatched timestamps"
+                    )
+
                 # Skip directly to splicing (no transcription needed)
                 segments = []
                 candidates = []
@@ -2594,6 +2605,16 @@ range. If you cannot find any clear ad copy, return an empty list."""
                 "detection_result_path": detection_result_path,
                 "detection_source": detection_source,
             }
+
+            # Shift the description's chapter outline to match the cut audio.
+            # Only when cuts came from that same outline: that proves its times
+            # match this audio. Feeds with dynamically inserted ads often write
+            # show-note times against the ad-free edit, which are already right.
+            keep_segments = stats.get("keep_segments")
+            if detection_source == "timestamps" and keep_segments and job.description:
+                remapped = remap_description_timestamps(job.description, keep_segments)
+                if remapped != job.description:
+                    completion_kwargs["processed_description"] = remapped
 
             # Add LLM usage data if available
             if llm_usage:

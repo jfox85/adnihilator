@@ -40,7 +40,8 @@ def create_test_podcast(client):
     return podcasts[0]
 
 
-def create_test_episode(client, podcast_id, status, title="Episode 1", processed_audio_key=None):
+def create_test_episode(client, podcast_id, status, title="Episode 1", processed_audio_key=None,
+                        description=None, processed_description=None):
     """Helper to create a test episode directly in the database."""
     from web.dependencies import SessionFactory
     from web.models import Podcast
@@ -55,6 +56,8 @@ def create_test_episode(client, podcast_id, status, title="Episode 1", processed
             status=status.value,
             processed_audio_key=processed_audio_key,
             processed_duration=3600.0 if status == EpisodeStatus.COMPLETE else None,
+            description=description,
+            processed_description=processed_description,
         )
         db.add(episode)
         db.commit()
@@ -115,6 +118,27 @@ def test_feed_contains_complete_episodes(client):
     response = client.get(f"/feed/{podcast['feed_token']}.xml")
     assert "Episode 1" in response.text
     assert "Pending Episode" not in response.text
+
+
+def test_feed_uses_remapped_description_when_available(client):
+    """Chapter times in the feed match the processed audio, not the original."""
+    podcast = create_test_podcast(client)
+    create_test_episode(
+        client, podcast["id"], EpisodeStatus.COMPLETE, title="Remapped",
+        processed_audio_key=f"{podcast['id']}/ep1.mp3",
+        description="ORIGINAL (07:23) – GTA 6",
+        processed_description="REMAPPED (01:32) – GTA 6",
+    )
+    create_test_episode(
+        client, podcast["id"], EpisodeStatus.COMPLETE, title="Legacy",
+        processed_audio_key=f"{podcast['id']}/ep2.mp3",
+        description="LEGACY ORIGINAL ONLY",
+    )
+
+    response = client.get(f"/feed/{podcast['feed_token']}.xml")
+    assert "REMAPPED (01:32)" in response.text
+    assert "ORIGINAL (07:23)" not in response.text
+    assert "LEGACY ORIGINAL ONLY" in response.text
 
 
 def test_feed_audio_urls_point_to_r2(client):

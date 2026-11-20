@@ -1,9 +1,12 @@
 """Audio splicing module using ffmpeg."""
 
+import json
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 
+from .chapters import remap_chapters
 from .models import AdSpan, TranscriptSegment
 from .redaction import redact_secrets
 
@@ -96,13 +99,86 @@ def splice_audio(
         # Fallback to segment-by-segment approach
         _splice_with_concat(input_path, output_path, keep_segments)
 
+    _rewrite_chapters(input_path, output_path, keep_segments)
+
     return {
         "ads_removed": len(sorted_spans),
         "time_removed": time_removed,
         "original_duration": duration,
         "new_duration": duration - time_removed,
         "segments_kept": len(keep_segments),
+        "keep_segments": keep_segments,
     }
+
+
+def _read_chapters(path: str) -> list[tuple[float, float, str]]:
+    """Read embedded chapters as (start, end, title); empty if unavailable."""
+    if not shutil.which("ffprobe"):
+        return []
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_chapters", "-of", "json", path],
+            capture_output=True, check=True, text=True, timeout=60,
+        )
+        chapters = json.loads(result.stdout).get("chapters", [])
+        return [
+            (float(c["start_time"]), float(c["end_time"]), (c.get("tags") or {}).get("title", ""))
+            for c in chapters
+        ]
+    except (subprocess.SubprocessError, ValueError, KeyError, OSError):
+        return []
+
+
+def _escape_ffmetadata(value: str) -> str:
+    """Escape a value for ffmpeg's FFMETADATA format."""
+    for char in ("\\", "=", ";", "#", "\n"):
+        value = value.replace(char, "\\" + char)
+    return value
+
+
+def _rewrite_chapters(input_path: str, output_path: str, keep_segments: list[tuple[float, float]]) -> None:
+    """Copy remapped chapters (and source tags) into the spliced output.
+
+    Best effort: a chapter rewrite failure must never fail an otherwise
+    successful splice, so on any error the plain spliced audio is kept.
+    """
+    try:
+        chapters = _read_chapters(input_path)
+        if not chapters:
+            return
+        remapped = remap_chapters(chapters, keep_segments)
+
+        lines = [";FFMETADATA1"]
+        for start, end, title in remapped:
+            lines += [
+                "[CHAPTER]",
+                "TIMEBASE=1/1000",
+                f"START={int(round(start * 1000))}",
+                f"END={int(round(end * 1000))}",
+                f"title={_escape_ffmetadata(title)}",
+            ]
+
+        out = Path(output_path)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            meta = Path(tmpdir) / "chapters.ffmeta"
+            meta.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            staged = Path(tmpdir) / f"chaptered{out.suffix}"
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", str(out),
+                "-i", input_path,
+                "-i", str(meta),
+                "-map", "0:a",
+                "-map_metadata", "1",  # original title/artist/album tags
+                "-map_chapters", "2",  # remapped chapters
+                "-c", "copy",
+                "-id3v2_version", "3",
+                str(staged),
+            ]
+            subprocess.run(cmd, capture_output=True, check=True, timeout=600)
+            shutil.move(str(staged), str(out))
+    except Exception as error:  # noqa: BLE001 - chapters are optional metadata
+        print(f"  Warning: chapter rewrite skipped ({type(error).__name__})")
 
 
 def _snap_span_to_transcript(
@@ -246,6 +322,9 @@ def _splice_with_filter_complex(
         "-i", input_path,
         "-filter_complex", filter_complex,
         "-map", "[out]",
+        # Source chapters would be at original-audio times; never copy them.
+        # _rewrite_chapters adds correctly remapped chapters afterwards.
+        "-map_chapters", "-1",
         output_path,
     ]
 
@@ -302,6 +381,7 @@ def _splice_with_concat(
             "-safe", "0",
             "-i", str(concat_list),
             "-c", "copy",
+            "-map_chapters", "-1",
             output_path,
         ]
 

@@ -124,6 +124,7 @@ class WorkerClient:
         llm_total_tokens: Optional[int] = None,
         llm_cost_usd: Optional[float] = None,
         detection_source: Optional[str] = None,
+        processed_description: Optional[str] = None,
     ) -> None:
         """Mark an episode as complete.
 
@@ -164,6 +165,8 @@ class WorkerClient:
             payload["llm_cost_usd"] = llm_cost_usd
         if detection_source:
             payload["detection_source"] = detection_source
+        if processed_description:
+            payload["processed_description"] = processed_description
 
         try:
             response = self.client.post(

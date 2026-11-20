@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ..app import get_db
@@ -122,6 +122,7 @@ class CompleteRequest(BaseModel):
     llm_total_tokens: Optional[int] = None
     llm_cost_usd: Optional[float] = None
     detection_source: Optional[str] = None
+    processed_description: Optional[str] = Field(default=None, max_length=200_000)
 
 
 class FailRequest(BaseModel):
@@ -213,6 +214,7 @@ async def complete_episode(
     episode.llm_total_tokens = request.llm_total_tokens
     episode.llm_cost_usd = request.llm_cost_usd
     episode.detection_source = request.detection_source
+    episode.processed_description = request.processed_description
     transcript = db.get(EpisodeTranscript, episode_id) if transcripts_ready(db.get_bind()) else None
     if transcript and transcript.state == "processing" and not transcript.active_checksum:
         transcript.state, transcript.last_error = "failed", "persistence_pending"

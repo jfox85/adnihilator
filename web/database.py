@@ -3,7 +3,8 @@
 import os
 from pathlib import Path
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 Base = declarative_base()
@@ -62,7 +63,38 @@ def init_db(engine=None):
     from .transcript_migration import TABLES, upgrade
     owned = {table.name for table in TABLES}
     Base.metadata.create_all(engine, tables=[table for table in Base.metadata.sorted_tables if table.name not in owned])
+    _add_missing_nullable_columns(engine)
     # Existing reviewed schema stays usable. Normal startup never migrates it.
     if os.getenv("TRANSCRIPT_SCHEMA_OPT_IN", "false").lower() == "true":
         upgrade(engine)
     return engine
+
+
+# Additive, nullable columns that create_all() cannot add to existing tables.
+# Only plain nullable additions belong here; anything else needs a migration.
+_ADDITIVE_COLUMNS = {
+    "episodes": {"processed_description": "TEXT"},
+}
+
+
+def _add_missing_nullable_columns(engine) -> None:
+    """Add known nullable columns to pre-existing tables (idempotent).
+
+    Several uvicorn workers run this concurrently at startup, so losing the
+    race to another worker ("duplicate column name") is treated as success.
+    """
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    for table, columns in _ADDITIVE_COLUMNS.items():
+        if table not in tables:
+            continue
+        existing = {c["name"] for c in inspector.get_columns(table)}
+        for name, sql_type in columns.items():
+            if name in existing:
+                continue
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}"))
+            except OperationalError as error:
+                if "duplicate column name" not in str(error).lower():
+                    raise
