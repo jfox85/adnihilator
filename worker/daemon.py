@@ -17,6 +17,7 @@ import httpx
 from adnihilator.ad_keywords import find_ad_candidates
 from adnihilator.ad_llm import create_llm_client, OpenAIClient
 from adnihilator.ad_timestamps import extract_ad_timestamps
+from adnihilator.chapters import remap_description_timestamps
 from adnihilator.audio import get_duration
 from adnihilator.config import load_config
 from adnihilator.external_transcript import fetch_external_transcript
@@ -2594,6 +2595,13 @@ range. If you cannot find any clear ad copy, return an empty list."""
                 "detection_result_path": detection_result_path,
                 "detection_source": detection_source,
             }
+
+            # Shift the description's chapter outline to match the cut audio.
+            keep_segments = stats.get("keep_segments")
+            if keep_segments and job.description:
+                remapped = remap_description_timestamps(job.description, keep_segments)
+                if remapped != job.description:
+                    completion_kwargs["processed_description"] = remapped
 
             # Add LLM usage data if available
             if llm_usage:

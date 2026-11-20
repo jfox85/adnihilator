@@ -117,6 +117,9 @@ class Episode(Base):
     processed_duration: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     ads_removed_seconds: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     detection_result_path: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Description with chapter times remapped to the processed (ad-free) audio.
+    # NULL means "use the original description" (no outline, or legacy rows).
+    processed_description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # LLM Usage Tracking
     llm_provider: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)

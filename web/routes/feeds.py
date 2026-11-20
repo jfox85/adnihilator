@@ -84,9 +84,11 @@ async def get_feed(
         fe.title(episode.title or "Untitled Episode")
 
         # Episode description/summary
-        if episode.description:
-            fe.description(episode.description)
-            fe.podcast.itunes_summary(episode.description)
+        # Prefer the description whose chapter times match the processed audio.
+        description = episode.processed_description or episode.description
+        if description:
+            fe.description(description)
+            fe.podcast.itunes_summary(description)
 
         if episode.published_at:
             # feedgen requires timezone-aware datetimes

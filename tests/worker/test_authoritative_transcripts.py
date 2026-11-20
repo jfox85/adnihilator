@@ -74,8 +74,16 @@ def job(route: str = "whisper", description: str | None = None) -> EpisodeJob:
 def fake_splice(input_path: str, output_path: str, spans: list[AdSpan], duration: float, **kwargs: object) -> dict:
     """Only a scratch placeholder is uploaded by the mocked storage client."""
     Path(output_path).write_bytes(b"clean")
-    removed = sum(span.end - span.start for span in spans if span.confidence >= 0.35)
-    return {"time_removed": removed, "new_duration": duration - removed}
+    cut = sorted((span.start, span.end) for span in spans if span.confidence >= 0.35)
+    removed = sum(end - start for start, end in cut)
+    keep, position = [], 0.0
+    for start, end in cut:
+        if start > position:
+            keep.append((position, start))
+        position = max(position, end)
+    if position < duration:
+        keep.append((position, duration))
+    return {"time_removed": removed, "new_duration": duration - removed, "keep_segments": keep}
 
 
 @contextmanager
@@ -228,7 +236,10 @@ class TestMissingRequiredTranscripts:
             worker.process_job(job(description=outline))
         spans = splice.call_args.args[2]
         assert [(span.start, span.end) for span in spans] == [(20, 90)]
-        assert worker.api_client.complete.call_args.kwargs["detection_source"] == "timestamps"
+        completion = worker.api_client.complete.call_args.kwargs
+        assert completion["detection_source"] == "timestamps"
+        assert "(00:20) &#8211; Main conversation</p>" in completion["processed_description"]
+        assert "Sponsors" not in completion["processed_description"]
 
     @pytest.mark.parametrize("missing", [[], [TranscriptSegment(index=0, start=0, end=120, text=" ")]])
     def test_empty_optional_external_lookup_uses_real_local_fallback(self, worker: WorkerDaemon, missing: list) -> None:

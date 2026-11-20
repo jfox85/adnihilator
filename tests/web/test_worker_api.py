@@ -81,6 +81,7 @@ def get_episode_from_db(episode_id):
             "error_message": episode.error_message,
             "processed_audio_key": episode.processed_audio_key,
             "claimed_at": episode.claimed_at,
+            "processed_description": episode.processed_description,
         }
         return data
     finally:
@@ -178,6 +179,25 @@ def test_complete_episode(client):
     episode_data = get_episode_from_db(episode_id)
     assert episode_data["status"] == EpisodeStatus.COMPLETE.value
     assert episode_data["processed_audio_key"] == f"{podcast_id}/{episode_id}.mp3"
+
+
+def test_complete_stores_remapped_description(client):
+    """A worker-supplied remapped description is stored for the feed."""
+    podcast_id = create_test_podcast(client)
+    episode_id = create_test_episode(client, podcast_id, status=EpisodeStatus.PROCESSING)
+
+    response = client.post(
+        f"/api/queue/{episode_id}/complete",
+        headers={"X-Worker-API-Key": "test-worker-key"},
+        json={
+            "processed_audio_key": f"{podcast_id}/{episode_id}.mp3",
+            "processed_duration": 3600.0,
+            "ads_removed_seconds": 120.5,
+            "processed_description": "(00:00) – Intro\n(01:32) – Topic",
+        },
+    )
+    assert response.status_code == 200
+    assert get_episode_from_db(episode_id)["processed_description"] == "(00:00) – Intro\n(01:32) – Topic"
 
 
 def test_fail_episode(client):
