@@ -217,6 +217,19 @@ class TestMissingRequiredTranscripts:
         splice.assert_called_once()
         assert worker.api_client.complete.call_args.kwargs["detection_source"] == "timestamps"
 
+    def test_sponsor_chapter_outline_uses_timestamp_fast_path(self, worker: WorkerDaemon) -> None:
+        """A Lex Fridman-style HTML outline cuts the whole sponsor chapter without ASR."""
+        outline = (
+            "<p><b>OUTLINE:</b><br />\n(00:00) &#8211; Introduction<br />\n"
+            "(00:20) &#8211; Sponsors, Comments, and Reflections<br />\n"
+            "(01:30) &#8211; Main conversation</p>"
+        )
+        with pipeline(worker, "whisper", []) as splice:
+            worker.process_job(job(description=outline))
+        spans = splice.call_args.args[2]
+        assert [(span.start, span.end) for span in spans] == [(20, 90)]
+        assert worker.api_client.complete.call_args.kwargs["detection_source"] == "timestamps"
+
     @pytest.mark.parametrize("missing", [[], [TranscriptSegment(index=0, start=0, end=120, text=" ")]])
     def test_empty_optional_external_lookup_uses_real_local_fallback(self, worker: WorkerDaemon, missing: list) -> None:
         """An optional lookup without text is not a failed required ASR lane."""
