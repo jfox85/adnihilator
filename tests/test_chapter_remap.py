@@ -58,6 +58,17 @@ class TestRemapDescription:
         assert "(00:56:50) Later topic" in out
         assert "(00:00:00) Twyla Tharp" in out
 
+    def test_list_outline_stays_balanced(self):
+        """Dropping a list item keeps the surrounding list markup intact."""
+        description = "<ul><li>(00:00) Sponsors</li><li>(05:00) Topic</li><li>(09:00) More</li></ul>"
+        out = remap_description_timestamps(description, [(300.0, 1000.0)])
+        assert out == "<ul><li></li><li>(00:00) Topic</li><li>(04:00) More</li></ul>"
+
+    def test_paragraph_outline_drops_text_not_markup(self):
+        description = "<p>(00:00) Intro</p><p>(01:00) Sponsors</p><p>(05:00) Topic</p>"
+        out = remap_description_timestamps(description, [(0.0, 60.0), (300.0, 1000.0)])
+        assert out == "<p>(00:00) Intro</p><p></p><p>(01:00) Topic</p>"
+
     def test_no_cuts_returns_description_unchanged(self):
         assert remap_description_timestamps(LEX_OUTLINE, [(0.0, 12417.69)]) == LEX_OUTLINE
 

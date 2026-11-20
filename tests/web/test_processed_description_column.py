@@ -1,9 +1,11 @@
 """Startup adds the processed_description column to existing databases."""
 
 import sqlite3
+from unittest.mock import patch
 
 from sqlalchemy import inspect
 
+from web import database
 from web.database import get_engine, init_db
 
 
@@ -29,3 +31,27 @@ def test_init_db_adds_processed_description_to_existing_episodes_table(tmp_path)
     assert "processed_description" in columns
     conn = sqlite3.connect(db_path)
     assert conn.execute("SELECT description, processed_description FROM episodes").fetchone() == ("d", None)
+
+
+def test_concurrent_startup_losing_the_alter_race_is_not_fatal(tmp_path):
+    """Another worker adding the column between inspect and ALTER is fine."""
+    db_path = tmp_path / "race.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE episodes (id VARCHAR(36) PRIMARY KEY, description TEXT)")
+    conn.commit()
+    engine = get_engine(f"sqlite:///{db_path}")
+
+    real_inspect = database.inspect
+
+    def stale_inspect(bind):
+        """Report the column missing, then add it as the 'other worker'."""
+        inspector = real_inspect(bind)
+        conn.execute("ALTER TABLE episodes ADD COLUMN processed_description TEXT")
+        conn.commit()
+        return inspector
+
+    with patch.object(database, "inspect", side_effect=stale_inspect):
+        database._add_missing_nullable_columns(engine)
+
+    columns = {c["name"] for c in real_inspect(engine).get_columns("episodes")}
+    assert "processed_description" in columns

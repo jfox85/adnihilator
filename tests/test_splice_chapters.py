@@ -59,6 +59,23 @@ class TestSpliceChapters:
         stats = splice_audio(str(source), str(output), [AdSpan(start=1, end=2, confidence=0.9, reason="ad")], 6)
         assert stats["keep_segments"] == [(0.0, 1), (2, 6)]
 
+    def test_failed_chapter_rewrite_keeps_audio_and_drops_stale_chapters(self, tmp_path: Path) -> None:
+        """A rewrite failure never fails the splice or leaves wrong-time chapters."""
+        from unittest.mock import patch
+
+        source, output = tmp_path / "in.mp3", tmp_path / "out.mp3"
+        _chaptered_mp3(source, [(0, 4, "Intro"), (4, 10, "Sponsors"), (10, 20, "Topic")], 20)
+        with patch("adnihilator.splice.remap_chapters", side_effect=RuntimeError("boom")):
+            stats = splice_audio(str(source), str(output), [AdSpan(start=4, end=10, confidence=0.95, reason="ad")], 20)
+        assert stats["new_duration"] == pytest.approx(14)
+        assert _probe(output)["chapters"] == []
+
+    def test_non_ascii_chapter_titles_survive(self, tmp_path: Path) -> None:
+        source, output = tmp_path / "in.mp3", tmp_path / "out.mp3"
+        _chaptered_mp3(source, [(0, 4, "Intro"), (4, 10, "Sponsors"), (10, 20, "Ragnarök – Valhalla")], 20)
+        splice_audio(str(source), str(output), [AdSpan(start=4, end=10, confidence=0.95, reason="ad")], 20)
+        assert [c["tags"]["title"] for c in _probe(output)["chapters"]] == ["Intro", "Ragnarök – Valhalla"]
+
     def test_no_chapters_in_source_is_fine(self, tmp_path: Path) -> None:
         source, output = tmp_path / "in.mp3", tmp_path / "out.mp3"
         subprocess.run(

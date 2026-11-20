@@ -2012,6 +2012,16 @@ range. If you cannot find any clear ad copy, return an empty list."""
                 duration = get_duration(str(audio_path))
                 print(f"  Duration: {duration:.0f}s")
 
+                # Description times describe a specific edit of the episode. If
+                # they reach past this audio, it isn't that edit (e.g. different
+                # dynamic ads), so cutting by them could remove real content.
+                latest = max(t.end for t in high_confidence_timestamps)
+                if latest > duration:
+                    raise DetectionSafetyError(
+                        f"Description timestamps reach {latest:.0f}s but audio is {duration:.0f}s; "
+                        "refusing to cut by mismatched timestamps"
+                    )
+
                 # Skip directly to splicing (no transcription needed)
                 segments = []
                 candidates = []
@@ -2597,8 +2607,11 @@ range. If you cannot find any clear ad copy, return an empty list."""
             }
 
             # Shift the description's chapter outline to match the cut audio.
+            # Only when cuts came from that same outline: that proves its times
+            # match this audio. Feeds with dynamically inserted ads often write
+            # show-note times against the ad-free edit, which are already right.
             keep_segments = stats.get("keep_segments")
-            if keep_segments and job.description:
+            if detection_source == "timestamps" and keep_segments and job.description:
                 remapped = remap_description_timestamps(job.description, keep_segments)
                 if remapped != job.description:
                     completion_kwargs["processed_description"] = remapped

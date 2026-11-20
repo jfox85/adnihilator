@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 from sqlalchemy import create_engine, event, inspect, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 Base = declarative_base()
@@ -77,14 +78,23 @@ _ADDITIVE_COLUMNS = {
 
 
 def _add_missing_nullable_columns(engine) -> None:
-    """Add known nullable columns to pre-existing tables (idempotent)."""
+    """Add known nullable columns to pre-existing tables (idempotent).
+
+    Several uvicorn workers run this concurrently at startup, so losing the
+    race to another worker ("duplicate column name") is treated as success.
+    """
     inspector = inspect(engine)
     tables = set(inspector.get_table_names())
-    with engine.begin() as conn:
-        for table, columns in _ADDITIVE_COLUMNS.items():
-            if table not in tables:
+    for table, columns in _ADDITIVE_COLUMNS.items():
+        if table not in tables:
+            continue
+        existing = {c["name"] for c in inspector.get_columns(table)}
+        for name, sql_type in columns.items():
+            if name in existing:
                 continue
-            existing = {c["name"] for c in inspector.get_columns(table)}
-            for name, sql_type in columns.items():
-                if name not in existing:
+            try:
+                with engine.begin() as conn:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}"))
+            except OperationalError as error:
+                if "duplicate column name" not in str(error).lower():
+                    raise

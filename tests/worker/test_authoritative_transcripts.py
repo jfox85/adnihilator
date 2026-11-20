@@ -241,6 +241,25 @@ class TestMissingRequiredTranscripts:
         assert "(00:20) &#8211; Main conversation</p>" in completion["processed_description"]
         assert "Sponsors" not in completion["processed_description"]
 
+    def test_outline_longer_than_audio_is_refused(self, worker: WorkerDaemon) -> None:
+        """Description times that don't fit this audio never drive a cut."""
+        outline = "(00:00) – Intro\n(01:00) – Sponsors\n(03:00) – Topic\n"
+        with pipeline(worker, "whisper", []) as splice, patch("worker.daemon.get_duration", return_value=150):
+            with pytest.raises(DetectionSafetyError, match="mismatched timestamps"):
+                worker.process_job(job(description=outline))
+        splice.assert_not_called()
+        worker.api_client.complete.assert_not_called()
+
+    def test_description_not_rewritten_for_non_timestamp_detection(self, worker: WorkerDaemon) -> None:
+        """Transcript-detected cuts don't shift show-note chapter times."""
+        outline = "(00:00) – Intro\n(00:20) – Main conversation\n(01:30) – More\n"
+        worker.config.llm.provider = "none"  # heuristic transcript detection
+        with pipeline(worker, "whisper", transcript(ad=True)):
+            worker.process_job(job(description=outline))
+        completion = worker.api_client.complete.call_args.kwargs
+        assert completion["ads_removed"] > 0  # something was cut...
+        assert "processed_description" not in completion  # ...but notes untouched
+
     @pytest.mark.parametrize("missing", [[], [TranscriptSegment(index=0, start=0, end=120, text=" ")]])
     def test_empty_optional_external_lookup_uses_real_local_fallback(self, worker: WorkerDaemon, missing: list) -> None:
         """An optional lookup without text is not a failed required ASR lane."""

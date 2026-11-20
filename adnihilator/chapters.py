@@ -59,6 +59,7 @@ def remap_chapters(
 # Lines are separated by <br>, newlines, or closing block tags.
 _LINE_SPLIT = re.compile(r"(<br\s*/?>|\n|</p>|</li>)", re.IGNORECASE)
 _SOFT_SEPARATOR = re.compile(r"<br\s*/?>|\n", re.IGNORECASE)
+_TAG = re.compile(r"<[^>]+>")
 # An outline line: optional leading tags, optional bracket, then a time.
 _OUTLINE_LINE = re.compile(
     r"^(?P<prefix>\s*(?:<[^>]+>\s*)*[(\[]?\s*)(?P<time>\d{1,2}:\d{2}(?::\d{2})?)(?=[)\]\s])"
@@ -129,11 +130,15 @@ def remap_description_timestamps(description: str | None, keep: KeepSegments) ->
     i = 0
     while i < len(parts):
         if i in drop:
-            # Drop the line and the soft line breaks after it, but keep block
-            # closers such as </p> so the HTML stays well-formed.
+            # Drop the line's text and the soft line breaks after it, but keep
+            # its markup (e.g. an opening <ul><li>) and block closers such as
+            # </p> so the HTML stays balanced.
+            tags = "".join(_TAG.findall(parts[i]))
             i += 1
             while i < len(parts) and (parts[i] == "" or _SOFT_SEPARATOR.fullmatch(parts[i])):
                 i += 1
+            if tags:
+                out.append(tags)
             continue
         out.append(parts[i])
         i += 1
