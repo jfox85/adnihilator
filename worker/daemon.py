@@ -1420,7 +1420,8 @@ DETECTED ADS:
 REVIEW TASKS:
 1. Verify each ad looks legitimate (has sponsor content, not false positive)
 2. Check if any ads should be REJECTED (e.g., clearly not an ad, wrong boundaries)
-3. Check if any ads should be MERGED (e.g., same sponsor split into multiple spans)
+3. Check if overlapping or touching ads should be MERGED. Never merge separated
+   reads, even for the same sponsor: merging cuts all audio between them.
 4. Flag any concerns about the detection quality
 
 Return JSON in this exact format:
@@ -1493,7 +1494,24 @@ content cannot be recovered from the processed file."""
                 indices = merge.indices
                 valid_indices = [i for i in indices if 0 <= i < len(ad_spans) and i in approved_indices]
                 if len(valid_indices) >= 2:
-                    to_merge = [ad_spans[i] for i in valid_indices]
+                    to_merge = sorted(
+                        (ad_spans[i] for i in valid_indices), key=lambda span: span.start
+                    )
+                    # A review can consolidate existing cuts, but cannot authorize
+                    # removing new audio in the gaps between separate ad reads.
+                    covered_end = to_merge[0].end
+                    has_gap = False
+                    for span in to_merge[1:]:
+                        if span.start > covered_end:
+                            has_gap = True
+                            print(
+                                f"    Ignoring unsafe merge {valid_indices}: "
+                                "separated ad spans; keeping individual cuts"
+                            )
+                            break
+                        covered_end = max(covered_end, span.end)
+                    if has_gap:
+                        continue
                     print(f"    Merging ads {valid_indices}: {merge.reason}")
                     merged = AdSpan(
                         start=min(s.start for s in to_merge),
