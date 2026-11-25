@@ -158,10 +158,51 @@ class TestFinalReviewSafety:
         """Typed review data still supports a valid multi-span merge."""
         spans = [
             AdSpan(start=10, end=40, confidence=0.9, reason="First"),
-            AdSpan(start=50, end=70, confidence=0.8, reason="Second"),
+            AdSpan(start=40, end=70, confidence=0.8, reason="Second"),
         ]
         result = review(reviewer, '{"approved_ads":[0,1],"merge_suggestions":[{"indices":[0,1]}]}', spans)
         assert [(span.start, span.end) for span in result] == [(10, 70)]
+
+    def test_filmcast_separated_reads_do_not_cut_intervening_program(
+        self, reviewer: WorkerDaemon, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Episode 902's same-sponsor merge must preserve the missing hour."""
+        spans = [
+            AdSpan(start=start, end=end, confidence=0.95, reason="OnDeck")
+            for start, end in [
+                (0, 120), (1561.48, 1583), (2809.8, 2839.32),
+                (6405, 6443.44), (5523, 5533.4),
+            ]
+        ]
+        result = review(reviewer, json.dumps({
+            "approved_ads": [0, 1, 2, 3, 4],
+            "merge_suggestions": [{"indices": [1, 4], "reason": "Same sponsor"}],
+        }), spans)
+        assert [(span.start, span.end) for span in result] == sorted(
+            (span.start, span.end) for span in spans
+        )
+        assert not any(span.start < 4500 < span.end for span in result)
+        assert "Ignoring unsafe merge [1, 4]" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("ranges,expected", [
+        ([(10, 40), (40.01, 70)], [(10, 40), (40.01, 70)]),
+        ([(10, 50), (40, 70)], [(10, 70)]),
+        ([(40, 70), (10, 50), (20, 30)], [(10, 70)]),
+        ([(10, 40), (20, 30), (50, 70)], [(10, 40), (20, 30), (50, 70)]),
+        ([(10, 70), (20, 30), (60, 80)], [(10, 80)]),
+    ])
+    def test_review_merge_cannot_expand_the_union_of_approved_cuts(
+        self, reviewer: WorkerDaemon, ranges: list[tuple[float, float]],
+        expected: list[tuple[float, float]],
+    ) -> None:
+        """Check small gaps, overlap chains, unsorted and nested inputs."""
+        spans = [AdSpan(start=a, end=b, confidence=0.9, reason="Ad") for a, b in ranges]
+        indices = list(range(len(spans)))
+        result = review(reviewer, json.dumps({
+            "approved_ads": indices,
+            "merge_suggestions": [{"indices": indices}],
+        }), spans)
+        assert [(span.start, span.end) for span in result] == expected
 
     def test_observed_json_mode_provider_error_still_fails_closed(self, reviewer: WorkerDaemon) -> None:
         """Replay the historical 400 without making an OpenAI request."""
